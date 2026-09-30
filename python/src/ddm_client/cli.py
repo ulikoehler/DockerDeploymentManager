@@ -11,7 +11,6 @@ import getpass
 import json
 import os
 import sys
-import sys
 
 from .client import DdmClient, DdmError
 
