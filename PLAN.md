@@ -27,6 +27,11 @@ inspired by `~/dev/Noxeco/NoxecoDeploymentManager` but fully vendor-neutral.
   under a configurable base/prefix, generated `backup.sh`, streamed stdin
   dumps (pg_dump-style), and host systemd timers; run/check/snapshots/
   forget/restore via API, UI and client.
+- **Monitoring & alerting**: per-service online checks (docker HEALTHCHECK,
+  HTTP, TCP, container-running) and server-side log watchers matching
+  error patterns; notifications via Slack/Telegram/email/generic webhook;
+  optional automatic reactions (restart …) with cooldowns and flap
+  suppression.
 - **Generic command framework** (parity with the original): config-defined
   sections of parameterized command sequences.
 - **Python client library + CLI** mirroring the API.
@@ -44,7 +49,7 @@ inspired by `~/dev/Noxeco/NoxecoDeploymentManager` but fully vendor-neutral.
 
 | Component      | Choice                                                              |
 |----------------|---------------------------------------------------------------------|
-| Backend        | Rust 2021, axum 0.7 (HTTP + WS), tokio, serde/serde_yaml, notify, clap (server CLI) |
+| Backend        | Rust 2021, axum 0.7 (HTTP + WS), tokio, serde/serde_yaml, notify, clap (server CLI), reqwest + lettre (notifiers) |
 | Docker access  | `bollard` for the Docker socket API; `docker compose` CLI for compose ops |
 | Host access    | `nsenter` into PID 1 namespaces (trait `HostExec`, swappable)         |
 | Auth           | JWT (`jsonwebtoken`), password hashing via `argon2`                 |
@@ -81,6 +86,8 @@ crates/
       exec.rs              command execution engine + broadcast log channels
       commands.rs          generic config command items (sections/items)
       backup.rs            restic config, backup.sh render, timers, snapshots
+      monitor.rs           health checks, log watchers, alert state machine
+      notify.rs            notifiers: slack, telegram, email (lettre), webhook
       logs.rs              log filtering pipeline (grep/regex/since/stream)
       audit.rs             audit log (ring buffer + optional file append)
       ws.rs                websocket protocol & handlers
@@ -106,6 +113,7 @@ web/
       ddm-log-viewer.ts ddm-compose-editor.ts ddm-unit-editor.ts
       ddm-service-wizard.ts ddm-user-list.ts ddm-user-edit.ts
       ddm-command-panel.ts ddm-exec-output.ts ddm-backup-panel.ts
+      ddm-monitor-panel.ts ddm-events-view.ts
   test/ (vitest: matchers, log filter helpers)
 client/
   pyproject.toml README.md
@@ -115,7 +123,7 @@ client/
 examples/
   config.yaml users.yaml
   services/hello-world/docker-compose.yml
-  services/pg-app/{docker-compose.yml,meta.yaml}   # stdin_dump example
+  services/pg-app/{docker-compose.yml,meta.yaml}   # stdin_dump + monitoring ex.
   templates/                 service templates
   systemd/ddm.service        unit template example
   deploy/docker-compose.yml  self-deployment example
@@ -225,6 +233,41 @@ backup:
   scheduler: systemd_timer         # systemd_timer | internal | none
   on_calendar: "daily"             # timer schedule
   unit_prefix: "ddm-backup"        # units: ddm-backup-<svc>.service/.timer
+
+monitoring:
+  enabled: true
+  allow_auto_actions: true         # master switch for restart/exec reactions
+  check_interval_secs: 30          # default interval for health checks
+  state_dir: /var/lib/ddm          # alert state, cooldown bookkeeping
+  notifiers:
+    - id: slack-ops
+      type: slack_webhook
+      url_env: DDM_SLACK_WEBHOOK_URL     # secrets via env, not in yaml
+    - id: telegram-ops
+      type: telegram
+      bot_token_env: DDM_TELEGRAM_TOKEN
+      chat_id: "123456789"
+    - id: mail-ops
+      type: email
+      smtp_host: smtp.example.com
+      smtp_port: 587
+      smtp_tls: starttls
+      username_env: DDM_SMTP_USER
+      password_env: DDM_SMTP_PASS
+      from: "ddm@example.com"
+      to: ["ops@example.com"]
+    - id: generic-hook
+      type: webhook                      # POST JSON {event, service, ...}
+      url: "https://hooks.example.com/ddm"
+      headers: {}
+  defaults:                            # applied to every monitored service
+    notify: [slack-ops]
+    failure_threshold: 3
+    cooldown_secs: 300
+  rules:                               # global rules over service matchers
+    - services: {glob: "db-*"}
+      log_alerts:
+        - {id: db-errors, regex: '(?i)(panic|fatal)', notify: [mail-ops]}
 
 service_templates:
   - id: generic-web
@@ -358,6 +401,23 @@ WebSockets authenticate via `Sec-WebSocket-Protocol: bearer.<token>`
 - `POST /api/services/{name}/backup/restore` `{snapshot, target_dir}` →
   `{execution_id}` — restores into `target_dir` (admin/unrestricted only;
   in-place restore is documented as a manual op)
+
+### Monitoring & alerting (see §8c)
+- `GET /api/monitoring/status` — per-service monitor state (filtered to
+  caller's services): `{service, checks: [{id, type, state, last_ok,
+  failures}], log_alerts: [{id, state, last_match}], suppressed}`
+- `GET /api/monitoring/status/{service}` — detail incl. recent matched lines
+- `GET /api/monitoring/events?service=&since=&limit=` — alert event history
+  (firing/resolved/action taken/notification sent)
+- `GET /api/services/{name}/monitoring` · `PUT` — per-service monitor config
+  (persisted to `meta.yaml`; requires `edit_compose` right)
+- `POST /api/services/{name}/monitoring/test` — run checks once, return results
+- `POST /api/monitoring/notifiers/{id}/test` `{message}` — send test
+  notification (admin)
+- `GET /api/monitoring/notifiers` — configured notifiers, secrets redacted
+- `WS /ws/events` — global push channel for UI badges:
+  `MonitorState{service, check, state}`, `AlertFired{event}`,
+  `AlertResolved{event}`, `AutoAction{service, action, result}`
 
 ### Log streaming
 - `WS /ws/services/{name}/logs?follow=1&tail=&grep=&regex=&stream=` — live
@@ -577,6 +637,73 @@ Details:
 - Backup runs go through the normal execution engine — visible under
   `/ws/executions/{id}` and in audit.
 
+### 8c. Monitoring, alerting & auto-reactions
+
+A lightweight in-process monitor (no external Prometheus dependency) covering
+three primitives per service, configured in `meta.yaml` (merged with
+`monitoring.defaults` and global `monitoring.rules` selected by the same
+match engine used for user access):
+
+```yaml
+monitoring:
+  health:
+    enabled: true
+    type: docker_healthcheck        # docker_healthcheck | http | tcp | container_running
+    # http extras: url: http://127.0.0.1:8080/healthz  expect_status: 200
+    #              timeout_secs: 5  (probed via the container network/ns)
+    # tcp extras:  host: 127.0.0.1  port: 5432
+    interval_secs: 30
+    failure_threshold: 3            # consecutive failures → "down"
+    recovery_threshold: 2           # consecutive successes → "recovered"
+    notify: [slack-ops, mail-ops]
+    actions:
+      - type: restart             # docker compose restart / systemctl restart
+        after_failures: 3
+        cooldown_secs: 300
+        max_attempts: 3           # per window_secs; then suppress+alert
+        window_secs: 900
+  log_alerts:
+    - id: errors
+      regex: '(?i)\b(error|panic|fatal|exception)\b'
+      exclude_regex: '(?i)healthcheck'   # optional noise filter
+      container: "*"                     # or a compose service name
+      notify: [slack-ops]
+      cooldown_secs: 300                 # min interval between notifications
+      context_lines: 3                   # matched ±N lines in notification
+      actions:
+        - {type: restart, cooldown_secs: 600, max_attempts: 2, window_secs: 3600}
+```
+
+- **Health checks**: `docker_healthcheck` polls container `Health.Status`
+  via bollard (uses the image's HEALTHCHECK — zero extra config); `http`
+  probes a URL (inside the container's network namespace via `docker exec`
+  `wget/curl` or from the manager when the port is published); `tcp` connects
+  to host:port; `container_running` = "all compose containers running".
+  Each check is a state machine `ok → failing(1..N) → down` and back
+  through `recovery_threshold`; transitions emit events + notifications.
+- **Log watchers**: long-lived `docker logs -f --since now` streams (bollard)
+  per service; each line runs through the alert's `regex`/`exclude_regex`.
+  Matches are grouped per alert id; a notification contains the matched
+  excerpt. `cooldown_secs` + `max_per_cooldown` bound the noise; a dedup key
+  (service+rule+line-hash) collapses repeats.
+- **Notifiers** (`notify.rs`): `slack_webhook` (Incoming Webhook JSON),
+  `telegram` (bot `sendMessage`), `email` (SMTP via `lettre`, starttls/tls),
+  `webhook` (generic POST JSON for ntfy/Gotify/Discord-compatible endpoints).
+  Secrets come from `*_env` indirection — never stored in config. All sends
+  are retried with backoff and logged to audit; `notifiers/{id}/test` verifies.
+- **Auto-reactions**: `restart` (compose restart, or `systemctl restart` when
+  a managed unit exists), `stop`, and `exec_command` (a configured generic
+  command item). Guard rails: `monitoring.allow_auto_actions` master switch,
+  per-action `cooldown_secs`, `max_attempts` per `window_secs`, and flap
+  detection — when attempts are exhausted the rule is `suppressed` and a
+  final "auto-remediation exhausted" alert fires instead of looping.
+- **State**: monitor state + cooldowns persist under `monitoring.state_dir`
+  (survives container restarts); events feed `/api/monitoring/events`,
+  `WS /ws/events`, and the audit log.
+- **Permissions**: status/events visible to anyone with service access;
+  editing monitor config requires `edit_compose`; notifier CRUD and
+  auto-action toggles are admin-only.
+
 ## 9. Frontend (Lit + TS)
 
 - `esbuild.mjs` bundles `web/src/main.ts` → `web/dist` (embedded via
@@ -599,6 +726,11 @@ Details:
     editor (type/pattern/effect rows), policy select, password reset.
   - `ddm-backup-panel` (in service detail): backup config form, provision /
     check report, "run now", timer status, snapshot list, forget/restore.
+  - `ddm-monitor-panel` (in service detail): live health state via
+    `WS /ws/events`, health-check + log-alert rule editors, "test notifier"
+    button, suppression indicators.
+  - `ddm-events-view`: global event feed (firing/resolved/auto-actions).
+  - Service list/detail get health badges driven by `WS /ws/events`.
   - `ddm-command-panel` + `ddm-exec-output`: render config sections; run
     commands and stream output via `/ws/executions/:id`.
 - `vitest` for pure helpers (pattern matching display, filter building).
@@ -623,6 +755,7 @@ CLI `ddm`: `login`, `services`, `status`, `logs [--follow --grep --regex
 `create --template|--compose`,
 `compose get|put`, `unit get|put|regenerate|check|repair`,
 `backup run|check|provision|snapshots|forget|restore`,
+`monitor status|events|test`, `notify-test <id>`,
 `users list|add|passwd|access`, `exec <section> <item>` — mirroring
 `noxeco_manager.py` ergonomics, but talking to the real API (JWT bearer).
 Websocket via `websockets`; REST via `httpx`; `pytest` suite using
@@ -647,6 +780,10 @@ Websocket via `websockets`; REST via `httpx`; `pytest` suite using
   - backup: `backup.sh` render (repo URL templating, stdin dumps, excludes,
     retention args), timer/service unit render, `BackupCheckReport` logic,
     meta.yaml parse + path validation, password-file generation/permissions
+  - monitor: check state machine (thresholds, recovery), cooldown /
+    max_attempts / flap suppression, log-line regex matching + dedup,
+    notifier payload formatting (mock HTTP/SMTP), meta.yaml merge of
+    monitoring config, `allow_auto_actions` gate
 - **Integration tests** (`crates/ddm-server/tests/`): spin the axum `Router`
   against a `tempdir` services root with a **scripted `MockHostExec`** and a
   docker-socket shim; exercise login → service create → policy rejection →
@@ -668,9 +805,11 @@ Websocket via `websockets`; REST via `httpx`; `pytest` suite using
 - `docs/deployment.md`: self-install as compose service + optional systemd
   unit for the manager itself; upgrades.
 - `docs/web-ui.md`, `docs/client.md`, `docs/development.md`, a
-  `docs/server-cli.md` covering in-container user management/recovery, and
+  `docs/server-cli.md` covering in-container user management/recovery,
   `docs/backup.md` covering the restic setup end-to-end (incl. password
-  handling warnings from the article: back up `.restic_password` separately).
+  handling warnings from the article: back up `.restic_password` separately),
+  and `docs/monitoring.md` (check types, rule syntax, notifier setup,
+  auto-action guard rails).
 - `examples/`: ready-to-run config, users (with a printed bootstrap-password
   note), hello-world service, template, unit template, client demo.
 
@@ -684,11 +823,13 @@ Websocket via `websockets`; REST via `httpx`; `pytest` suite using
 6. Generic command framework + systemd group endpoints (parity)
 7. Backup management: restic provisioning, script + timer render, run/check/
    snapshots/forget/restore endpoints
-8. Web UI (Lit): login, list/detail, logs, editors, wizard, users admin,
-   backup panel
-9. Python client + CLI + pytest suite
-10. Docs, examples, Dockerfile, self-compose, CI workflow
-11. Final verification: `cargo test`, `cargo clippy`, web build+tsc, pytest,
+8. Monitoring & alerting: health checks, log watchers, notifiers,
+   auto-reactions, events API + WS push
+9. Web UI (Lit): login, list/detail, logs, editors, wizard, users admin,
+   backup panel, monitor panel, events view
+10. Python client + CLI + pytest suite
+11. Docs, examples, Dockerfile, self-compose, CI workflow
+12. Final verification: `cargo test`, `cargo clippy`, web build+tsc, pytest,
     docker build, manual smoke checklist
 
 ## 14. Risks & open questions
@@ -713,5 +854,12 @@ Websocket via `websockets`; REST via `httpx`; `pytest` suite using
   compose bind-mount policy; `repository_base` may embed rest-server creds —
   redacted in `GET /api/config`, and `extra_env` is the escape hatch for
   backend creds (kept out of `meta.yaml`).
+- **Log watcher cost**: one `docker logs -f` stream per service with active
+  `log_alerts` — watchers start lazily (only for services with rules), share
+  a single stream per service across rules, and have a bounded buffer.
+  Restarted streams resume via `--since` with overlap dedup.
+- **Alert loops**: auto-restart on a persistent crash could loop —
+  mitigated by cooldowns, `max_attempts`/`window_secs`, flap suppression,
+  and the `allow_auto_actions` master switch (documented default: on).
 - **users.yaml write-back**: atomic write (tmp + rename) so the file watcher
   doesn't half-load; guarded against the watch loop re-entering.
