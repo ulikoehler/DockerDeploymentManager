@@ -135,6 +135,27 @@ export const apiBackupForget = (name: string) =>
   api(`/api/services/${name}/backup/forget`, { method: 'POST', body: {} });
 export const apiBackupRestore = (name: string, snapshot: string, target_dir: string) =>
   api(`/api/services/${name}/backup/restore`, { method: 'POST', body: { snapshot, target_dir } });
+export const apiFiles = (name: string, path = '') =>
+  api(`/api/services/${name}/files`, { query: { path } });
+export const apiWriteFile = (name: string, path: string, content: string) =>
+  api(`/api/services/${name}/files`, { method: 'PUT', body: { path, content } });
+export const apiMkdir = (name: string, path: string) =>
+  api(`/api/services/${name}/files/mkdir`, { method: 'POST', body: { path } });
+export const apiRename = (name: string, from: string, to: string) =>
+  api(`/api/services/${name}/files/rename`, { method: 'POST', body: { from, to } });
+export const apiDeleteFile = (name: string, path: string) =>
+  api(`/api/services/${name}/files`, { method: 'DELETE', query: { path } });
+export const apiGitRepos = (name: string) => api(`/api/services/${name}/git/repos`);
+export const apiGitStatus = (name: string, path = '') =>
+  api(`/api/services/${name}/git/status`, { query: { path } });
+export const apiGitLog = (name: string, path = '', n = 30) =>
+  api(`/api/services/${name}/git/log`, { query: { path, n } });
+export const apiGitBranches = (name: string, path = '') =>
+  api(`/api/services/${name}/git/branches`, { query: { path } });
+export const apiGitClone = (name: string, url: string, path = '', branch?: string) =>
+  api(`/api/services/${name}/git/clone`, { method: 'POST', body: { url, path, branch } });
+export const apiGitAction = (name: string, path: string, op: string, gitRef?: string) =>
+  api(`/api/services/${name}/git/action`, { method: 'POST', body: { path, op, git_ref: gitRef } });
 export const apiGetMonitoring = (name: string) => api(`/api/services/${name}/monitoring`);
 export const apiPutMonitoring = (name: string, cfg: unknown) =>
   api(`/api/services/${name}/monitoring`, { method: 'PUT', body: cfg });

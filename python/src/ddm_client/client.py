@@ -187,6 +187,55 @@ class DdmClient:
         return self._req("POST", f"/api/services/{name}/backup/restore",
                          {"snapshot": snapshot, "target_dir": target_dir})
 
+    # -- files & git ------------------------------------------------------------
+
+    def files(self, name: str, path: str = "") -> dict:
+        """Dir listing or file content, depending on what `path` is."""
+        return self._req("GET", f"/api/services/{name}/files",
+                         params={"path": path})
+
+    def write_file(self, name: str, path: str, content: str) -> None:
+        self._req("PUT", f"/api/services/{name}/files",
+                  {"path": path, "content": content})
+
+    def mkdir(self, name: str, path: str) -> None:
+        self._req("POST", f"/api/services/{name}/files/mkdir",
+                  {"path": path})
+
+    def rename_file(self, name: str, from_: str, to: str) -> None:
+        self._req("POST", f"/api/services/{name}/files/rename",
+                  {"from": from_, "to": to})
+
+    def delete_file(self, name: str, path: str) -> None:
+        self._req("DELETE", f"/api/services/{name}/files",
+                  params={"path": path})
+
+    def git_repos(self, name: str) -> list[dict]:
+        return self._req("GET", f"/api/services/{name}/git/repos")
+
+    def git_status(self, name: str, path: str = "") -> dict:
+        return self._req("GET", f"/api/services/{name}/git/status",
+                         params={"path": path})
+
+    def git_log(self, name: str, path: str = "", n: int = 30) -> list[str]:
+        return self._req("GET", f"/api/services/{name}/git/log",
+                         params={"path": path, "n": n})
+
+    def git_branches(self, name: str, path: str = "") -> dict:
+        return self._req("GET", f"/api/services/{name}/git/branches",
+                         params={"path": path})
+
+    def git_clone(self, name: str, url: str, path: str = "",
+                  branch: str | None = None) -> dict:
+        return self._req("POST", f"/api/services/{name}/git/clone",
+                         {"url": url, "path": path, "branch": branch})
+
+    def git_action(self, name: str, path: str, op: str,
+                   git_ref: str | None = None) -> dict:
+        """op: pull|fetch|checkout (checkout needs git_ref)."""
+        return self._req("POST", f"/api/services/{name}/git/action",
+                         {"path": path, "op": op, "git_ref": git_ref})
+
     # -- monitoring -----------------------------------------------------------
 
     def get_monitoring(self, name: str) -> dict:

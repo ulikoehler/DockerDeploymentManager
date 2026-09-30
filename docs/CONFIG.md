@@ -21,7 +21,7 @@ keeps running. Check `GET /api/config/status` for the last reload result.
 
 | key | default | notes |
 |---|---|---|
-| `services_root` | `/services` | service dirs inside the container |
+| `services_root` | `/opt/services` | service dirs inside the container |
 | `host_services_root` | `services_root` | same path seen by the host — used in `WorkingDirectory=` and `backup.sh`. Keep identical inside and outside (easiest: mount the same host path at the same container path) |
 | `compose_file` | `docker-compose.yml` | preferred compose filename |
 | `host_systemd_dir` | `/host/systemd` | bind-mount of the host's `/etc/systemd/system` |
@@ -107,7 +107,7 @@ groups:
       - type: docker_compose_pull           # or docker_compose_pull_restart | shell
         id: pull
         label: Pull images
-        work_dir_template: "/opt/ddm-services/{service}"   # {unit} {service} substituted
+        work_dir_template: "/opt/services/{service}"   # {unit} {service} substituted
       - type: shell
         id: reload
         label: Reload
@@ -167,6 +167,7 @@ users:
       run_commands: true
       manage_backup: false
       manage_monitoring: false
+      edit_files: false        # file tree editing + git ops
     compose_policy: strict
 ```
 

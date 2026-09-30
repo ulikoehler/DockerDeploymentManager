@@ -6,8 +6,8 @@ server:
   web_dir: /opt/ddm/web          # bundled UI; omit to disable
 
 paths:
-  services_root: /opt/ddm-services          # same path in-container and on host
-  # host_services_root: /opt/ddm-services   # only needed if container path differs
+  services_root: /opt/services          # same path in-container and on host
+  # host_services_root: /opt/services   # only needed if container path differs
   compose_file: docker-compose.yml
   host_systemd_dir: /host/systemd           # bind-mount of /etc/systemd/system
   host_exec: nsenter                        # nsenter | local
@@ -40,7 +40,7 @@ security:
       sysctls: { mode: allowlist, list: [] }
       # bind mounts only allowed from these host-side source prefixes:
       allowed_bind_sources:
-        - "/opt/ddm-services/**"
+        - "/opt/services/**"
       deny_bind_targets:
         - "/"
         - "/etc/**"
@@ -82,11 +82,11 @@ systemd:
         - type: docker_compose_pull
           id: pull
           label: Pull images
-          work_dir_template: "/opt/ddm-services/{service}"
+          work_dir_template: "/opt/services/{service}"
         - type: docker_compose_pull_restart
           id: update
           label: Pull & restart
-          work_dir_template: "/opt/ddm-services/{service}"
+          work_dir_template: "/opt/services/{service}"
 
 backup:
   enabled: true

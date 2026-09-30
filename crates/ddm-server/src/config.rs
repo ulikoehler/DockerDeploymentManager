@@ -118,7 +118,7 @@ pub struct PathsConfig {
 }
 
 fn default_services_root() -> String {
-    "/services".to_string()
+    "/opt/services".to_string()
 }
 fn default_compose_file() -> String {
     "docker-compose.yml".to_string()

@@ -40,6 +40,12 @@ backups.
   failures).
 - **Service creation** — raw compose paste or `service_templates` with
   variables; optional unit generation + enable + start.
+- **File manager** — browse/read/edit/create/rename/delete arbitrary files
+  inside a service dir (path traversal + symlink + `.git`/restic-secret
+  protection; 512 KiB read cap; binary detection).
+- **Git support** — discover repos inside a service dir, clone (into the
+  dir or a subdirectory, optional branch), pull/fetch, switch branch,
+  status, and log — output streams over the execution WebSocket.
 - **Users & permissions** — argon2-hashed users in `users.yaml`; roles
   (`admin`/`operator`/`viewer`), ordered `exact`/`glob`/`regex` access rules,
   per-user feature flags and compose policies. Manageable via API, web UI,
@@ -78,7 +84,7 @@ docker compose exec ddm ddm-server user add admin --role admin --generate
 ```
 
 Service directories live under `paths.services_root` (default
-`/opt/ddm-services`). Copy `examples/hello-world` there and it shows up
+`/opt/services`). Copy `examples/hello-world` there and it shows up
 in the UI immediately.
 
 ## Repository layout

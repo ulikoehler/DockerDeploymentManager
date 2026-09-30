@@ -11,6 +11,7 @@ import getpass
 import json
 import os
 import sys
+import sys
 
 from .client import DdmClient, DdmError
 
@@ -66,6 +67,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("op", choices=["status", "check", "provision", "run",
                                   "snapshots", "forget", "restore"])
     s.add_argument("--snapshot"); s.add_argument("--target")
+
+    s = sub.add_parser("files"); s.add_argument("service")
+    s.add_argument("op", choices=["ls", "cat", "write", "mkdir",
+                                  "rename", "rm"])
+    s.add_argument("path", nargs="?", default="")
+    s.add_argument("arg", nargs="?", help="target for rename / file for write")
+
+    s = sub.add_parser("git"); s.add_argument("service")
+    s.add_argument("op", choices=["repos", "status", "log", "branches",
+                                  "clone", "pull", "fetch", "checkout"])
+    s.add_argument("path", nargs="?", default="",
+                   help="repo dir relative to service dir (default: root)")
+    s.add_argument("arg", nargs="?", help="url (clone) or ref (checkout)")
+    s.add_argument("--branch"); s.add_argument("-n", type=int, default=30)
 
     s = sub.add_parser("monitor")
     s.add_argument("op", choices=["status", "events", "test"])
@@ -258,6 +273,53 @@ def dispatch(args) -> int:
                                                args.target or f"/tmp/restore-{args.service}"),
         }
         out(ops[args.op]())
+    elif cmd == "files":
+        op = args.op
+        if op == "ls":
+            node = c.files(args.service, args.path)
+            if node["kind"] == "dir":
+                for e in node["entries"]:
+                    print(f"{e['kind']:>7} {e['size']:>10}  {e['name']}")
+            else:
+                print(node.get("content", f"<{node['kind']}>"))
+        elif op == "cat":
+            out(c.files(args.service, args.path).get("content"))
+        elif op == "write":
+            src = sys.stdin.read() if args.arg in (None, "-") else \
+                open(args.arg).read()
+            c.write_file(args.service, args.path, src)
+            out({"written": args.path})
+        elif op == "mkdir":
+            c.mkdir(args.service, args.path)
+            out({"created": args.path})
+        elif op == "rename":
+            c.rename_file(args.service, args.path, args.arg)
+            out({"renamed": f"{args.path} -> {args.arg}"})
+        elif op == "rm":
+            c.delete_file(args.service, args.path)
+            out({"deleted": args.path})
+    elif cmd == "git":
+        op = args.op
+        if op == "repos":
+            out(c.git_repos(args.service))
+        elif op == "status":
+            out(c.git_status(args.service, args.path))
+        elif op == "log":
+            out(c.git_log(args.service, args.path, args.n))
+        elif op == "branches":
+            out(c.git_branches(args.service, args.path))
+        elif op == "clone":
+            r = c.git_clone(args.service, args.arg or "", args.path,
+                            args.branch)
+            eid = r.get("execution_id")
+            print(f"execution: {eid}")
+            return asyncio.run(_stream_exec(c, eid)) if eid else 0
+        else:  # pull | fetch | checkout
+            r = c.git_action(args.service, args.path, op,
+                             args.arg if op == "checkout" else None)
+            eid = r.get("execution_id")
+            print(f"execution: {eid}")
+            return asyncio.run(_stream_exec(c, eid)) if eid else 0
     elif cmd == "monitor":
         if args.op == "status":
             out(c.monitor_status(args.service))

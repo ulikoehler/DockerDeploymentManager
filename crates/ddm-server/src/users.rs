@@ -75,6 +75,9 @@ pub struct UserFeatures {
     pub manage_backup: bool,
     #[serde(default)]
     pub manage_monitoring: bool,
+    /// Edit arbitrary files inside service dirs and manage git repos there.
+    #[serde(default)]
+    pub edit_files: bool,
 }
 
 fn bool_true() -> bool {
@@ -90,6 +93,7 @@ impl Default for UserFeatures {
             run_commands: true,
             manage_backup: false,
             manage_monitoring: false,
+            edit_files: false,
         }
     }
 }

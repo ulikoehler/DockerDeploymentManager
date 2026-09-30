@@ -7,6 +7,8 @@ mod compose;
 mod config;
 mod docker;
 mod exec;
+mod files;
+mod gitops;
 mod hostexec;
 mod logs;
 mod monitor;

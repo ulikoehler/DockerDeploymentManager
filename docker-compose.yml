@@ -16,7 +16,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # service root: same path on both sides so generated units work
-      - /opt/ddm-services:/opt/ddm-services
+      - /opt/services:/opt/services
       # host systemd unit dir (read/write, for generated units)
       - /etc/systemd/system:/host/systemd
       # config + users + monitor state persist here

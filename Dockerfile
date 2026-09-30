@@ -16,7 +16,7 @@ RUN cargo build --release -p ddm-server
 # ---- runtime ----
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates docker.io docker-compose-v2 util-linux curl \
+      ca-certificates docker.io docker-compose-v2 util-linux curl git \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=backend /app/target/release/ddm-server /usr/local/bin/ddm-server
 COPY --from=web /app/dist /opt/ddm/web

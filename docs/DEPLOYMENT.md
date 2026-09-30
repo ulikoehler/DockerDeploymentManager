@@ -20,7 +20,7 @@ services:
       # TELEGRAM_BOT_TOKEN: …
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /opt/ddm-services:/opt/ddm-services    # same path both sides!
+      - /opt/services:/opt/services    # same path both sides!
       - /etc/systemd/system:/host/systemd    # host unit dir
       - ./data:/etc/ddm                       # config + users
       - ./data-state:/var/lib/ddm             # monitor state
@@ -50,7 +50,7 @@ If the service dir must have different paths inside/outside, set
 ## Bootstrap
 
 ```bash
-mkdir -p data data-state /opt/ddm-services
+mkdir -p data data-state /opt/services
 cp config.example.yaml data/config.yaml
 cp -r examples/templates data/templates
 # users.yaml can start empty — bootstrap in-container:

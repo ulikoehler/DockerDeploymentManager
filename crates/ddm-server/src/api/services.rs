@@ -21,7 +21,7 @@ use std::path::Path as FsPath;
 // ---------------------------------------------------------------------------
 
 /// Check access to a service for the caller.
-async fn require_service_access(
+pub(crate) async fn require_service_access(
     state: &AppState,
     user: &AuthUser,
     name: &str,

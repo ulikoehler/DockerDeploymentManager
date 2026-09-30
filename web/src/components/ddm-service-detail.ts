@@ -7,6 +7,8 @@ import './ddm-compose-editor';
 import './ddm-unit-editor';
 import './ddm-backup-panel';
 import './ddm-service-monitoring';
+import './ddm-files';
+import './ddm-git';
 
 @customElement('ddm-service-detail')
 export class DdmServiceDetail extends LitElement {
@@ -87,6 +89,8 @@ export class DdmServiceDetail extends LitElement {
         ${this.tabBtn('overview', 'Overview')}
         ${this.tabBtn('logs', 'Logs')}
         ${this.tabBtn('compose', 'Compose')}
+        ${this.tabBtn('files', 'Files')}
+        ${this.tabBtn('git', 'Git')}
         ${this.tabBtn('unit', 'Unit')}
         ${this.tabBtn('backup', 'Backup')}
         ${this.tabBtn('monitoring', 'Monitoring')}
@@ -101,6 +105,10 @@ export class DdmServiceDetail extends LitElement {
         return html`<ddm-log-viewer name=${this.name}></ddm-log-viewer>`;
       case 'compose':
         return html`<ddm-compose-editor name=${this.name}></ddm-compose-editor>`;
+      case 'files':
+        return html`<ddm-files name=${this.name}></ddm-files>`;
+      case 'git':
+        return html`<ddm-git name=${this.name}></ddm-git>`;
       case 'unit':
         return html`<ddm-unit-editor name=${this.name}
           .report=${this.unitReport}></ddm-unit-editor>`;

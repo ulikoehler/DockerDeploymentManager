@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod commands_api;
+pub mod files;
 pub mod misc;
 pub mod services;
 pub mod systemd_api;
@@ -45,6 +46,21 @@ pub fn api_router() -> Router<AppState> {
         )
         .route("/api/services/:name/actions", post(services::action))
         .route("/api/services/:name/logs", get(services::logs))
+        // files + git
+        .route(
+            "/api/services/:name/files",
+            get(files::list_files)
+                .put(files::write_file)
+                .delete(files::delete_file),
+        )
+        .route("/api/services/:name/files/mkdir", post(files::mkdir))
+        .route("/api/services/:name/files/rename", post(files::rename))
+        .route("/api/services/:name/git/repos", get(files::git_repos))
+        .route("/api/services/:name/git/status", get(files::git_status))
+        .route("/api/services/:name/git/log", get(files::git_log))
+        .route("/api/services/:name/git/branches", get(files::git_branches))
+        .route("/api/services/:name/git/clone", post(files::git_clone))
+        .route("/api/services/:name/git/action", post(files::git_action))
         // backup
         .route(
             "/api/services/:name/backup",

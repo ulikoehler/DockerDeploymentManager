@@ -25,6 +25,9 @@ ddm create <name> --compose compose.yml | --template <id> [--var k=v]
      [--no-unit] [--no-enable] [--start]
 ddm delete <svc> [--keep-dir]
 ddm compose <svc> get | put [file|-] [--recreate]
+ddm files <svc> ls|cat|write|mkdir|rename|rm [path] [arg]
+ddm git <svc> repos|status|log|branches|clone|pull|fetch|checkout
+     [path] [url|ref] [--branch B] [-n N]
 ddm unit <svc> get | put [file|-] [--restart] | check | regenerate
 ddm backup <svc> status|check|provision|run|snapshots|forget|restore
      [--snapshot S] [--target /path]

@@ -80,6 +80,39 @@ by env indirection (`url_env`, `bot_token_env`, `username_env`,
 `password_env`). Writes are persisted to `config.yaml` atomically and take
 effect immediately (hot reload).
 
+## Files (per service)
+
+All paths are relative to the service dir; `..`, absolute paths, `.git`
+internals, and `.restic_password`/`.restic_inited` are rejected. Writes and
+git mutations need the `edit_files` feature or admin.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/services/{name}/files?path=` | dir → `{kind:"dir", entries:[{name,kind,size}]}`; file → `{kind:"file", content, size, truncated}` (512 KiB cap; binary → `{kind:"binary"}`) |
+| PUT | `/api/services/{name}/files` | `{path, content}` — atomic write, creates parents |
+| POST | `/api/services/{name}/files/mkdir` | `{path}` |
+| POST | `/api/services/{name}/files/rename` | `{from, to}` |
+| DELETE | `/api/services/{name}/files?path=` | file or dir (recursive); refuses the root |
+
+## Git (per service)
+
+Repos are discovered in the service dir and up to 3 levels deep. `path` is
+relative to the service dir (""/"." = the dir itself). Mutating ops return
+`{execution_id}` — stream output via `WS /ws/executions/{id}`.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/services/{name}/git/repos` | `[{path, branch, remote, dirty}]` |
+| GET | `/api/services/{name}/git/status?path=` | `{branch, remote, tracking, changes[]}` |
+| GET | `/api/services/{name}/git/log?path=&n=` | up to 200 `hash date author subject` lines |
+| GET | `/api/services/{name}/git/branches?path=` | `{current, local[], remote[]}` |
+| POST | `/api/services/{name}/git/clone` | `{url, path?, branch?}` → execution |
+| POST | `/api/services/{name}/git/action` | `{path, op: pull|fetch|checkout, git_ref?}` → execution |
+
+Git runs inside the container (`git` is in the image); the service dir is
+bind-mounted so host-side units see the same files. Refs/URLs are validated
+(no `-` prefix, no `..`, no shell metachars).
+
 ## Users (admin)
 
 | Method | Path | Notes |
