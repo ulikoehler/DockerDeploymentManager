@@ -1,0 +1,2 @@
+[console_scripts]
+ddm = ddm_client.cli:main
