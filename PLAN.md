@@ -208,7 +208,11 @@ service_templates:
     create_unit: true
 
 systemd:
-  unit_template: /etc/ddm/templates/ddm.service.tpl   # {service} {dir} subst.
+  # Default unit template follows the TechOverflow "docker-compose systemd
+  # service" style (see §8a). {service}, {dir}, {compose_file}, {compose_bin}
+  # are substituted. A custom template file may replace it.
+  unit_template: /etc/ddm/templates/ddm.service.tpl   # optional; built-in default below
+  compose_binary: auto              # auto | /usr/bin/docker-compose | "docker compose"
   daemon_reload_after_change: true
   groups:                             # parity w/ original: host unit views
     - id: infra
@@ -297,9 +301,14 @@ WebSockets authenticate via `Sec-WebSocket-Protocol: bearer.<token>`
 - `PUT /api/services/{name}/compose` — replace; policy-validated, atomic write,
   optional `{"recreate": true}` to `up -d` after save
 - `GET /api/services/{name}/unit` → unit file (+generated-vs-custom flag)
+- `GET /api/services/{name}/unit/check` → `UnitCheckReport` for existing
+  services (see §8a): `{exists, enabled, active, in_sync, workdir_ok,
+  issues: [{code, message, fixable}]}`
 - `PUT /api/services/{name}/unit` — write unit (requires `unit_edit` right),
   daemon-reload
-- `POST /api/services/{name}/unit/regenerate` — re-render from template
+- `POST /api/services/{name}/unit/regenerate` — re-render from template,
+  daemon-reload (and optionally `enable`/`restart`) — the "repair" action for
+  issues reported by `unit/check`
 - `POST /api/services/{name}/actions` `{action: pull|up|down|restart|update|
   start|stop|enable|disable}` → `{execution_id}`
   (`update` = pull + up -d --remove-orphans, the "deploy" op)
@@ -357,6 +366,68 @@ only); `regenerate` produces a templated unit and is allowed for service
 editors. Unit content is sanity-checked (must contain `[Unit]`/`[Service]`,
 no `ExecStart` pointing outside allowed roots unless unrestricted).
 
+### 8a. systemd unit management (TechOverflow style)
+
+New services get a unit rendered in the style of the TechOverflow
+"docker-compose systemd service" — the compose project runs **in the
+foreground** under a `simple` unit so systemd tracks the compose process and
+restarts it on failure:
+
+```ini
+[Unit]
+Description={service}
+Requires=docker.service
+After=docker.service
+
+[Service]
+Restart=always
+User=root
+Group=docker
+TimeoutStopSec=15
+WorkingDirectory={dir}
+# Shutdown container (if running) when unit is started
+ExecStartPre={compose_bin} -f {compose_file} down
+ExecStart={compose_bin} -f {compose_file} up
+ExecStop={compose_bin} -f {compose_file} down
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Notes:
+
+- `{compose_bin}` resolves on the **host** (via `HostExec` `which`), not in
+  the container — `compose_binary: auto` tries `docker compose` (v2 plugin)
+  then `docker-compose`, and can be pinned in config.
+- The unit deliberately runs `up` in the foreground (not `up -d`): with
+  `Restart=always` + `TimeoutStopSec=15`, systemd supervises the compose
+  process, and `ExecStartPre=down` cleans up leftovers on every start.
+- Service name = directory name (validated `^[a-z0-9][a-z0-9_.-]*$`).
+- Creation flow mirrors the article: render → write to
+  `host_systemd_dir/{service}.service` → `daemon-reload` → `systemctl enable`
+  → `systemctl start` (the last two driven by the create request's
+  `enable`/`start` flags).
+
+**Checks for existing services** — `GET /api/services/{name}/unit/check`
+returns a `UnitCheckReport` so drift and missing pieces are diagnosable and
+repairable from the UI/API:
+
+| Check                        | Issue code        | Fixable via `regenerate` |
+|------------------------------|-------------------|--------------------------|
+| Unit file exists             | `missing`         | yes |
+| `systemctl is-enabled`       | `not_enabled`     | yes |
+| `systemctl is-active`        | `inactive`        | yes (with `start`) |
+| `WorkingDirectory` = svc dir | `workdir_mismatch`| yes |
+| `Exec*` references compose   | `compose_mismatch`| yes |
+| Content == rendered template | `content_drift`   | yes |
+| `Requires=docker.service`    | `docker_dep_missing` | yes |
+| `systemd-analyze verify`     | `invalid_unit`    | yes |
+
+The service detail endpoint embeds a compact `{unit: {exists, enabled,
+active, in_sync}}` summary so the list view can badge unhealthy units. A
+"Check/Repair" action in `ddm-service-detail` runs `unit/check` and offers
+`regenerate` (+`enable`/`start`) when fixable issues exist.
+
 ## 9. Frontend (Lit + TS)
 
 - `esbuild.mjs` bundles `web/src/main.ts` → `web/dist` (embedded via
@@ -398,7 +469,8 @@ c.put_compose("web-1", yaml_text)
 
 CLI `ddm`: `login`, `services`, `status`, `logs [--follow --grep --regex
 --since --tail]`, `update|restart|start|stop [--unit|--all-allowed]`,
-`compose get|put`, `unit get|put|regenerate`, `create --template|--compose`,
+`create --template|--compose`,
+`compose get|put`, `unit get|put|regenerate|check|repair`,
 `users list|add|passwd|access`, `exec <section> <item>` — mirroring
 `noxeco_manager.py` ergonomics, but talking to the real API (JWT bearer).
 Websocket via `websockets`; REST via `httpx`; `pytest` suite using
@@ -412,7 +484,9 @@ Websocket via `websockets`; REST via `httpx`; `pytest` suite using
   - policy: every rule (+ compose fixtures in `tests/fixtures/*.yml`),
     unrestricted bypass, edge cases (short/long volume syntax, port forms)
   - compose/service: discovery, name validation, atomic writes, meta
-  - systemd: template render, unit validation, HostExec command building
+  - systemd: TechOverflow-style template render, `UnitCheckReport` logic
+    (missing/not_enabled/workdir_mismatch/content_drift/…), unit validation,
+    HostExec command building, `compose_binary: auto` resolution order
   - logs: filter pipeline correctness (grep/regex/since/stream)
   - commands: arg building (value/variable/conditional/optional — ported
     from the original), sequence stop-on-failure
