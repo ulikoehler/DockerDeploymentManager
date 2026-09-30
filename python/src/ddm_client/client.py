@@ -215,6 +215,19 @@ class DdmClient:
         return self._req("POST", f"/api/monitoring/notifiers/{id}/test",
                          {"message": message})
 
+    def create_notifier(self, config: dict) -> dict:
+        """config e.g. {"type": "telegram", "id": "tg",
+                        "bot_token": "...", "chat_id": "..."}"""
+        return self._req("POST", "/api/monitoring/notifiers", config)
+
+    def update_notifier(self, id: str, config: dict) -> dict:
+        """Update a notifier. Secret fields left empty/"***" keep their
+        current values."""
+        return self._req("PUT", f"/api/monitoring/notifiers/{id}", config)
+
+    def delete_notifier(self, id: str) -> None:
+        self._req("DELETE", f"/api/monitoring/notifiers/{id}")
+
     # -- users ----------------------------------------------------------------
 
     def users(self) -> list[dict]:

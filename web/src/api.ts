@@ -142,6 +142,12 @@ export const apiMonitorStatus = () => api('/api/monitoring/status');
 export const apiMonitorEvents = (service?: string, limit = 100) =>
   api('/api/monitoring/events', { query: { service, limit } });
 export const apiNotifiers = () => api('/api/monitoring/notifiers');
+export const apiCreateNotifier = (body: unknown) =>
+  api('/api/monitoring/notifiers', { method: 'POST', body });
+export const apiUpdateNotifier = (id: string, body: unknown) =>
+  api(`/api/monitoring/notifiers/${id}`, { method: 'PUT', body });
+export const apiDeleteNotifier = (id: string) =>
+  api(`/api/monitoring/notifiers/${id}`, { method: 'DELETE' });
 export const apiNotifierTest = (id: string, message: string) =>
   api(`/api/monitoring/notifiers/${id}/test`, { method: 'POST', body: { message } });
 export const apiUsers = () => api<UserView[]>('/api/users');

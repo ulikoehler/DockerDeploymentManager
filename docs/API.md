@@ -68,8 +68,17 @@ Unit issue codes: `missing`, `not_enabled`, `inactive`, `workdir_mismatch`,
 | GET | `/api/services/{name}/monitoring` | `{config, state}` |
 | PUT | `/api/services/{name}/monitoring` | save `ServiceMonitoringConfig` into `meta.yaml` (regexes validated) |
 | POST | `/api/services/{name}/monitoring/test` | container health snapshot |
-| GET | `/api/monitoring/notifiers` | admin; secrets redacted |
+| GET | `/api/monitoring/notifiers` | admin; secrets redacted to `***` |
+| POST | `/api/monitoring/notifiers` | `{type, id, …}` — create (admin); id `^[a-z0-9_-]{1,64}$`, duplicate ids rejected |
+| PUT | `/api/monitoring/notifiers/{id}` | update (admin); id immutable; secret fields left empty/`***` keep their current values |
+| DELETE | `/api/monitoring/notifiers/{id}` | remove (admin) |
 | POST | `/api/monitoring/notifiers/{id}/test` | `{message?}` — sends a test notification |
+
+Notifier bodies are the `monitoring.notifiers[]` YAML entries as JSON. Secret
+fields may be given directly (`url`, `bot_token`, `username`, `password`) or
+by env indirection (`url_env`, `bot_token_env`, `username_env`,
+`password_env`). Writes are persisted to `config.yaml` atomically and take
+effect immediately (hot reload).
 
 ## Users (admin)
 

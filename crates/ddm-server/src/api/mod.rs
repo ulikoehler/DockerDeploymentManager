@@ -83,7 +83,14 @@ pub fn api_router() -> Router<AppState> {
             "/api/services/:name/monitoring/test",
             post(services::monitoring_test),
         )
-        .route("/api/monitoring/notifiers", get(misc::notifiers))
+        .route(
+            "/api/monitoring/notifiers",
+            get(misc::notifiers).post(misc::notifier_create),
+        )
+        .route(
+            "/api/monitoring/notifiers/:id",
+            put(misc::notifier_update).delete(misc::notifier_delete),
+        )
         .route(
             "/api/monitoring/notifiers/:id/test",
             post(misc::notifier_test),

@@ -534,6 +534,9 @@ pub enum NotifierConfig {
     },
     Telegram {
         id: String,
+        /// Bot token directly (prefer `bot_token_env` for secrets).
+        #[serde(default)]
+        bot_token: Option<String>,
         #[serde(default)]
         bot_token_env: Option<String>,
         chat_id: String,
@@ -545,6 +548,11 @@ pub enum NotifierConfig {
         smtp_port: u16,
         #[serde(default)]
         smtp_tls: SmtpTls,
+        /// Credentials directly (prefer `*_env` for secrets).
+        #[serde(default)]
+        username: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
         #[serde(default)]
         username_env: Option<String>,
         #[serde(default)]
@@ -1118,6 +1126,29 @@ impl SharedConfig {
         self.inner.read().await.clone().into()
     }
 
+    /// Atomically mutate the config: apply `f`, validate, write the YAML
+    /// file (tmp + rename under a flock), then swap the live value and
+    /// broadcast the change. The watcher will reload the same content.
+    pub async fn mutate<F>(&self, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut AppConfig) -> Result<()>,
+    {
+        let mut new_cfg = self.inner.read().await.clone();
+        f(&mut new_cfg)?;
+        validate_config(&new_cfg)?;
+        let text = serde_yaml::to_string(&new_cfg).context("serializing config")?;
+        write_atomic(&self.path, text.as_bytes())?;
+        let arc = Arc::new(new_cfg);
+        *self.inner.write().await = (*arc).clone();
+        *self.last_reload.write().await = ReloadStatus {
+            ok: true,
+            error: None,
+            at: Some(chrono::Utc::now()),
+        };
+        let _ = self.changes.send(arc);
+        Ok(())
+    }
+
     /// Cheap synchronous snapshot for use inside non-async contexts is not
     /// needed elsewhere; handlers use `get().await`.
     pub async fn reload_status(&self) -> ReloadStatus {
@@ -1135,6 +1166,25 @@ impl SharedConfig {
             }
         });
     }
+}
+
+/// Write bytes to `path` atomically: flock + tmp file + rename.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use fs2::FileExt;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "config.yaml".into());
+    let lock_path = dir.join(format!(".{name}.lock"));
+    let lock_file = std::fs::File::create(&lock_path)?;
+    lock_file.lock_exclusive()?;
+    let tmp = dir.join(format!(".{name}.tmp"));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    let _ = std::fs::remove_file(&lock_path);
+    Ok(())
 }
 
 async fn watch_loop(state: Arc<SharedConfig>, path: PathBuf) -> Result<()> {
@@ -1187,5 +1237,46 @@ pub fn resolve_users_path(config_path: &Path, cfg: &AppConfig) -> PathBuf {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(p)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mutate_persists_and_reloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        let cfg = AppConfig::default();
+        std::fs::write(&path, serde_yaml::to_string(&cfg).unwrap()).unwrap();
+        let sc = SharedConfig::new(cfg, path.clone());
+        sc.mutate(|c| {
+            c.monitoring.notifiers.push(NotifierConfig::Telegram {
+                id: "tg".into(),
+                bot_token: Some("tok".into()),
+                bot_token_env: None,
+                chat_id: "42".into(),
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(sc.get().await.monitoring.notifiers.len(), 1);
+        let reloaded = load_config(&path).unwrap();
+        assert_eq!(reloaded.monitoring.notifiers[0].id(), "tg");
+        // duplicate id rejected
+        let r = sc
+            .mutate(|c| {
+                c.monitoring.notifiers.push(NotifierConfig::Telegram {
+                    id: "tg".into(),
+                    bot_token: None,
+                    bot_token_env: None,
+                    chat_id: "x".into(),
+                });
+                Ok(())
+            })
+            .await;
+        assert!(r.is_err());
     }
 }

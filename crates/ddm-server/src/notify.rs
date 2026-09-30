@@ -69,14 +69,13 @@ async fn send_once(cfg: &NotifierConfig, n: &Notification) -> Result<()> {
                 .error_for_status()?;
         }
         NotifierConfig::Telegram {
+            bot_token,
             bot_token_env,
             chat_id,
             ..
         } => {
-            let token = bot_token_env
-                .as_ref()
-                .and_then(|e| std::env::var(e).ok())
-                .context("telegram bot_token_env not set")?;
+            let token = env_or(bot_token, bot_token_env)
+                .context("telegram notifier has no bot_token/bot_token_env configured")?;
             let url = format!("https://api.telegram.org/bot{token}/sendMessage");
             client
                 .post(&url)
@@ -92,6 +91,8 @@ async fn send_once(cfg: &NotifierConfig, n: &Notification) -> Result<()> {
             smtp_host,
             smtp_port,
             smtp_tls,
+            username,
+            password,
             username_env,
             password_env,
             from,
@@ -102,8 +103,8 @@ async fn send_once(cfg: &NotifierConfig, n: &Notification) -> Result<()> {
                 smtp_host,
                 *smtp_port,
                 *smtp_tls,
-                username_env,
-                password_env,
+                &env_or(username, username_env),
+                &env_or(password, password_env),
                 from,
                 to,
                 n,
@@ -131,8 +132,8 @@ async fn send_email(
     host: &str,
     port: u16,
     tls: SmtpTls,
-    username_env: &Option<String>,
-    password_env: &Option<String>,
+    username: &Option<String>,
+    password: &Option<String>,
     from: &str,
     to: &[String],
     n: &Notification,
@@ -157,11 +158,8 @@ async fn send_email(
     }
     .port(port);
 
-    if let (Some(u), Some(p)) = (
-        username_env.as_ref().and_then(|e| std::env::var(e).ok()),
-        password_env.as_ref().and_then(|e| std::env::var(e).ok()),
-    ) {
-        transport_builder = transport_builder.credentials(Credentials::new(u, p));
+    if let (Some(u), Some(p)) = (username, password) {
+        transport_builder = transport_builder.credentials(Credentials::new(u.clone(), p.clone()));
     }
     transport_builder.build().send(msg).await?;
     Ok(())
@@ -177,7 +175,10 @@ pub fn describe(notifiers: &[NotifierConfig]) -> Vec<serde_json::Value> {
             for key in [
                 "url",
                 "url_env",
+                "bot_token",
                 "bot_token_env",
+                "username",
+                "password",
                 "password_env",
                 "username_env",
             ] {

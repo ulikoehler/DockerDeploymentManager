@@ -33,7 +33,10 @@ fn redact(cfg: &crate::config::AppConfig) -> serde_json::Value {
                 for key in [
                     "url",
                     "url_env",
+                    "bot_token",
                     "bot_token_env",
+                    "username",
+                    "password",
                     "password_env",
                     "username_env",
                 ] {
@@ -271,6 +274,160 @@ pub async fn notifier_test(
 }
 
 // ---------------------------------------------------------------------------
+// notifier CRUD — writes through to config.yaml via SharedConfig::mutate
+// ---------------------------------------------------------------------------
+
+const SECRET_KEYS: &[&str] = &[
+    "url",
+    "url_env",
+    "bot_token",
+    "bot_token_env",
+    "username",
+    "password",
+    "password_env",
+    "username_env",
+];
+
+fn valid_notifier_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
+}
+
+#[allow(clippy::result_large_err)]
+fn parse_notifier(v: &serde_json::Value) -> Result<crate::config::NotifierConfig, Response> {
+    serde_json::from_value(v.clone()).map_err(|e| bad_request(format!("invalid notifier: {e}")))
+}
+
+/// On update, secret fields left empty or "***" keep the existing values.
+fn merge_secrets(new: &mut serde_json::Value, old: Option<&serde_json::Value>) {
+    let Some(old) = old else { return };
+    for key in SECRET_KEYS {
+        let keep = match new.get(*key) {
+            None | Some(serde_json::Value::Null) => true,
+            Some(serde_json::Value::String(s)) => s.is_empty() || s == "***",
+            _ => false,
+        };
+        if keep {
+            match old.get(*key) {
+                Some(v) if !v.is_null() => {
+                    new.as_object_mut()
+                        .unwrap()
+                        .insert(key.to_string(), v.clone());
+                }
+                _ => {
+                    new.as_object_mut().unwrap().remove(*key);
+                }
+            }
+        }
+    }
+}
+
+pub async fn notifier_create(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
+    if !user.user.is_admin() {
+        return Err(forbidden());
+    }
+    let n = parse_notifier(&body)?;
+    if !valid_notifier_id(n.id()) {
+        return Err(bad_request("id must be 1-64 chars of [a-z0-9_-]"));
+    }
+    let id = n.id().to_string();
+    let idc = id.clone();
+    state
+        .config
+        .mutate(move |c| {
+            if c.monitoring.notifiers.iter().any(|x| x.id() == idc) {
+                anyhow::bail!("notifier '{idc}' already exists");
+            }
+            c.monitoring.notifiers.push(n);
+            Ok(())
+        })
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    state
+        .audit
+        .record(&user.user.name, "notifier_create", &id, "");
+    Ok(ok(true))
+}
+
+pub async fn notifier_update(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
+    if !user.user.is_admin() {
+        return Err(forbidden());
+    }
+    let cfg = state.config.get().await;
+    let old_v = cfg
+        .monitoring
+        .notifiers
+        .iter()
+        .find(|n| n.id() == id)
+        .map(|n| serde_json::to_value(n).unwrap_or_default())
+        .ok_or_else(|| not_found("notifier not found"))?;
+    let mut merged = body.clone();
+    merge_secrets(&mut merged, Some(&old_v));
+    let n = parse_notifier(&merged)?;
+    if n.id() != id {
+        return Err(bad_request("id cannot be changed"));
+    }
+    let idc = id.clone();
+    state
+        .config
+        .mutate(move |c| {
+            let slot = c
+                .monitoring
+                .notifiers
+                .iter_mut()
+                .find(|x| x.id() == idc)
+                .ok_or_else(|| anyhow::anyhow!("notifier not found"))?;
+            *slot = n;
+            Ok(())
+        })
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    state
+        .audit
+        .record(&user.user.name, "notifier_update", &id, "");
+    Ok(ok(true))
+}
+
+pub async fn notifier_delete(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
+    if !user.user.is_admin() {
+        return Err(forbidden());
+    }
+    let idc = id.clone();
+    state
+        .config
+        .mutate(move |c| {
+            let before = c.monitoring.notifiers.len();
+            c.monitoring.notifiers.retain(|x| x.id() != idc);
+            if c.monitoring.notifiers.len() == before {
+                anyhow::bail!("notifier '{idc}' not found");
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| not_found(e.to_string()))?;
+    state
+        .audit
+        .record(&user.user.name, "notifier_delete", &id, "");
+    Ok(ok(true))
+}
+
+// ---------------------------------------------------------------------------
 // matcher self-test helper used by the users UI (dry-run access check)
 // ---------------------------------------------------------------------------
 
@@ -284,4 +441,42 @@ pub struct AccessTestQuery {
 #[allow(dead_code)]
 pub async fn access_test(Query(q): Query<AccessTestQuery>) -> Json<bool> {
     Json(matcher_matches(&q.matcher, &q.service))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn merge_secrets_keeps_old() {
+        let old = json!({"type": "telegram", "id": "tg", "bot_token": "secret", "chat_id": "1"});
+        let mut new = json!({"type": "telegram", "id": "tg", "chat_id": "2"});
+        merge_secrets(&mut new, Some(&old));
+        assert_eq!(new["bot_token"], "secret");
+        assert_eq!(new["chat_id"], "2");
+    }
+
+    #[test]
+    fn merge_secrets_stars_keep_old() {
+        let old = json!({"type": "slack_webhook", "id": "s", "url": "https://x"});
+        let mut new = json!({"type": "slack_webhook", "id": "s", "url": "***"});
+        merge_secrets(&mut new, Some(&old));
+        assert_eq!(new["url"], "https://x");
+    }
+
+    #[test]
+    fn merge_secrets_new_value_wins() {
+        let old = json!({"type": "slack_webhook", "id": "s", "url": "https://old"});
+        let mut new = json!({"type": "slack_webhook", "id": "s", "url": "https://new"});
+        merge_secrets(&mut new, Some(&old));
+        assert_eq!(new["url"], "https://new");
+    }
+
+    #[test]
+    fn valid_ids() {
+        assert!(valid_notifier_id("slack-ops_1"));
+        assert!(!valid_notifier_id("Bad Id"));
+        assert!(!valid_notifier_id(""));
+    }
 }

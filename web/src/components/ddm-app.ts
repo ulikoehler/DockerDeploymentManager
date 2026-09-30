@@ -115,7 +115,7 @@ export class DdmApp extends LitElement {
       case 'commands':
         return html`<ddm-commands></ddm-commands>`;
       case 'monitor':
-        return html`<ddm-monitor-panel></ddm-monitor-panel>`;
+        return html`<ddm-monitor-panel .admin=${this.isAdmin}></ddm-monitor-panel>`;
       case 'events':
         return html`<ddm-events-view></ddm-events-view>`;
       default:

@@ -74,6 +74,15 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("notify-test"); s.add_argument("id")
     s.add_argument("--message", default="ddm test notification")
 
+    s = sub.add_parser("notify")
+    s.add_argument("op", choices=["list", "add", "update", "remove"])
+    s.add_argument("id", nargs="?")
+    s.add_argument("--type", choices=["slack_webhook", "telegram",
+                                     "email", "webhook"])
+    s.add_argument("--set", action="append", default=[],
+                   help="field=value, e.g. --set bot_token=… --set chat_id=123")
+    s.add_argument("--json-body", help="full notifier JSON (overrides --set)")
+
     s = sub.add_parser("users")
     s.add_argument("op", choices=["list", "show", "add", "remove", "passwd",
                                   "access", "roles", "policy", "features"])
@@ -260,6 +269,27 @@ def dispatch(args) -> int:
             out(c.monitor_test(args.service))
     elif cmd == "notify-test":
         out(c.notifier_test(args.id, args.message))
+    elif cmd == "notify":
+        if args.op == "list":
+            out(c.notifiers())
+        elif args.op == "remove":
+            if not args.id:
+                raise DdmError(0, "notify remove needs an id")
+            c.delete_notifier(args.id)
+            out({"deleted": args.id})
+        else:
+            body = json.loads(args.json_body) if args.json_body else {}
+            body.setdefault("id", args.id)
+            if args.type:
+                body.setdefault("type", args.type)
+            for k, v in kvlist(args.set).items():
+                body[k] = v
+            if not body.get("id") or not body.get("type"):
+                raise DdmError(0, "need --type and an id (or --json-body)")
+            if args.op == "add":
+                out(c.create_notifier(body))
+            else:
+                out(c.update_notifier(args.id or body["id"], body))
     elif cmd == "users":
         return users_cmd(c, args)
     elif cmd == "exec":

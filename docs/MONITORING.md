@@ -96,6 +96,27 @@ monitoring:
       headers: { "X-Priority": "4" }
 ```
 
+Secrets may be given directly (`bot_token`, `username`, `password`, `url`) or
+via `*_env` indirection (recommended for file-based config).
+
+### Managing notifiers via API / web UI / CLI
+
+Notifiers can be created, edited, tested, and deleted at runtime — no config
+file editing required. Changes are persisted to `config.yaml` (atomic write)
+and hot-reloaded instantly.
+
+- Web UI: *Monitoring* → Notifiers → add/edit/delete/test (admin only).
+- API: `POST/PUT/DELETE /api/monitoring/notifiers[/{id}]` (see API.md).
+  On update, secret fields left empty or `***` keep their current values.
+- CLI:
+  ```
+  ddm notify list
+  ddm notify add tg --type telegram --set bot_token=123:abc --set chat_id=456
+  ddm notify update tg --set chat_id=789      # secrets kept if omitted
+  ddm notify remove tg
+  ddm notify-test tg
+  ```
+
 Test a notifier: `POST /api/monitoring/notifiers/{id}/test` or
 `ddm notify-test slack-ops`.
 

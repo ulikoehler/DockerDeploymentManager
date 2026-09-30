@@ -29,6 +29,8 @@ ddm unit <svc> get | put [file|-] [--restart] | check | regenerate
 ddm backup <svc> status|check|provision|run|snapshots|forget|restore
      [--snapshot S] [--target /path]
 ddm monitor status|events|test [svc]
+ddm notify list|add|update|remove <id> [--type telegram] [--set k=v]
+     [--json-body '{...}']
 ddm notify-test <id> [--message ...]
 ddm users list|show|add|remove|passwd|access|roles|policy|features ...
 ddm commands                              # list sections/items
