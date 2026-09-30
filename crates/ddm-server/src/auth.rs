@@ -186,3 +186,92 @@ pub fn ok<T: Serialize>(data: T) -> Json<SuccessResponse<T>> {
         data,
     })
 }
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use crate::users::{User, UserFeatures};
+
+    fn u() -> User {
+        User {
+            name: "alice".into(),
+            password_hash: String::new(),
+            roles: vec!["operator".into()],
+            access: vec![],
+            features: UserFeatures::default(),
+            compose_policy: None,
+        }
+    }
+
+    #[test]
+    fn forged_signature_rejected() {
+        let keys = JwtKeys::new("secret-a".into());
+        let t = keys.issue(&u(), 60).unwrap();
+        let other = JwtKeys::new("secret-b".into());
+        assert!(other.verify(&t).is_none());
+    }
+
+    #[test]
+    fn tampered_payload_rejected() {
+        let keys = JwtKeys::new("s".into());
+        let t = keys.issue(&u(), 60).unwrap();
+        // flip a char in the payload segment
+        let mut parts: Vec<String> = t.split('.').map(String::from).collect();
+        let payload = parts[1].as_bytes().to_vec();
+        let flip = if payload[0] == b'A' { b'B' } else { b'A' };
+        let mut p = payload;
+        p[0] = flip;
+        parts[1] = String::from_utf8(p).unwrap();
+        let forged = parts.join(".");
+        assert!(keys.verify(&forged).is_none());
+    }
+
+    #[test]
+    fn expired_rejected() {
+        let keys = JwtKeys::new("s".into());
+        let t = keys.issue(&u(), -120).unwrap(); // expired (past 60s leeway)
+        assert!(keys.verify(&t).is_none());
+    }
+
+    #[test]
+    fn rotate_invalidates_all_tokens() {
+        let keys = JwtKeys::new("s".into());
+        let t = keys.issue(&u(), 60).unwrap();
+        assert!(keys.verify(&t).is_some());
+        keys.rotate();
+        assert!(keys.verify(&t).is_none());
+    }
+
+    #[test]
+    fn alg_none_style_garbage_rejected() {
+        let keys = JwtKeys::new("s".into());
+        // unsigned-looking token, garbage, empty
+        for t in ["eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.", "a.b.c", ""] {
+            assert!(keys.verify(t).is_none());
+        }
+    }
+
+    #[test]
+    fn bearer_from_query_only_for_ws_keys() {
+        use axum::http::Request;
+        let req = Request::builder()
+            .uri("/ws/x?token=abc&other=1")
+            .body(())
+            .unwrap();
+        let (parts, _) = req.into_parts();
+        assert_eq!(bearer_token(&parts), Some("abc"));
+
+        let req = Request::builder().uri("/ws/x?tok=notit").body(()).unwrap();
+        let (parts, _) = req.into_parts();
+        assert_eq!(bearer_token(&parts), None);
+
+        // header beats query
+        let req = Request::builder()
+            .uri("/x?token=query")
+            .header(axum::http::header::AUTHORIZATION, "Bearer hdr")
+            .body(())
+            .unwrap();
+        let (parts, _) = req.into_parts();
+        assert_eq!(bearer_token(&parts), Some("hdr"));
+    }
+}

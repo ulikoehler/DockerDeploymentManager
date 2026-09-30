@@ -201,3 +201,101 @@ mod tests {
         assert!(!valid_service_name("a/b"));
     }
 }
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use crate::users::{User, UserFeatures};
+
+    fn mk(rules: Vec<AccessRule>) -> User {
+        User {
+            name: "op".into(),
+            password_hash: "x".into(),
+            roles: vec!["operator".into()],
+            access: rules,
+            features: UserFeatures::default(),
+            compose_policy: None,
+        }
+    }
+
+    fn r(k: AccessRuleType, p: &str, e: AccessEffect) -> AccessRule {
+        AccessRule {
+            kind: k,
+            pattern: p.into(),
+            effect: e,
+        }
+    }
+
+    #[test]
+    fn invalid_rules_fail_closed() {
+        // unparseable glob/regex are skipped; with deny-default → no access
+        let u = mk(vec![
+            r(AccessRuleType::Glob, "[unclosed", AccessEffect::Allow),
+            r(AccessRuleType::Regex, "(", AccessEffect::Allow),
+        ]);
+        assert!(!can_access_service(&u, "x", DefaultAccess::Deny));
+    }
+
+    #[test]
+    fn regex_is_unanchored_but_deny_still_wins() {
+        // pattern "prod" matches "x-prod-y" (substring) — admins must anchor
+        let u1 = mk(vec![r(AccessRuleType::Regex, "prod", AccessEffect::Allow)]);
+        assert!(can_access_service(&u1, "x-prod-y", DefaultAccess::Deny));
+        // deny-all after allow-specific still applies first-match ordering
+        let u2 = mk(vec![
+            r(AccessRuleType::Exact, "web", AccessEffect::Allow),
+            r(AccessRuleType::Glob, "*", AccessEffect::Deny),
+        ]);
+        assert!(can_access_service(&u2, "web", DefaultAccess::Deny));
+        assert!(!can_access_service(&u2, "db", DefaultAccess::Deny));
+    }
+
+    #[test]
+    fn exact_is_case_sensitive_no_fold() {
+        let u = mk(vec![r(AccessRuleType::Exact, "web", AccessEffect::Allow)]);
+        assert!(!can_access_service(&u, "WEB", DefaultAccess::Deny));
+        assert!(!can_access_service(&u, "Web", DefaultAccess::Deny));
+    }
+
+    #[test]
+    fn glob_star_matches_everything_including_dotnames() {
+        // documents actual globset semantics: '*' is broad — service names
+        // that would be problematic (.hidden, traversals) are rejected
+        // earlier by valid_service_name, so the matcher never sees them.
+        let u = mk(vec![r(AccessRuleType::Glob, "*", AccessEffect::Allow)]);
+        assert!(can_access_service(&u, "x", DefaultAccess::Deny));
+        assert!(can_access_service(&u, ".hidden", DefaultAccess::Deny));
+    }
+
+    #[test]
+    fn service_name_cannot_carry_traversal() {
+        for bad in [
+            "..",
+            "a/b",
+            "a\\b",
+            "/x",
+            ".hidden",
+            "-x",
+            "_x",
+            "UPPER",
+            "with space",
+            "with;semi",
+            "with$var",
+            "x\x00y",
+        ] {
+            assert!(!valid_service_name(bad), "{bad:?} accepted");
+        }
+        for ok_name in ["a", "web-1", "x.y_z", "a1"] {
+            assert!(valid_service_name(ok_name), "{ok_name:?} rejected");
+        }
+    }
+
+    #[test]
+    fn non_admin_cannot_self_expand() {
+        // viewer-role user with a crafted admin-looking role string
+        let mut u = mk(vec![]);
+        u.roles = vec!["Admin".into(), "ADMIN".into(), "admin ".into()];
+        assert!(!u.is_admin());
+        assert!(!can_access_service(&u, "x", DefaultAccess::Deny));
+    }
+}

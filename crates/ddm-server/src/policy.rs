@@ -59,6 +59,13 @@ pub fn validate_compose(compose_yaml: &str, policy: &ComposePolicy) -> Vec<Polic
     }
 
     let mut out = Vec::new();
+
+    // top-level `include:` can pull compose fragments from outside the
+    // service dir — must obey the same rules as service-level extends.
+    if let Some(v) = doc.get("include") {
+        check_extends("include", v, &mut out);
+    }
+
     let services = doc
         .get("services")
         .and_then(|s| s.as_mapping())
@@ -418,16 +425,23 @@ fn check_volume(
         ));
     }
 
-    // denied targets
+    // denied targets — `/etc/**` must also catch `/etc` itself, so patterns
+    // ending in `/**` are additionally matched as exact prefixes.
     if let Some(tgt) = &target {
-        if let Some(gs) = build_globset(&policy.deny_bind_targets) {
-            if gs.is_match(tgt) {
-                out.push(PolicyViolation::new(
-                    path,
-                    "deny_bind_targets",
-                    format!("bind target '{tgt}' matches a denied target"),
-                ));
-            }
+        let exact_hit = policy.deny_bind_targets.iter().any(|p| {
+            p.strip_suffix("/**")
+                .map(|pre| tgt.trim_end_matches('/') == pre)
+                .unwrap_or(false)
+        });
+        let glob_hit = build_globset(&policy.deny_bind_targets)
+            .map(|gs| gs.is_match(tgt))
+            .unwrap_or(false);
+        if exact_hit || glob_hit {
+            out.push(PolicyViolation::new(
+                path,
+                "deny_bind_targets",
+                format!("bind target '{tgt}' matches a denied target"),
+            ));
         }
     }
 }
@@ -437,13 +451,23 @@ fn check_extends(path: &str, v: &Value, out: &mut Vec<PolicyViolation>) {
     let files: Vec<String> = match v {
         Value::Mapping(m) => m
             .get(Value::String("file".to_string()))
+            .or_else(|| m.get(Value::String("path".to_string())))
             .and_then(|f| f.as_str())
             .map(|s| vec![s.to_string()])
             .unwrap_or_default(),
         Value::String(s) => vec![s.clone()],
         Value::Sequence(seq) => seq
             .iter()
-            .filter_map(|i| i.as_str().map(String::from))
+            .flat_map(|i| match i {
+                // include: - ./f.yml  or  - {path: ./f.yml}
+                Value::String(s) => vec![s.clone()],
+                Value::Mapping(m) => ["path", "file"]
+                    .iter()
+                    .filter_map(|k| m.get(Value::String(k.to_string())))
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+                _ => vec![],
+            })
             .collect(),
         _ => vec![],
     };
@@ -562,5 +586,202 @@ services:
         assert!(violations(y)
             .iter()
             .any(|v| v.rule == "no_external_extends"));
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use crate::config::{ComposePolicy, ListRule};
+
+    fn policy() -> ComposePolicy {
+        ComposePolicy {
+            allowed_bind_sources: vec!["/services/**".into()],
+            cap_add: ListRule::allowlist(vec!["NET_BIND_SERVICE".into()]),
+            deny_root_user: true,
+            ..ComposePolicy::strict_defaults()
+        }
+    }
+
+    fn v(y: &str) -> Vec<PolicyViolation> {
+        validate_compose(y, &policy())
+    }
+    fn has(y: &str, rule: &str) -> bool {
+        v(y).iter().any(|x| x.rule == rule)
+    }
+
+    #[test]
+    fn host_namespace_variants() {
+        for kv in [
+            "pid: host",
+            "ipc: host",
+            "uts: host",
+            "cgroup: host",
+            "network_mode: host",
+            "userns_mode: host",
+            "network_mode: service:victim",
+            "pid: container:abc",
+        ] {
+            let y = format!("services:\n  x:\n    image: a\n    {kv}\n");
+            assert!(has(&y, "deny_host_namespaces"), "{kv} not denied");
+        }
+    }
+
+    #[test]
+    fn root_user_variants() {
+        for u in ["user: root", "user: \"0\"", "user: 0", "user: \"0:0\""] {
+            let y = format!("services:\n  x:\n    image: a\n    {u}\n");
+            assert!(has(&y, "deny_root_user"), "{u} not denied");
+        }
+        let y = "services:\n  x:\n    image: a\n    user: \"1000:1000\"\n";
+        assert!(!has(y, "deny_root_user"));
+    }
+
+    #[test]
+    fn cap_all_and_case() {
+        assert!(has(
+            "services:\n  x:\n    image: a\n    cap_add: [ALL]\n",
+            "cap_add"
+        ));
+        // allowlist mode is exact-match: lowercase is NOT allowed either
+        assert!(has(
+            "services:\n  x:\n    image: a\n    cap_add: [sys_admin]\n",
+            "cap_add"
+        ));
+    }
+
+    #[test]
+    fn denylist_mode_blocks_dangerous() {
+        let p = ComposePolicy {
+            cap_add: ListRule {
+                mode: crate::config::ListRuleMode::Denylist,
+                list: vec!["SYS_ADMIN".into(), "SYS_PTRACE".into()],
+            },
+            ..policy()
+        };
+        let y = "services:\n  x:\n    image: a\n    cap_add: [SYS_ADMIN]\n";
+        assert!(validate_compose(y, &p).iter().any(|x| x.rule == "cap_add"));
+    }
+
+    #[test]
+    fn devices_denied() {
+        for d in [
+            "devices: [/dev/kmsg]",
+            "devices: [/dev/mem:/dev/mem]",
+            "devices: /dev/fuse",
+        ] {
+            let y = format!("services:\n  x:\n    image: a\n    {d}\n");
+            assert!(has(&y, "deny_devices"), "{d} not denied");
+        }
+    }
+
+    #[test]
+    fn security_opt_unconfined_denied() {
+        for so in [
+            "apparmor:unconfined",
+            "seccomp:unconfined",
+            "seccomp=unconfined",
+            "label:disable",
+            "no-new-privileges:false",
+        ] {
+            let y = format!("services:\n  x:\n    image: a\n    security_opt: [\"{so}\"]\n");
+            assert!(has(&y, "deny_isolation_overrides"), "{so} not denied");
+        }
+    }
+
+    #[test]
+    fn bind_source_tricks() {
+        for (src, rule) in [
+            ("/etc/shadow", "allowed_bind_sources"),
+            ("/services/x/../../../etc/passwd", "no_path_escape"),
+            ("~/secret", "no_home_expand"),
+            ("/services/x/.restic_password", "deny_secret_mount"),
+            ("/run/docker.sock", "deny_docker_socket"),
+            (
+                "/var/run/containerd/containerd.sock",
+                "allowed_bind_sources",
+            ),
+        ] {
+            let y = format!("services:\n  x:\n    image: a\n    volumes:\n      - {src}:/mnt\n");
+            assert!(has(&y, rule), "{src} not flagged by {rule}");
+        }
+    }
+
+    #[test]
+    fn long_syntax_bind_checked() {
+        let y = r#"
+services:
+  x:
+    image: a
+    volumes:
+      - { type: bind, source: /etc, target: /etc }
+"#;
+        assert!(has(y, "allowed_bind_sources"));
+        assert!(has(y, "deny_bind_targets"));
+    }
+
+    #[test]
+    fn registry_allowlist() {
+        let p = ComposePolicy {
+            allowed_registries: vec!["ghcr.io".into(), "docker.io".into()],
+            ..policy()
+        };
+        let bad = "services:\n  x:\n    image: evil.example.com/x:latest\n";
+        assert!(validate_compose(bad, &p)
+            .iter()
+            .any(|v| v.rule == "allowed_registries"));
+        let ok = "services:\n  x:\n    image: ghcr.io/org/x:latest\n";
+        assert!(!validate_compose(ok, &p)
+            .iter()
+            .any(|v| v.rule == "allowed_registries"));
+        // bare names (docker.io implied) do not match "docker.io" prefix:
+        // registry is "library/nginx"-less → "nginx" — denied, by design.
+        let bare = "services:\n  x:\n    image: nginx:latest\n";
+        assert!(validate_compose(bare, &p)
+            .iter()
+            .any(|v| v.rule == "allowed_registries"));
+    }
+
+    #[test]
+    fn port_range_variants() {
+        for spec in [
+            "\"22:22\"",
+            "\"127.0.0.1:22:22\"",
+            "\"443:443/tcp\"",
+            "{ published: 80, target: 80 }",
+        ] {
+            let y = format!("services:\n  x:\n    image: a\n    ports:\n      - {spec}\n");
+            assert!(has(&y, "allowed_port_range"), "{spec} not denied");
+        }
+        // container-only port has no host port → allowed
+        let y = "services:\n  x:\n    image: a\n    ports:\n      - \"8080\"\n";
+        assert!(!has(y, "allowed_port_range"));
+    }
+
+    #[test]
+    fn toplevel_include_escape_denied() {
+        for inc in ["./ok.yml", "../evil.yml", "/etc/compose.yml"] {
+            let y = format!("include:\n  - {inc}\nservices: {{}}\n");
+            let denied = inc != "./ok.yml";
+            assert_eq!(has(&y, "no_external_extends"), denied, "{inc}");
+        }
+        // object form
+        let y = "include:\n  - { path: ../x.yml }\nservices: {}\n";
+        assert!(has(y, "no_external_extends"));
+    }
+
+    #[test]
+    fn service_count_limit() {
+        let mut y = String::from("services:\n");
+        for i in 0..21 {
+            y.push_str(&format!("  s{i}:\n    image: a\n"));
+        }
+        assert!(has(&y, "max_services"));
+    }
+
+    #[test]
+    fn non_mapping_service_flagged() {
+        let y = "services:\n  x: privileged\n";
+        assert!(has(y, "shape"));
     }
 }

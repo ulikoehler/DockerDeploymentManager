@@ -456,9 +456,12 @@ pub fn verify_webhook(
         .clone()
         .or_else(|| secret_env.as_ref().and_then(|e| std::env::var(e).ok()));
     let Some(secret) = secret else { return false };
+    if secret.is_empty() {
+        return false; // an empty secret must never authenticate anything
+    }
     // GitLab: plain token compare
     if let Some(t) = gitlab_token {
-        return t == secret;
+        return !t.is_empty() && t == secret;
     }
     // GitHub/generic: HMAC-SHA256
     if let Some(sig) = sig_header.and_then(|s| s.strip_prefix("sha256=")) {
@@ -548,5 +551,127 @@ mod tests {
         // gitlab token path
         assert!(verify_webhook(&secret, &None, None, Some("s3cret"), body));
         assert!(!verify_webhook(&secret, &None, None, Some("wrong"), body));
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn token_scrubbed_from_errors() {
+        let mut c = AppConfig::default();
+        c.gitops.token = Some("ghp_sup3rsecret".into());
+        let e =
+            anyhow::anyhow!("remote set-url https://x-access-token:ghp_sup3rsecret@h/r.git failed");
+        let out = format!("{:#}", scrub(e, &c));
+        assert!(!out.contains("ghp_sup3rsecret"), "{out}");
+        assert!(out.contains("***"));
+    }
+
+    #[test]
+    fn token_env_scrubbed_from_errors() {
+        let mut c = AppConfig::default();
+        c.gitops.token_env = Some("DDM_TEST_GITOPS_TOK".into());
+        std::env::set_var("DDM_TEST_GITOPS_TOK", "envtok123");
+        let e = anyhow::anyhow!("git fetch https://x-access-token:envtok123@h/r failed");
+        let out = format!("{:#}", scrub(e, &c));
+        assert!(!out.contains("envtok123"), "{out}");
+    }
+
+    #[test]
+    fn remote_url_without_token_stays_plain() {
+        let mut c = AppConfig::default();
+        c.gitops.url = "https://github.com/x/y.git".into();
+        assert_eq!(remote_url(&c), "https://github.com/x/y.git");
+        // token only applies to https — ssh/file urls untouched
+        c.gitops.token = Some("t".into());
+        c.gitops.url = "git@h:x/y.git".into();
+        assert_eq!(remote_url(&c), "git@h:x/y.git");
+    }
+
+    #[test]
+    fn webhook_rejects_malformed_signatures() {
+        let secret = Some("s".into());
+        let body = b"x";
+        for sig in [
+            "",
+            "sha256=",
+            "md5=abc",
+            "sha256=zz",
+            "sha256=abc",
+            "abc",
+            "SHA256=aaaa",
+        ] {
+            assert!(
+                !verify_webhook(&secret, &None, Some(sig), None, body),
+                "{sig:?} accepted"
+            );
+        }
+        // empty secret is never valid
+        assert!(!verify_webhook(
+            &Some(String::new()),
+            &None,
+            None,
+            Some(""),
+            body
+        ));
+    }
+
+    #[test]
+    fn webhook_secret_from_env() {
+        std::env::set_var("DDM_TEST_GITOPS_WH", "envsecret");
+        let env = Some("DDM_TEST_GITOPS_WH".to_string());
+        assert!(verify_webhook(&None, &env, None, Some("envsecret"), b"x"));
+        assert!(!verify_webhook(&None, &env, None, Some("wrong"), b"x"));
+    }
+
+    #[test]
+    fn gitlab_and_github_secrets_not_cross_verified() {
+        // a gitlab token must not satisfy an HMAC check and vice versa
+        let secret = Some("tok".into());
+        assert!(!verify_webhook(
+            &secret,
+            &None,
+            Some("sha256=tok"),
+            None,
+            b"b"
+        ));
+        // correct gitlab token with a *wrong* hmac present → token wins,
+        // but a wrong gitlab token + right hmac must also verify
+        use hmac::{Hmac, Mac};
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(b"tok").unwrap();
+        mac.update(b"b");
+        let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        // gitlab path takes precedence when the header is present:
+        // a correct HMAC but wrong gitlab token still fails
+        assert!(!verify_webhook(
+            &secret,
+            &None,
+            Some(&sig),
+            Some("bad"),
+            b"b"
+        ));
+    }
+
+    #[test]
+    fn users_file_protected_in_config_target() {
+        let c = AppConfig {
+            users_file: "myusers.yml".into(),
+            ..Default::default()
+        };
+        let t = GitOpsTarget {
+            into: GitOpsTargetKind::Config,
+            path: "config".into(),
+        };
+        let p = protected_set(&c, &t);
+        assert!(p.contains("myusers.yml"));
+        assert!(p.contains(".git"));
+        let t2 = GitOpsTarget {
+            into: GitOpsTargetKind::Services,
+            path: "s".into(),
+        };
+        let p2 = protected_set(&c, &t2);
+        assert!(!p2.contains("myusers.yml"));
     }
 }

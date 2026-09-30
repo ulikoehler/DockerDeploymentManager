@@ -291,3 +291,87 @@ mod tests {
         assert!(write_file(t.path(), ".git/x", "no").is_err());
     }
 }
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn traversal_variants_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for rel in [
+            "..",
+            "../x",
+            "a/../../x",
+            "a/../..",
+            "..\\x",
+            "a\\b",
+            "/etc/passwd",
+            "\\abs",
+            "a/b/../../../etc",
+            "x/./../../y",
+            "dir/../..",
+        ] {
+            assert!(resolve(root, rel).is_err(), "{rel:?} resolved");
+        }
+    }
+
+    #[test]
+    fn denied_paths_anywhere_in_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for rel in [
+            ".git",
+            ".git/config",
+            "sub/.git/HEAD",
+            "a/b/.git/x",
+            ".restic_password",
+            "data/.restic_password",
+            ".restic_inited",
+            "x/.restic_inited",
+        ] {
+            assert!(resolve(root, rel).is_err(), "{rel:?} allowed");
+        }
+    }
+
+    #[test]
+    fn nested_symlink_escape_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "x").unwrap();
+        // mid-path symlink: sub/link -> outside, resolve "sub/link/secret.txt"
+        fs::create_dir(root.join("sub")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("sub/link")).unwrap();
+        assert!(resolve(root, "sub/link/secret.txt").is_err());
+        // even deeper nonexistent tail
+        assert!(resolve(root, "sub/link/a/b/c").is_err());
+        // file itself is a symlink
+        std::os::unix::fs::symlink(outside.path().join("secret.txt"), root.join("leak.txt"))
+            .unwrap();
+        assert!(resolve(root, "leak.txt").is_err());
+    }
+
+    #[test]
+    fn dot_segments_inside_stay_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("a")).unwrap();
+        fs::write(root.join("a/f"), "x").unwrap();
+        // "a/./f" is fine — CurDir components are dropped
+        assert!(resolve(root, "a/./f").unwrap().ends_with("a/f"));
+        // "a/../a/f" — ParentDir rejected even though it resolves inside
+        assert!(resolve(root, "a/../a/f").is_err());
+    }
+
+    #[test]
+    fn empty_and_dot_resolve_to_root_not_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = resolve(dir.path(), "").unwrap();
+        assert_eq!(r, dir.path().canonicalize().unwrap());
+        let r = resolve(dir.path(), ".").unwrap();
+        assert_eq!(r, dir.path().canonicalize().unwrap());
+    }
+}

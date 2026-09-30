@@ -1404,3 +1404,45 @@ mod tests {
         assert!(r.is_err());
     }
 }
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn gitops_target_paths_cannot_escape() {
+        for bad in ["../x", "/abs", "\\abs", "a//b", "a/../b", "..", ""] {
+            let mut c = AppConfig::default();
+            c.gitops.targets.push(GitOpsTarget {
+                into: GitOpsTargetKind::Config,
+                path: bad.into(),
+            });
+            assert!(validate_config(&c).is_err(), "{bad:?} accepted");
+        }
+        let mut c = AppConfig::default();
+        c.gitops.targets.push(GitOpsTarget {
+            into: GitOpsTargetKind::Services,
+            path: "services/sub".into(),
+        });
+        assert!(validate_config(&c).is_ok());
+    }
+
+    #[test]
+    fn gitops_enabled_without_url_rejected() {
+        let mut c = AppConfig::default();
+        c.gitops.enabled = true;
+        assert!(validate_config(&c).is_err());
+        c.gitops.url = "https://x/y.git".into();
+        assert!(validate_config(&c).is_ok());
+    }
+
+    #[test]
+    fn duplicate_notifier_ids_rejected() {
+        let mut c = AppConfig::default();
+        let n = serde_yaml::from_str::<NotifierConfig>("type: webhook\nid: dup\nurl: https://x\n")
+            .unwrap();
+        c.monitoring.notifiers.push(n.clone());
+        c.monitoring.notifiers.push(n);
+        assert!(validate_config(&c).is_err());
+    }
+}

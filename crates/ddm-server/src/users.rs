@@ -354,3 +354,74 @@ pub fn parse_access_spec(spec: &str, effect: AccessEffect) -> Result<AccessRule>
         effect,
     })
 }
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn wrong_password_never_verifies() {
+        let h = hash_password("correct horse battery staple").unwrap();
+        for pw in [
+            "",
+            "correct horse battery stapl",
+            "correct horse battery staple ",
+            "CORRECT HORSE BATTERY STAPLE",
+            "\u{0}correct horse battery staple",
+        ] {
+            assert!(!verify_password(pw, &h), "{pw:?} verified");
+        }
+        assert!(verify_password("correct horse battery staple", &h));
+    }
+
+    #[test]
+    fn malformed_hashes_fail_closed() {
+        for h in ["", "x", "$argon2id$garbage", "plaintext", "$2y$10$fake"] {
+            assert!(!verify_password("anything", h), "{h:?} verified");
+        }
+    }
+
+    #[test]
+    fn generated_passwords_are_strong_and_unique() {
+        let a = generate_password();
+        let b = generate_password();
+        assert_eq!(a.len(), 24);
+        assert_ne!(a, b);
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn access_spec_validates_patterns_at_write_time() {
+        // invalid regex/glob cannot be persisted via the CLI
+        assert!(parse_access_spec("regex:(", AccessEffect::Allow).is_err());
+        assert!(parse_access_spec("glob:[", AccessEffect::Allow).is_err());
+        assert!(parse_access_spec("wat:x", AccessEffect::Allow).is_err());
+        assert!(parse_access_spec("nocolon", AccessEffect::Allow).is_err());
+        assert!(parse_access_spec("exact:svc", AccessEffect::Deny).is_ok());
+        assert!(parse_access_spec("regex:^prod-", AccessEffect::Allow).is_ok());
+        // empty pattern is technically a valid (match-nothing) glob — but
+        // empty exact is fine too; ensure no panic
+        let _ = parse_access_spec("glob:", AccessEffect::Allow);
+    }
+
+    #[tokio::test]
+    async fn authenticate_rejects_unknown_and_wrong() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("users.yaml");
+        let mut f = UsersFile::default();
+        f.users.push(User {
+            name: "bob".into(),
+            password_hash: hash_password("pw1").unwrap(),
+            roles: vec!["viewer".into()],
+            access: vec![],
+            features: UserFeatures::default(),
+            compose_policy: None,
+        });
+        write_users_atomic(&path, &f).unwrap();
+        let store = UserStore::load(&path).unwrap();
+        assert!(store.authenticate("bob", "pw1").await.is_some());
+        assert!(store.authenticate("bob", "wrong").await.is_none());
+        assert!(store.authenticate("mallory", "pw1").await.is_none());
+        assert!(store.authenticate("bob", "").await.is_none());
+    }
+}

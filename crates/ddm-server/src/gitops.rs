@@ -291,3 +291,90 @@ mod tests {
         assert!(!valid_clone_url(""));
     }
 }
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn ref_injection_rejected() {
+        for bad in [
+            "--upload-pack=evil",
+            "--exec=sh",
+            "-oProxyCommand=x",
+            "$(rm -rf /)",
+            "`id`",
+            "a;cat /etc/shadow",
+            "a|nc x 1",
+            "a\nevil",
+            "a b",
+            "a'b",
+            "a\"b",
+            "a..b",
+            "a//../../etc",
+            "HEAD@{upstream}",
+            "",
+            "a?b",
+            "a*b",
+            "a[b",
+            "a~b",
+            "a^b",
+            "a:b",
+            "a\\b",
+        ] {
+            assert!(!valid_ref(bad), "{bad:?} accepted as ref");
+        }
+        for ok in ["main", "origin/main", "feature/x_y.z@1", "v2.0"] {
+            assert!(valid_ref(ok), "{ok:?} rejected");
+        }
+    }
+
+    #[test]
+    fn clone_url_flag_and_scheme_injection() {
+        for bad in [
+            "--config=core.sshCommand=evil",
+            "-c x=y",
+            "ext::sh -c id",
+            "fd::/x",
+            // javascript/data/other schemes
+            "javascript:alert(1)",
+            "data:text/plain,x",
+            "ftp://h/x",
+        ] {
+            assert!(!valid_clone_url(bad), "{bad:?} accepted");
+        }
+    }
+
+    #[test]
+    fn checkout_script_never_emits_raw_ref() {
+        let dir = Path::new("/tmp/svc");
+        // even a ref that passed validation is single-quoted in the script
+        let s = op_script("checkout", dir, Some("feature/x")).unwrap();
+        assert!(s.contains("git checkout 'feature/x'"), "{s}");
+        // hostile ref is rejected before reaching the script
+        assert!(op_script("checkout", dir, Some("a;rm -rf /")).is_err());
+        assert!(op_script("checkout", dir, Some("$(id)")).is_err());
+        assert!(op_script("checkout", dir, Some("--orphan")).is_err());
+    }
+
+    #[test]
+    fn clone_target_stays_inside_service_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // path escapes via clone rel are rejected by files::resolve
+        assert!(clone_script(dir.path(), "https://h/r.git", "../x", None).is_err());
+        assert!(clone_script(dir.path(), "https://h/r.git", "/abs", None).is_err());
+        assert!(clone_script(dir.path(), "https://h/r.git", ".git/x", None).is_err());
+        // url with a quote can't break out of shell_word quoting
+        let s = clone_script(dir.path(), "https://h/r'evil.git", "sub", None).unwrap();
+        assert!(s.contains("'https://h/r'\\''evil.git'"), "{s}");
+    }
+
+    #[test]
+    fn service_dir_path_is_shell_quoted() {
+        let dir = Path::new("/opt/svc with space/$(evil)");
+        let s = op_script("pull", dir, None).unwrap();
+        assert!(s.contains("'/opt/svc with space/$(evil)'"), "{s}");
+        assert!(!s.contains("cd /opt/svc"), "{s}");
+    }
+}
