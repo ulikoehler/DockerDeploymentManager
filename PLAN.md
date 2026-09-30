@@ -23,6 +23,10 @@ inspired by `~/dev/Noxeco/NoxecoDeploymentManager` but fully vendor-neutral.
 - **Compose + systemd unit editing** through the API/UI.
 - **Compose security policy** engine with sane defaults (deny `privileged`,
   host namespaces, docker.sock mounts, …) and per-user opt-out profiles.
+- **Backup management**: generalized restic integration — per-service repos
+  under a configurable base/prefix, generated `backup.sh`, streamed stdin
+  dumps (pg_dump-style), and host systemd timers; run/check/snapshots/
+  forget/restore via API, UI and client.
 - **Generic command framework** (parity with the original): config-defined
   sections of parameterized command sequences.
 - **Python client library + CLI** mirroring the API.
@@ -76,6 +80,7 @@ crates/
       services.rs          service registry: discovery, meta, lifecycle
       exec.rs              command execution engine + broadcast log channels
       commands.rs          generic config command items (sections/items)
+      backup.rs            restic config, backup.sh render, timers, snapshots
       logs.rs              log filtering pipeline (grep/regex/since/stream)
       audit.rs             audit log (ring buffer + optional file append)
       ws.rs                websocket protocol & handlers
@@ -100,7 +105,7 @@ web/
       ddm-app.ts ddm-login.ts ddm-service-list.ts ddm-service-detail.ts
       ddm-log-viewer.ts ddm-compose-editor.ts ddm-unit-editor.ts
       ddm-service-wizard.ts ddm-user-list.ts ddm-user-edit.ts
-      ddm-command-panel.ts ddm-exec-output.ts
+      ddm-command-panel.ts ddm-exec-output.ts ddm-backup-panel.ts
   test/ (vitest: matchers, log filter helpers)
 client/
   pyproject.toml README.md
@@ -110,6 +115,7 @@ client/
 examples/
   config.yaml users.yaml
   services/hello-world/docker-compose.yml
+  services/pg-app/{docker-compose.yml,meta.yaml}   # stdin_dump example
   templates/                 service templates
   systemd/ddm.service        unit template example
   deploy/docker-compose.yml  self-deployment example
@@ -167,7 +173,8 @@ server:
   cors_origins: []                    # empty = same-origin only
 
 paths:
-  services_root: /services
+  services_root: /services            # path inside the container
+  host_services_root: /opt/services   # same dir as seen by the HOST (units, backup.sh)
   compose_file: docker-compose.yml    # also accepts compose.yaml on discovery
   host_systemd_dir: /host/systemd
   host_exec: nsenter                  # nsenter | local
@@ -200,6 +207,24 @@ security:
       max_services_per_compose: 20
     relaxed: { ...subset of strict... }
   unit_edit_requires: admin           # role needed for raw unit file edits
+
+backup:
+  enabled: true
+  restic_binary: auto              # resolved on the HOST via HostExec `which`
+  # Per-service repo = base + service name ("directory/prefix" style).
+  # Works for rest-server ("rest:http://…/"), s3 ("s3:…/prefix/"), local, sftp.
+  repository_base: "rest:http://restic:pass@10.1.2.3:16383/"
+  # repository_template: "{base}{service}"  # override; {base},{service} subst.
+  password_mode: per_service_file  # .restic_password in the service dir (0600)
+  extra_env: {}                    # e.g. AWS_ACCESS_KEY_ID for s3 backends
+  excludes: ["**/__pycache__", "*.tmp", "**/.git"]   # appended to per-svc list
+  retention:                       # optional forget --prune after each backup
+    keep_last: 7
+    keep_daily: 7
+    keep_weekly: 4
+  scheduler: systemd_timer         # systemd_timer | internal | none
+  on_calendar: "daily"             # timer schedule
+  unit_prefix: "ddm-backup"        # units: ddm-backup-<svc>.service/.timer
 
 service_templates:
   - id: generic-web
@@ -315,6 +340,24 @@ WebSockets authenticate via `Sec-WebSocket-Protocol: bearer.<token>`
   (`update` = pull + up -d --remove-orphans, the "deploy" op)
 - `GET /api/services/{name}/logs?tail=&since=&grep=&regex=&stream=&container=`
   → filtered snapshot
+
+### Backup (restic, see §8b)
+- `GET /api/services/{name}/backup` — effective backup config for the service
+- `PUT /api/services/{name}/backup` — update per-service backup config
+  (paths, excludes, stdin dumps, schedule enable)
+- `GET /api/services/{name}/backup/check` → `BackupCheckReport`:
+  `{password_file, script, repo_inited, timer_exists, timer_enabled,
+  timer_active, last_run, issues[]}` — same pattern as `unit/check`
+- `POST /api/services/{name}/backup/provision` — generate `.restic_password`,
+  `backup.sh`, run `restic init`, install + enable the timer (idempotent repair)
+- `POST /api/services/{name}/backup/run` → `{execution_id}` — run `backup.sh`
+  now, output streamed via `/ws/executions/{id}`
+- `GET /api/services/{name}/backup/snapshots` — `restic snapshots --json`
+- `POST /api/services/{name}/backup/forget` → `{execution_id}` — retention
+  (`forget --prune`) run
+- `POST /api/services/{name}/backup/restore` `{snapshot, target_dir}` →
+  `{execution_id}` — restores into `target_dir` (admin/unrestricted only;
+  in-place restore is documented as a manual op)
 
 ### Log streaming
 - `WS /ws/services/{name}/logs?follow=1&tail=&grep=&regex=&stream=` — live
@@ -460,6 +503,80 @@ active, in_sync}}` summary so the list view can badge unhealthy units. A
 "Check/Repair" action in `ddm-service-detail` runs `unit/check` and offers
 `regenerate` (+`enable`/`start`) when fixable issues exist.
 
+### 8b. Backup management (restic)
+
+Generalized version of the TechOverflow restic setup: each service gets a
+generated `backup.sh` in its directory, a `.restic_password` (0600,
+auto-generated, **never returned by the API**), a per-service repository
+formed by `repository_base + service name` (the "directory/prefix" scheme —
+`rest:http://host:port/<svc>`, `s3:bucket/prefix/<svc>`, local dir, sftp), a
+`.restic_inited` marker for one-time `restic init`, streamed pre-backup dumps
+via `docker compose exec -T … | restic backup --stdin`, and a host systemd
+service+timer for scheduling. Generated `backup.sh` (conceptual):
+
+```bash
+#!/bin/bash
+set -euo pipefail
+export NAME="{service}"
+export RESTIC_REPOSITORY="{repository}"          # base + name
+export RESTIC_PASSWORD_FILE="{dir}/.restic_password"
+{extra_env_exports}
+cd "{dir}"                                       # HOST path (host_services_root)
+
+[ -f ".restic_inited" ] || { restic init && touch .restic_inited; }
+
+# streamed stdin dumps (e.g. PostgreSQL)
+{for each stdin_dump:}
+{compose_bin} exec -T {dump.service} {dump.command} \
+  | restic --verbose backup --stdin --stdin-filename="{dump.filename}"
+{/for}
+
+restic --verbose backup {paths} {excludes...}
+restic forget --prune {retention_args}            # if retention configured
+```
+
+Per-service backup config lives in `meta.yaml` next to the compose file:
+
+```yaml
+backup:
+  enabled: true
+  paths: ["docker-compose.yml", "backup.sh", "data"]   # relative to svc dir
+  excludes: ["data/tmp"]
+  stdin_dumps:                       # the pg_dump pattern, generalized
+    - filename: "{service}.sql"      # or fixed name
+      service: database              # compose service to exec into
+      command: ["pg_dump", "-U", "${POSTGRES_USER}", "${POSTGRES_DB}"]
+      env_file: .env                 # optional; sourced for ${VAR} expansion
+  schedule_enabled: true             # install/enable the systemd timer
+```
+
+Details:
+
+- `backup.sh` and the timer units run on the **host** via `HostExec`
+  (restic must exist on the host — `restic_binary: auto` resolves it, and
+  `backup/check` reports `restic_missing` if absent). `WorkingDirectory` and
+  script paths use `paths.host_services_root` (the host-side equivalent of
+  the container's `services_root` mount — required anyway for §8a units).
+- Generated timer pair: `ddm-backup-<svc>.service` (`Type=oneshot`,
+  `ExecStart=<host_dir>/backup.sh`) + `ddm-backup-<svc>.timer`
+  (`OnCalendar=<on_calendar>`, `Persistent=true`); enabled via host
+  `systemctl`. `scheduler: internal` instead runs generated scripts on a
+  tokio interval; `none` = manual/API runs only.
+- `backup/provision` is idempotent: create password (pwgen-style random),
+  render script, `restic init`, write units, `daemon-reload`,
+  `enable --now <timer>`. `backup/check` issues: `password_missing`,
+  `script_missing`, `repo_not_inited`, `timer_missing`, `timer_disabled`,
+  `restic_missing`, `never_run` — all fixable via `provision`.
+- Snapshots/forget/restore run `restic --json` via HostExec with the
+  service's env; parse and return structured JSON. Restore requires
+  `edit_units`-equivalent elevation (admin or `compose_policy:
+  unrestricted`) and writes to an explicit `target_dir`.
+- `paths` in `meta.yaml` are validated: relative-only, no `..`, must exist
+  inside the service dir. Compose policy also forbids bind-mounting
+  `.restic_password` into containers.
+- Backup runs go through the normal execution engine — visible under
+  `/ws/executions/{id}` and in audit.
+
 ## 9. Frontend (Lit + TS)
 
 - `esbuild.mjs` bundles `web/src/main.ts` → `web/dist` (embedded via
@@ -480,6 +597,8 @@ active, in_sync}}` summary so the list view can badge unhealthy units. A
   - `ddm-service-wizard`: name + template or paste-compose + create-unit toggle.
   - `ddm-user-list` / `ddm-user-edit`: roles, feature toggles, matcher list
     editor (type/pattern/effect rows), policy select, password reset.
+  - `ddm-backup-panel` (in service detail): backup config form, provision /
+    check report, "run now", timer status, snapshot list, forget/restore.
   - `ddm-command-panel` + `ddm-exec-output`: render config sections; run
     commands and stream output via `/ws/executions/:id`.
 - `vitest` for pure helpers (pattern matching display, filter building).
@@ -503,6 +622,7 @@ CLI `ddm`: `login`, `services`, `status`, `logs [--follow --grep --regex
 --since --tail]`, `update|restart|start|stop [--unit|--all-allowed]`,
 `create --template|--compose`,
 `compose get|put`, `unit get|put|regenerate|check|repair`,
+`backup run|check|provision|snapshots|forget|restore`,
 `users list|add|passwd|access`, `exec <section> <item>` — mirroring
 `noxeco_manager.py` ergonomics, but talking to the real API (JWT bearer).
 Websocket via `websockets`; REST via `httpx`; `pytest` suite using
@@ -524,6 +644,9 @@ Websocket via `websockets`; REST via `httpx`; `pytest` suite using
     from the original), sequence stop-on-failure
   - cli: `user add/passwd/set-access` against a tempdir users.yaml (assert
     file round-trips, hashes verify, watcher-free standalone operation)
+  - backup: `backup.sh` render (repo URL templating, stdin dumps, excludes,
+    retention args), timer/service unit render, `BackupCheckReport` logic,
+    meta.yaml parse + path validation, password-file generation/permissions
 - **Integration tests** (`crates/ddm-server/tests/`): spin the axum `Router`
   against a `tempdir` services root with a **scripted `MockHostExec`** and a
   docker-socket shim; exercise login → service create → policy rejection →
@@ -544,8 +667,10 @@ Websocket via `websockets`; REST via `httpx`; `pytest` suite using
   hardening notes (why `privileged`/`pid:host` is needed, socket risk).
 - `docs/deployment.md`: self-install as compose service + optional systemd
   unit for the manager itself; upgrades.
-- `docs/web-ui.md`, `docs/client.md`, `docs/development.md`, and a
-  `docs/server-cli.md` covering in-container user management/recovery.
+- `docs/web-ui.md`, `docs/client.md`, `docs/development.md`, a
+  `docs/server-cli.md` covering in-container user management/recovery, and
+  `docs/backup.md` covering the restic setup end-to-end (incl. password
+  handling warnings from the article: back up `.restic_password` separately).
 - `examples/`: ready-to-run config, users (with a printed bootstrap-password
   note), hello-world service, template, unit template, client demo.
 
@@ -557,10 +682,13 @@ Websocket via `websockets`; REST via `httpx`; `pytest` suite using
 4. Execution engine + broadcast channels + WS streaming
 5. Service CRUD + compose policy validator + systemd unit management
 6. Generic command framework + systemd group endpoints (parity)
-7. Web UI (Lit): login, list/detail, logs, editors, wizard, users admin
-8. Python client + CLI + pytest suite
-9. Docs, examples, Dockerfile, self-compose, CI workflow
-10. Final verification: `cargo test`, `cargo clippy`, web build+tsc, pytest,
+7. Backup management: restic provisioning, script + timer render, run/check/
+   snapshots/forget/restore endpoints
+8. Web UI (Lit): login, list/detail, logs, editors, wizard, users admin,
+   backup panel
+9. Python client + CLI + pytest suite
+10. Docs, examples, Dockerfile, self-compose, CI workflow
+11. Final verification: `cargo test`, `cargo clippy`, web build+tsc, pytest,
     docker build, manual smoke checklist
 
 ## 14. Risks & open questions
@@ -575,6 +703,15 @@ Websocket via `websockets`; REST via `httpx`; `pytest` suite using
   model keeps unknown keys via catch-alls so nothing is silently dropped on
   round-trip edits.
 - **`docker compose` vs `docker-compose`**: configurable `compose_command`;
-  default `docker compose` (v2 plugin bundled in the image).
+  default `docker compose` (v2 plugin bundled in the image). Host-side units
+  and `backup.sh` use `systemd.compose_binary` resolved on the host — the two
+  are independent.
+- **restic on host**: backup scripts execute on the host via `HostExec`, so
+  the image stays slim; `backup/check` surfaces `restic_missing`. Alternative
+  `scheduler: internal` still shells out to host restic via nsenter.
+- **Backup secrets**: `.restic_password` is 0600, excluded from API reads and
+  compose bind-mount policy; `repository_base` may embed rest-server creds —
+  redacted in `GET /api/config`, and `extra_env` is the escape hatch for
+  backend creds (kept out of `meta.yaml`).
 - **users.yaml write-back**: atomic write (tmp + rename) so the file watcher
   doesn't half-load; guarded against the watch loop re-entering.
