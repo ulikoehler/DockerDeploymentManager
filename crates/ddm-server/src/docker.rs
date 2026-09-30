@@ -12,9 +12,9 @@ use std::sync::Mutex;
 pub struct ContainerInfo {
     pub id: String,
     pub name: String,
-    pub service: String, // compose service name (label)
-    pub state: String,   // created|running|paused|restarting|exited|...
-    pub status: String,  // human status incl. health
+    pub service: String,        // compose service name (label)
+    pub state: String,          // created|running|paused|restarting|exited|...
+    pub status: String,         // human status incl. health
     pub health: Option<String>, // healthy|unhealthy|starting|none
 }
 
@@ -25,8 +25,7 @@ pub struct LogLine {
     pub stream: String, // stdout|stderr
 }
 
-pub type LogStream =
-    Pin<Box<dyn futures::Stream<Item = Result<LogLine>> + Send>>;
+pub type LogStream = Pin<Box<dyn futures::Stream<Item = Result<LogLine>> + Send>>;
 
 /// Docker operations required by DDM. Abstracted so tests can mock.
 #[async_trait]
@@ -223,13 +222,7 @@ impl DockerApi for MockDocker {
         Ok(self.containers.lock().unwrap().clone())
     }
     async fn container_health(&self, id: &str) -> Result<Option<String>> {
-        Ok(self
-            .health
-            .lock()
-            .unwrap()
-            .get(id)
-            .cloned()
-            .unwrap_or(None))
+        Ok(self.health.lock().unwrap().get(id).cloned().unwrap_or(None))
     }
     async fn logs(
         &self,

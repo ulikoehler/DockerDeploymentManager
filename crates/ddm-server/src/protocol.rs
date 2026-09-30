@@ -4,9 +4,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
-    ExecutionStarted { id: String, title: String },
-    LogOutput { id: String, text: String, stream: String },
-    ExecutionFinished { id: String, success: bool },
+    ExecutionStarted {
+        id: String,
+        title: String,
+    },
+    LogOutput {
+        id: String,
+        text: String,
+        stream: String,
+    },
+    ExecutionFinished {
+        id: String,
+        success: bool,
+    },
 }
 
 /// Snapshot of a finished (or running) execution for the history API.

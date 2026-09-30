@@ -19,7 +19,9 @@ impl CompiledRule {
     pub fn compile(rule: &AccessRule) -> Option<Self> {
         let matcher = match rule.kind {
             AccessRuleType::Exact => CompiledMatcher::Exact(rule.pattern.clone()),
-            AccessRuleType::Glob => CompiledMatcher::Glob(Glob::new(&rule.pattern).ok()?.compile_matcher()),
+            AccessRuleType::Glob => {
+                CompiledMatcher::Glob(Glob::new(&rule.pattern).ok()?.compile_matcher())
+            }
             AccessRuleType::Regex => CompiledMatcher::Regex(Regex::new(&rule.pattern).ok()?),
         };
         Some(Self {
@@ -56,6 +58,7 @@ pub fn can_access_service(user: &User, service: &str, default: DefaultAccess) ->
 }
 
 /// Filter a service list to those the user may see.
+#[allow(dead_code)]
 pub fn filter_services<'a, I>(user: &User, services: I, default: DefaultAccess) -> Vec<String>
 where
     I: IntoIterator<Item = &'a String>,
@@ -99,7 +102,11 @@ pub fn valid_service_name(name: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-'))
         && !name.starts_with(['.', '-', '_'])
-        && name.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false)
+        && name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphanumeric())
+            .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -135,14 +142,22 @@ mod tests {
 
     #[test]
     fn glob_allow() {
-        let u = user(vec![rule(AccessRuleType::Glob, "web-*", AccessEffect::Allow)]);
+        let u = user(vec![rule(
+            AccessRuleType::Glob,
+            "web-*",
+            AccessEffect::Allow,
+        )]);
         assert!(can_access_service(&u, "web-1", DefaultAccess::Deny));
         assert!(!can_access_service(&u, "db-1", DefaultAccess::Deny));
     }
 
     #[test]
     fn regex_allow() {
-        let u = user(vec![rule(AccessRuleType::Regex, "^stg-[0-9]+$", AccessEffect::Allow)]);
+        let u = user(vec![rule(
+            AccessRuleType::Regex,
+            "^stg-[0-9]+$",
+            AccessEffect::Allow,
+        )]);
         assert!(can_access_service(&u, "stg-12", DefaultAccess::Deny));
         assert!(!can_access_service(&u, "stg-x", DefaultAccess::Deny));
     }

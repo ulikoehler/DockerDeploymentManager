@@ -1,0 +1,14 @@
+description: Postgres app with restic stdin dumps
+monitoring:
+  health:
+    kind: docker_healthcheck
+    interval_secs: 60
+    failure_threshold: 3
+backup:
+  enabled: true
+  paths: [docker-compose.yml, meta.yaml]
+  stdin_dumps:
+    - filename: app.sql
+      service: db
+      command: [pg_dump, "-U", "${POSTGRES_USER}", app]
+      env_file: .env

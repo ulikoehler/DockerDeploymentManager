@@ -30,8 +30,7 @@ fn build_globset(patterns: &[String]) -> Option<GlobSet> {
 }
 
 fn truthy(v: &Value) -> bool {
-    matches!(v, Value::Bool(true))
-        || matches!(v, Value::String(s) if s == "true" || s == "yes")
+    matches!(v, Value::Bool(true)) || matches!(v, Value::String(s) if s == "true" || s == "yes")
 }
 
 fn is_hostish(v: &Value) -> bool {
@@ -52,7 +51,11 @@ pub fn validate_compose(compose_yaml: &str, policy: &ComposePolicy) -> Vec<Polic
         }
     };
     if !doc.is_mapping() {
-        return vec![PolicyViolation::new("$", "parse", "compose file must be a mapping")];
+        return vec![PolicyViolation::new(
+            "$",
+            "parse",
+            "compose file must be a mapping",
+        )];
     }
 
     let mut out = Vec::new();
@@ -78,7 +81,11 @@ pub fn validate_compose(compose_yaml: &str, policy: &ComposePolicy) -> Vec<Polic
         let name = sname.as_str().unwrap_or("?").to_string();
         let base = format!("services.{name}");
         let Some(smap) = svc.as_mapping() else {
-            out.push(PolicyViolation::new(&base, "shape", "service must be a mapping"));
+            out.push(PolicyViolation::new(
+                &base,
+                "shape",
+                "service must be a mapping",
+            ));
             continue;
         };
 
@@ -107,7 +114,15 @@ fn check_service(
 
     // host namespaces
     if policy.deny_host_namespaces {
-        for k in ["pid", "network_mode", "ipc", "uts", "userns_mode", "cgroup", "cgroup_parent"] {
+        for k in [
+            "pid",
+            "network_mode",
+            "ipc",
+            "uts",
+            "userns_mode",
+            "cgroup",
+            "cgroup_parent",
+        ] {
             if let Some(v) = get(k) {
                 if is_hostish(v) || matches!(v, Value::String(s) if s == "host") {
                     out.push(PolicyViolation::new(
@@ -287,9 +302,11 @@ fn check_port(path: &str, v: &Value, policy: &ComposePolicy, out: &mut Vec<Polic
     let host_port = match v {
         Value::String(s) => host_port_of_short(s),
         Value::Number(n) => n.as_u64().map(|x| x as u16), // container-only → None ok
-        Value::Mapping(m) => m
-            .get(Value::String("published".to_string()))
-            .and_then(|p| p.as_str().and_then(|s| s.parse().ok()).or_else(|| p.as_u64().map(|x| x as u16))),
+        Value::Mapping(m) => m.get(Value::String("published".to_string())).and_then(|p| {
+            p.as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| p.as_u64().map(|x| x as u16))
+        }),
         _ => None,
     };
     if let Some(hp) = host_port {
@@ -315,7 +332,7 @@ fn parse_short_volume(spec: &str) -> (bool, Option<String>, Option<String>) {
         }
     } else {
         // named volume or container-path-only
-        (false, None, spec.split(':').nth(0).map(String::from))
+        (false, None, spec.split(':').next().map(String::from))
     }
 }
 
@@ -361,8 +378,7 @@ fn check_volume(
             "mounting .restic_password into a container is forbidden",
         ));
     }
-    if policy.deny_docker_socket
-        && (src == "/var/run/docker.sock" || src.ends_with("/docker.sock"))
+    if policy.deny_docker_socket && (src == "/var/run/docker.sock" || src.ends_with("/docker.sock"))
     {
         out.push(PolicyViolation::new(
             path,
@@ -490,9 +506,7 @@ services:
     #[test]
     fn docker_sock_denied() {
         let y = "services:\n  x:\n    image: a\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n";
-        assert!(violations(y)
-            .iter()
-            .any(|v| v.rule == "deny_docker_socket"));
+        assert!(violations(y).iter().any(|v| v.rule == "deny_docker_socket"));
     }
 
     #[test]
@@ -505,7 +519,8 @@ services:
 
     #[test]
     fn named_volume_ok() {
-        let y = "services:\n  x:\n    image: a\n    volumes:\n      - data:/data\nvolumes:\n  data:\n";
+        let y =
+            "services:\n  x:\n    image: a\n    volumes:\n      - data:/data\nvolumes:\n  data:\n";
         assert!(violations(y).is_empty(), "{:?}", violations(y));
     }
 
@@ -520,17 +535,13 @@ services:
     #[test]
     fn low_port_denied() {
         let y = "services:\n  x:\n    image: a\n    ports:\n      - \"80:8080\"\n";
-        assert!(violations(y)
-            .iter()
-            .any(|v| v.rule == "allowed_port_range"));
+        assert!(violations(y).iter().any(|v| v.rule == "allowed_port_range"));
     }
 
     #[test]
     fn restic_password_mount_denied() {
         let y = "services:\n  x:\n    image: a\n    volumes:\n      - /services/x/.restic_password:/pw\n";
-        assert!(violations(y)
-            .iter()
-            .any(|v| v.rule == "deny_secret_mount"));
+        assert!(violations(y).iter().any(|v| v.rule == "deny_secret_mount"));
     }
 
     #[test]
@@ -546,7 +557,8 @@ services:
 
     #[test]
     fn extends_escape_denied() {
-        let y = "services:\n  x:\n    extends:\n      file: ../other/compose.yml\n      service: a\n";
+        let y =
+            "services:\n  x:\n    extends:\n      file: ../other/compose.yml\n      service: a\n";
         assert!(violations(y)
             .iter()
             .any(|v| v.rule == "no_external_extends"));

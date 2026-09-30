@@ -78,6 +78,7 @@ impl CompiledFilter {
 
 /// Filter a blob of log text line by line. Input lines keep their newline;
 /// `stream` is unknown for combined text → pass "stdout".
+#[allow(dead_code)]
 pub fn filter_text(text: &str, filter: &CompiledFilter) -> String {
     text.lines()
         .filter(|l| filter.matches(l, "stdout", None))
@@ -86,6 +87,7 @@ pub fn filter_text(text: &str, filter: &CompiledFilter) -> String {
 }
 
 /// Strip ANSI escape codes (for the UI log viewer / plain-text clients).
+#[allow(dead_code)]
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();

@@ -40,8 +40,7 @@ pub struct AppState {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -144,11 +143,10 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
         let dir = PathBuf::from(dir);
         if dir.is_dir() {
             info!("serving web UI from {}", dir.display());
-            app = app.fallback_service(
-                tower_http::services::ServeDir::new(&dir).not_found_service(
+            app =
+                app.fallback_service(tower_http::services::ServeDir::new(&dir).not_found_service(
                     tower_http::services::ServeFile::new(dir.join("index.html")),
-                ),
-            );
+                ));
         } else {
             warn!("web_dir {} not found — UI disabled", dir.display());
         }

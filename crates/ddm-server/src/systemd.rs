@@ -133,10 +133,7 @@ pub fn validate_unit(content: &str) -> Result<()> {
 }
 
 /// `systemctl is-enabled` / `is-active` on the host.
-pub async fn unit_state(
-    host: &Arc<dyn HostExec>,
-    unit: &str,
-) -> (Option<String>, Option<String>) {
+pub async fn unit_state(host: &Arc<dyn HostExec>, unit: &str) -> (Option<String>, Option<String>) {
     let enabled = host
         .run("systemctl", &["is-enabled".into(), unit.into()])
         .await
@@ -198,10 +195,7 @@ pub async fn check_unit(
     let (enabled, active) = unit_state(host, &unit).await;
     match enabled.as_deref() {
         Some("enabled") | Some("enabled-runtime") => {}
-        Some(other) => issues.push(issue(
-            "not_enabled",
-            format!("unit is {other}"),
-        )),
+        Some(other) => issues.push(issue("not_enabled", format!("unit is {other}"))),
         None => {
             if exists {
                 issues.push(issue("not_enabled", "unit is not enabled"));
@@ -232,7 +226,10 @@ pub async fn check_unit(
             ));
         }
         if !content.contains("Requires=docker.service") {
-            issues.push(issue("docker_dep_missing", "unit does not require docker.service"));
+            issues.push(issue(
+                "docker_dep_missing",
+                "unit does not require docker.service",
+            ));
         }
         let compose_file = svc
             .compose_path
@@ -265,10 +262,7 @@ pub async fn check_unit(
         }
         // systemd-analyze verify (best effort)
         if let Ok(out) = host
-            .run(
-                "systemd-analyze",
-                &["verify".into(), format!("{unit}")],
-            )
+            .run("systemd-analyze", &["verify".into(), unit.to_string()])
             .await
         {
             if !out.success() {

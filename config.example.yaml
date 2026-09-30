@@ -1,0 +1,170 @@
+# ddm config — hot-reloaded on change. Copy to your config dir as config.yaml.
+server:
+  listen: 0.0.0.0:8080
+  jwt_secret_env: DDM_JWT_SECRET
+  token_ttl_minutes: 720
+  web_dir: /opt/ddm/web          # bundled UI; omit to disable
+
+paths:
+  services_root: /opt/ddm-services          # same path in-container and on host
+  # host_services_root: /opt/ddm-services   # only needed if container path differs
+  compose_file: docker-compose.yml
+  host_systemd_dir: /host/systemd           # bind-mount of /etc/systemd/system
+  host_exec: nsenter                        # nsenter | local
+  nsenter_target: 1
+
+docker:
+  socket: /var/run/docker.sock
+  compose_command: [docker, compose]
+
+logging:
+  default_tail: 200
+  max_tail: 5000
+  history_executions: 200
+
+users_file: users.yaml          # relative to this file's directory
+
+security:
+  default_access: deny          # users with no matching rule see nothing
+  default_policy: strict
+  unit_edit_requires: admin
+  policies:
+    strict:
+      deny_privileged: true
+      deny_host_namespaces: true
+      deny_docker_socket: true
+      deny_devices: true
+      deny_root_user: false
+      deny_isolation_overrides: true
+      cap_add: { mode: allowlist, list: [] }
+      sysctls: { mode: allowlist, list: [] }
+      # bind mounts only allowed from these host-side source prefixes:
+      allowed_bind_sources:
+        - "/opt/ddm-services/**"
+      deny_bind_targets:
+        - "/"
+        - "/etc/**"
+        - "/root/**"
+        - "/var/run/**"
+        - "/proc/**"
+        - "/sys/**"
+      allowed_port_range: [1024, 65535]
+      allowed_registries: []    # empty = any registry
+      max_services_per_compose: 20
+    relaxed:
+      deny_privileged: true
+      deny_host_namespaces: true
+      deny_docker_socket: true
+      deny_devices: true
+      cap_add: { mode: denylist, list: [SYS_ADMIN, SYS_MODULE] }
+      allowed_bind_sources: ["/opt/**", "/srv/**"]
+      allowed_port_range: [80, 65535]
+      max_services_per_compose: 50
+
+service_templates:
+  - id: hello-world
+    title: Hello world (nginx)
+    description: Minimal nginx service with a generated systemd unit.
+    compose_template: /etc/ddm/templates/hello-compose.yml
+    create_unit: true
+    vars:
+      - { name: port, label: HTTP port, required: true, default: "8081" }
+
+systemd:
+  # unit_template: /etc/ddm/templates/unit.service   # optional override
+  compose_binary: auto          # auto | docker compose | /usr/bin/docker-compose
+  daemon_reload_after_change: true
+  groups:
+    - id: ddm-services
+      title: Managed services
+      unit_regex: "^ddm-svc-.*\\.service$|^web-.*\\.service$"
+      custom_commands:
+        - type: docker_compose_pull
+          id: pull
+          label: Pull images
+          work_dir_template: "/opt/ddm-services/{service}"
+        - type: docker_compose_pull_restart
+          id: update
+          label: Pull & restart
+          work_dir_template: "/opt/ddm-services/{service}"
+
+backup:
+  enabled: true
+  restic_binary: auto
+  repository_base: "rest:http://restic-server:8000/"
+  # repository_template: "s3:mybucket/ddm/{service}"
+  extra_env: {}                  # e.g. AWS_ACCESS_KEY_ID: ...  (prefer *_env on notifiers)
+  excludes: ["*.tmp", "cache/**"]
+  retention: { keep_last: 7, keep_daily: 7, keep_weekly: 4 }
+  scheduler: systemd_timer       # systemd_timer | internal | none
+  on_calendar: daily
+  unit_prefix: ddm-backup
+
+monitoring:
+  enabled: true
+  allow_auto_actions: true
+  check_interval_secs: 30
+  state_dir: /var/lib/ddm
+  defaults:
+    failure_threshold: 3
+    cooldown_secs: 300
+    notify: [slack-ops]
+  # global log alert rules applied to matching services:
+  rules:
+    - services: { glob: "*" }
+      log_alerts:
+        - id: panic
+          regex: "(?i)(panic|fatal error|segfault)"
+          container: "*"
+          cooldown_secs: 300
+  notifiers:
+    - type: slack_webhook
+      id: slack-ops
+      url_env: SLACK_WEBHOOK_URL
+    # - type: telegram
+    #   id: tg-alerts
+    #   bot_token_env: TELEGRAM_BOT_TOKEN
+    #   chat_id: "12345"
+    # - type: email
+    #   id: mail
+    #   smtp_host: smtp.example.com
+    #   smtp_port: 587
+    #   smtp_tls: starttls
+    #   username_env: SMTP_USER
+    #   password_env: SMTP_PASS
+    #   from: ddm@example.com
+    #   to: [ops@example.com]
+    # - type: webhook
+    #   id: ntfy
+    #   url: https://ntfy.example.com/ddm
+    #   headers: { "X-Priority": "4" }
+
+# Generic command sections (parity with the Noxeco manager).
+sections:
+  - title: System
+    items:
+      - title: Disk usage
+        description: df -h on the host
+        button_label: Run
+        command_sequence:
+          - program: df
+            args: [{ type: value, value: "-h" }]
+      - title: Docker prune (careful!)
+        description: Remove unused images
+        button_label: Prune
+        required_role: admin
+        parameters:
+          - type: boolean
+            name: all
+            label: Also remove all unused images (-a)
+            default: false
+        command_sequence:
+          - program: docker
+            args:
+              - { type: value, value: system }
+              - { type: value, value: prune }
+              - { type: value, value: "-f" }
+              - type: conditional
+                variable: all
+                true_args: ["-a"]
+                false_args: []

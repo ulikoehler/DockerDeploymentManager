@@ -1,0 +1,123 @@
+# API reference
+
+All endpoints return `{"success": true, "data": …}` or
+`{"success": false, "error": "…"}` with an HTTP error status.
+
+Auth: `POST /api/auth/login` → `{token}`; send as `Authorization: Bearer
+<token>`. WebSocket endpoints accept `?token=…` (browsers can't set headers).
+
+## Auth
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/auth/login` | `{name, password}` → `{token, name, roles, expires_at}` |
+| GET  | `/api/auth/me` | own profile (roles, features, access, compose_policy) |
+| POST | `/api/auth/logout-all` | admin; rotates JWT secret → all sessions die |
+
+## Services
+
+| Method | Path | Notes |
+|---|---|---|
+| GET    | `/api/services` | list with containers, unit + monitor summary (access-filtered) |
+| POST   | `/api/services` | create: `{name, compose?|template_id?, vars?, description?, create_unit?, enable?, start?}` |
+| GET    | `/api/services/{name}` | detail |
+| DELETE | `/api/services/{name}?down=&keep_dir=` | admin; optionally `down`s and removes unit |
+| POST   | `/api/services/{name}/actions` | `{action}`: `pull` `up` `down` `restart` `update` `start` `stop` `enable` `disable` → `{execution_id}` |
+| GET    | `/api/services/{name}/logs?tail=&since=&grep=&regex=&exclude_regex=&stream=&container=` | filtered snapshot |
+
+### Compose file
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/services/{name}/compose` | `{content, violations[]}` |
+| PUT | `/api/services/{name}/compose` | `{content, recreate?}` — validated against caller's policy; violations → 400 |
+
+### systemd unit
+
+| Method | Path | Notes |
+|---|---|---|
+| GET  | `/api/services/{name}/unit` | `{exists, content, rendered_template, generated}` |
+| PUT  | `/api/services/{name}/unit` | `{content, enable?, restart?}` — requires `unit_edit_requires` role or `edit_units` |
+| GET  | `/api/services/{name}/unit/check` | `UnitCheckReport`: `exists, enabled, active, in_sync, workdir_ok, issues[{code,message,fixable}]` |
+| POST | `/api/services/{name}/unit/regenerate` | `{enable?, start?}` — re-render template + write |
+
+Unit issue codes: `missing`, `not_enabled`, `inactive`, `workdir_mismatch`,
+`compose_mismatch`, `content_drift`, `docker_dep_missing`, `invalid_unit`,
+`check_error`.
+
+## Backup
+
+| Method | Path | Notes |
+|---|---|---|
+| GET  | `/api/services/{name}/backup` | `{enabled_global, repository, config}` |
+| PUT  | `/api/services/{name}/backup` | save `ServiceBackupConfig` into `meta.yaml` |
+| GET  | `/api/services/{name}/backup/check` | `BackupCheckReport` |
+| POST | `/api/services/{name}/backup/provision` | idempotent: password file, backup.sh, timer units, `restic init` |
+| POST | `/api/services/{name}/backup/run` | run `backup.sh` now → `{execution_id}` |
+| GET  | `/api/services/{name}/backup/snapshots` | `restic snapshots --json` |
+| POST | `/api/services/{name}/backup/forget` | `forget --prune` with configured retention |
+| POST | `/api/services/{name}/backup/restore` | `{snapshot, target_dir}` — admin or `unrestricted` only |
+
+## Monitoring
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/monitoring/status` | per-service check states (access-filtered) |
+| GET | `/api/monitoring/status/{service}` | one service |
+| GET | `/api/monitoring/events?service=&limit=` | alert history (max 512 retained) |
+| GET | `/api/services/{name}/monitoring` | `{config, state}` |
+| PUT | `/api/services/{name}/monitoring` | save `ServiceMonitoringConfig` into `meta.yaml` (regexes validated) |
+| POST | `/api/services/{name}/monitoring/test` | container health snapshot |
+| GET | `/api/monitoring/notifiers` | admin; secrets redacted |
+| POST | `/api/monitoring/notifiers/{id}/test` | `{message?}` — sends a test notification |
+
+## Users (admin)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET/POST   | `/api/users` | list / create `{name, password, roles?, access?, features?, compose_policy?}` |
+| GET/PUT/DELETE | `/api/users/{name}` | self may GET itself |
+| PUT | `/api/users/{name}/password` | `{password}` — self or admin |
+| PUT | `/api/users/{name}/access` | `[{type: exact|glob|regex, pattern, effect: allow|deny}]` |
+
+## Host systemd groups
+
+| Method | Path | Notes |
+|---|---|---|
+| GET  | `/api/systemd/groups` | configured groups + custom commands |
+| GET  | `/api/systemd/groups/{group}/status` | `systemctl list-units` filtered by group regex |
+| POST | `/api/systemd/groups/{group}/restart` | restart all matching units |
+| POST | `/api/systemd/groups/{group}/execute` | `{command_id}` — run a group custom command on all units |
+| POST | `/api/systemd/units/{unit}/restart` | |
+| POST | `/api/systemd/units/{unit}/execute` | `{command_id}` |
+| GET  | `/api/systemd/units/{unit}/logs?lines=` | `journalctl -u` |
+
+Unit names must match a configured group's `unit_regex` (admins bypass).
+
+## Generic commands
+
+| Method | Path | Notes |
+|---|---|---|
+| GET  | `/api/commands` | sections+items the caller may see (role-filtered) |
+| POST | `/api/commands/{section}/{item}` | `{params}` → `{execution_id}` |
+
+## Misc
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/health` | unauthenticated liveness |
+| GET | `/api/config` | admin; effective config with secrets redacted |
+| GET | `/api/config/status` | last reload `{ok, error, at}` |
+| GET | `/api/policy` | caller's effective compose policy |
+| GET | `/api/templates` | service templates |
+| GET | `/api/audit` | admin; in-memory audit ring |
+| GET | `/api/executions` `/api/executions/{id}` | execution history |
+
+## WebSockets
+
+| Path | Description |
+|---|---|
+| `WS /ws/services/{name}/logs?follow=1&tail=&grep=&regex=&exclude_regex=&stream=&container=` | live filtered log lines as `{container, service, stream, text}` JSON |
+| `WS /ws/executions/{id}` | execution stream: `{"type":"execution_started"|"log_output"|"execution_finished", "data":{...}}` |
+| `WS /ws/execute` | same, plus client may send `{"type":"run","section":i,"item":j,"params":{}}` |
+| `WS /ws/events` | monitoring events: `monitor_state`, `alert_fired`, `alert_resolved`, `auto_action`, `config_reloaded` |

@@ -288,7 +288,12 @@ fn file_name(p: &Path) -> String {
 // CLI-facing mutations (shared between HTTP handlers and the server CLI)
 // ---------------------------------------------------------------------------
 
-pub fn cli_add_user(file: &mut UsersFile, name: &str, password: &str, roles: Vec<String>) -> Result<()> {
+pub fn cli_add_user(
+    file: &mut UsersFile,
+    name: &str,
+    password: &str,
+    roles: Vec<String>,
+) -> Result<()> {
     if file.users.iter().any(|u| u.name == name) {
         anyhow::bail!("user '{name}' already exists");
     }

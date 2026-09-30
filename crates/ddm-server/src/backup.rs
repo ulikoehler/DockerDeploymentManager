@@ -236,9 +236,7 @@ pub async fn provision(
             bin = shell_quote(host_bin),
             marker = INITED_FILE,
         );
-        let out = host
-            .run("bash", &["-c".into(), script])
-            .await?;
+        let out = host.run("bash", &["-c".into(), script]).await?;
         done.push(format!("restic init exit {}", out.status));
     }
     Ok(done)
@@ -278,11 +276,7 @@ fn bissue(code: &str, msg: impl Into<String>) -> BackupIssue {
     }
 }
 
-pub async fn check(
-    cfg: &AppConfig,
-    host: &Arc<dyn HostExec>,
-    svc: &Service,
-) -> BackupCheckReport {
+pub async fn check(cfg: &AppConfig, host: &Arc<dyn HostExec>, svc: &Service) -> BackupCheckReport {
     let bcfg = svc.meta.backup.clone().unwrap_or_default();
     let mut issues = vec![];
 
@@ -326,7 +320,10 @@ pub async fn check(
         (None, None)
     };
     if timer_exists {
-        if !matches!(t_enabled.as_deref(), Some("enabled") | Some("enabled-runtime")) {
+        if !matches!(
+            t_enabled.as_deref(),
+            Some("enabled") | Some("enabled-runtime")
+        ) {
             issues.push(bissue("timer_disabled", "timer not enabled"));
         }
         if !matches!(t_active.as_deref(), Some("active")) {
@@ -349,7 +346,12 @@ pub async fn check(
         )
         .await
         .ok()
-        .map(|o| o.stdout.trim().trim_start_matches("ExecMainStartTimestamp=").to_string())
+        .map(|o| {
+            o.stdout
+                .trim()
+                .trim_start_matches("ExecMainStartTimestamp=")
+                .to_string()
+        })
         .filter(|s| !s.is_empty() && s != "n/a")
     } else {
         None
@@ -443,7 +445,11 @@ pub fn restore_script(
     snapshot: &str,
     target_dir: &str,
 ) -> Result<String> {
-    if snapshot.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '-')) && snapshot != "latest" {
+    if snapshot
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || c == '-'))
+        && snapshot != "latest"
+    {
         anyhow::bail!("invalid snapshot id");
     }
     let target = PathBuf::from(target_dir);
@@ -461,11 +467,12 @@ pub fn restore_script(
 
 /// Script to run the backup now.
 pub fn run_script(svc: &Service) -> String {
-    format!("{}", shell_quote(&svc.host_dir.join(SCRIPT_FILE).to_string_lossy()))
+    shell_quote(&svc.host_dir.join(SCRIPT_FILE).to_string_lossy()).to_string()
 }
 
 /// Expand `${VAR}` in a dump command from an env file's contents.
 /// (Used for validation of meta.yaml at save time.)
+#[allow(dead_code)]
 pub fn expand_env_vars(cmd: &[String], env: &HashMap<String, String>) -> Vec<String> {
     cmd.iter()
         .map(|a| {
@@ -479,16 +486,14 @@ pub fn expand_env_vars(cmd: &[String], env: &HashMap<String, String>) -> Vec<Str
 }
 
 /// Validate a StdinDump list against a compose file's service names.
+#[allow(dead_code)]
 pub fn validate_dumps(dumps: &[StdinDump], compose_services: &[String]) -> Result<()> {
     for d in dumps {
         if d.filename.is_empty() || d.filename.contains('/') || d.filename.contains("..") {
             anyhow::bail!("invalid stdin_dump filename '{}'", d.filename);
         }
         if !compose_services.iter().any(|s| s == &d.service) {
-            anyhow::bail!(
-                "stdin_dump service '{}' not in compose services",
-                d.service
-            );
+            anyhow::bail!("stdin_dump service '{}' not in compose services", d.service);
         }
         if d.command.is_empty() {
             anyhow::bail!("stdin_dump '{}' has empty command", d.filename);
@@ -546,8 +551,10 @@ mod tests {
     fn render_script() {
         let tmp = tempfile::tempdir().unwrap();
         let s = svc(tmp.path());
-        let mut bcfg = ServiceBackupConfig::default();
-        bcfg.paths = vec!["docker-compose.yml".into(), "data".into()];
+        let mut bcfg = ServiceBackupConfig {
+            paths: vec!["docker-compose.yml".into(), "data".into()],
+            ..Default::default()
+        };
         bcfg.stdin_dumps.push(StdinDump {
             filename: "pg-app.sql".into(),
             service: "db".into(),

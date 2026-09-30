@@ -807,7 +807,7 @@ fn default_button_label() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Parameter {
     String {
         name: String,
@@ -1045,28 +1045,27 @@ pub enum AutoAction {
 
 /// Load and validate config from a YAML file.
 pub fn load_config(path: &Path) -> Result<AppConfig> {
-    let f = std::fs::File::open(path)
-        .with_context(|| format!("opening config {}", path.display()))?;
-    let cfg: AppConfig = serde_yaml::from_reader(f)
-        .with_context(|| format!("parsing config {}", path.display()))?;
+    let f =
+        std::fs::File::open(path).with_context(|| format!("opening config {}", path.display()))?;
+    let cfg: AppConfig =
+        serde_yaml::from_reader(f).with_context(|| format!("parsing config {}", path.display()))?;
     validate_config(&cfg)?;
     Ok(cfg)
 }
 
 /// Semantic validation that serde can't express.
 pub fn validate_config(cfg: &AppConfig) -> Result<()> {
-    if !cfg.security.policies.contains_key(&cfg.security.default_policy) {
+    if !cfg
+        .security
+        .policies
+        .contains_key(&cfg.security.default_policy)
+    {
         anyhow::bail!(
             "security.default_policy '{}' is not defined in security.policies",
             cfg.security.default_policy
         );
     }
-    let ids: Vec<&str> = cfg
-        .monitoring
-        .notifiers
-        .iter()
-        .map(|n| n.id())
-        .collect();
+    let ids: Vec<&str> = cfg.monitoring.notifiers.iter().map(|n| n.id()).collect();
     let mut seen = std::collections::HashSet::new();
     for id in &ids {
         if !seen.insert(*id) {

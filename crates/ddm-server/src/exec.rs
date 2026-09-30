@@ -36,11 +36,7 @@ impl ExecutionManager {
     }
 
     pub fn subscribe(&self, id: &str) -> Option<broadcast::Receiver<ServerMessage>> {
-        self.channels
-            .lock()
-            .unwrap()
-            .get(id)
-            .map(|t| t.subscribe())
+        self.channels.lock().unwrap().get(id).map(|t| t.subscribe())
     }
 
     pub fn history(&self) -> Vec<ExecutionInfo> {
@@ -392,9 +388,7 @@ mod tests {
 
     #[test]
     fn arg_variable_skips_empty() {
-        let args = vec![CommandArg::Variable {
-            name: "x".into(),
-        }];
+        let args = vec![CommandArg::Variable { name: "x".into() }];
         assert!(build_args(&args, &p(&[("x", "")])).is_empty());
         assert_eq!(build_args(&args, &p(&[("x", "v")])), vec!["v"]);
         assert!(build_args(&args, &p(&[])).is_empty());
@@ -420,10 +414,7 @@ mod tests {
             flag: "--name".into(),
             variable: "name".into(),
         }];
-        assert_eq!(
-            build_args(&args, &p(&[("name", "x")])),
-            vec!["--name", "x"]
-        );
+        assert_eq!(build_args(&args, &p(&[("name", "x")])), vec!["--name", "x"]);
         assert!(build_args(&args, &p(&[])).is_empty());
     }
 }

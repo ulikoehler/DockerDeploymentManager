@@ -1,0 +1,13 @@
+# Trivial service to try out ddm. Deploy by copying this directory under
+# services_root, or POST /api/services?name=hello-world&template=hello-compose.
+services:
+  hello:
+    image: nginx:alpine
+    ports:
+      - "127.0.0.1:8088:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped

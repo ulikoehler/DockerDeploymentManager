@@ -121,8 +121,7 @@ fn load_users_file(config_path: &Path) -> Result<(UsersFile, PathBuf)> {
     let file = if users_path.exists() {
         let f = std::fs::File::open(&users_path)
             .with_context(|| format!("opening {}", users_path.display()))?;
-        serde_yaml::from_reader(f)
-            .with_context(|| format!("parsing {}", users_path.display()))?
+        serde_yaml::from_reader(f).with_context(|| format!("parsing {}", users_path.display()))?
     } else {
         UsersFile::default()
     };
@@ -199,13 +198,16 @@ pub fn run_user_command(config_path: &Path, cmd: &UserCmd) -> Result<()> {
                 .iter()
                 .find(|u| u.name == *name)
                 .ok_or_else(|| anyhow::anyhow!("user '{name}' not found"))?;
-            println!("{}", serde_yaml::to_string(&serde_json::json!({
-                "name": u.name,
-                "roles": u.roles,
-                "access": u.access,
-                "features": u.features,
-                "compose_policy": u.compose_policy,
-            }))?);
+            println!(
+                "{}",
+                serde_yaml::to_string(&serde_json::json!({
+                    "name": u.name,
+                    "roles": u.roles,
+                    "access": u.access,
+                    "features": u.features,
+                    "compose_policy": u.compose_policy,
+                }))?
+            );
         }
         UserCmd::Add {
             name,

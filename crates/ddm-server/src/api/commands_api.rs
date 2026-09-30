@@ -133,7 +133,12 @@ pub async fn run(
             .collect::<Vec<_>>()
             .join(" && ");
         state.exec.run_item(
-            host_shell_item(&item.title, &script, cfg.paths.host_exec, cfg.paths.nsenter_target),
+            host_shell_item(
+                &item.title,
+                &script,
+                cfg.paths.host_exec,
+                cfg.paths.nsenter_target,
+            ),
             HashMap::new(),
             &user.user.name,
             None,

@@ -1,0 +1,17 @@
+description: Example nginx service
+access: [glob:web-*]
+monitoring:
+  health:
+    kind: docker_healthcheck
+    interval_secs: 30
+    failure_threshold: 3
+    recovery_threshold: 2
+  log_alerts:
+    - id: errors
+      regex: "(?i)(error|fatal)"
+      exclude_regex: healthcheck
+      cooldown_secs: 300
+      max_per_cooldown: 5
+backup:
+  enabled: true
+  paths: [docker-compose.yml, meta.yaml]

@@ -24,9 +24,8 @@ pub fn render_template(
     host_dir: &str,
     vars: &HashMap<String, String>,
 ) -> Result<String> {
-    let raw = std::fs::read_to_string(&tpl.compose_template).with_context(|| {
-        format!("reading compose template {}", tpl.compose_template)
-    })?;
+    let raw = std::fs::read_to_string(&tpl.compose_template)
+        .with_context(|| format!("reading compose template {}", tpl.compose_template))?;
     let mut out = raw;
     out = out.replace("{service}", service);
     out = out.replace("{dir}", host_dir);

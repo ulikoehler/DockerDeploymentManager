@@ -70,8 +70,11 @@ pub async fn logout_all(
         return Err(crate::auth::forbidden());
     }
     state.jwt.rotate();
-    state
-        .audit
-        .record(&user.user.name, "logout_all", "sessions", "jwt secret rotated");
+    state.audit.record(
+        &user.user.name,
+        "logout_all",
+        "sessions",
+        "jwt secret rotated",
+    );
     Ok(ok(true))
 }

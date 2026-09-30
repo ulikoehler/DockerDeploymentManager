@@ -102,7 +102,10 @@ pub async fn list(
             .unwrap_or_default();
         let unit = unit_summary(&state, &svc.name).await;
         let monitor_state = monitor_states.get(&svc.name).map(|m| {
-            if m.checks.iter().any(|c| c.state == "down" || c.state == "firing") {
+            if m.checks
+                .iter()
+                .any(|c| c.state == "down" || c.state == "firing")
+            {
                 "alerting".to_string()
             } else {
                 "ok".to_string()
@@ -220,13 +223,8 @@ pub async fn create(
                 .find(|t| t.id == *tid)
                 .ok_or_else(|| bad_request("unknown template_id"))?;
             let host_dir = FsPath::new(cfg.paths.host_services_root()).join(&req.name);
-            crate::compose::render_template(
-                tpl,
-                &req.name,
-                &host_dir.to_string_lossy(),
-                &req.vars,
-            )
-            .map_err(|e| bad_request(e.to_string()))?
+            crate::compose::render_template(tpl, &req.name, &host_dir.to_string_lossy(), &req.vars)
+                .map_err(|e| bad_request(e.to_string()))?
         }
         _ => return Err(bad_request("provide exactly one of compose or template_id")),
     };
@@ -246,16 +244,18 @@ pub async fn create(
         }
     }
 
-    let dir = svc_ops::create_service_dir(&cfg, &req.name)
-        .map_err(|e| bad_request(e.to_string()))?;
+    let dir =
+        svc_ops::create_service_dir(&cfg, &req.name).map_err(|e| bad_request(e.to_string()))?;
     let compose_path = dir.join(&cfg.paths.compose_file);
     crate::compose::write_compose(&compose_path, &compose_text)
         .map_err(|e| internal(e.to_string()))?;
 
-    let mut meta = crate::config::ServiceMeta::default();
-    meta.description = req.description.clone().unwrap_or_default();
-    meta.created_by = Some(user.user.name.clone());
-    meta.template = req.template_id.clone();
+    let meta = crate::config::ServiceMeta {
+        description: req.description.clone().unwrap_or_default(),
+        created_by: Some(user.user.name.clone()),
+        template: req.template_id.clone(),
+        ..Default::default()
+    };
     svc_ops::save_meta(&dir, &meta).map_err(|e| internal(e.to_string()))?;
 
     // optional systemd unit
@@ -270,13 +270,19 @@ pub async fn create(
         if req.enable {
             let _ = state
                 .host
-                .run("systemctl", &["enable".into(), format!("{}.service", svc.name)])
+                .run(
+                    "systemctl",
+                    &["enable".into(), format!("{}.service", svc.name)],
+                )
                 .await;
         }
         if req.start {
             let _ = state
                 .host
-                .run("systemctl", &["start".into(), format!("{}.service", svc.name)])
+                .run(
+                    "systemctl",
+                    &["start".into(), format!("{}.service", svc.name)],
+                )
                 .await;
         }
     }
@@ -314,7 +320,10 @@ pub async fn delete(
     if unit.exists() {
         let _ = state
             .host
-            .run("systemctl", &["disable".into(), "--now".into(), format!("{name}.service")])
+            .run(
+                "systemctl",
+                &["disable".into(), "--now".into(), format!("{name}.service")],
+            )
             .await;
         let _ = std::fs::remove_file(&unit);
         let _ = state.host.run("systemctl", &["daemon-reload".into()]).await;
@@ -344,13 +353,16 @@ pub async fn get_compose(
     Path(name): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<ComposeResponse>>, Response> {
     let svc = require_service_access(&state, &user, &name).await?;
-    let content = crate::compose::read_compose(&svc.compose_path)
-        .map_err(|e| internal(e.to_string()))?;
+    let content =
+        crate::compose::read_compose(&svc.compose_path).map_err(|e| internal(e.to_string()))?;
     let violations = caller_policy(&state, &user)
         .await
         .map(|p| policy::validate_compose(&content, &p))
         .unwrap_or_default();
-    Ok(ok(ComposeResponse { content, violations }))
+    Ok(ok(ComposeResponse {
+        content,
+        violations,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -390,9 +402,12 @@ pub async fn put_compose(
         .record(&user.user.name, "compose_write", &name, "");
     let mut exec_id = None;
     if req.recreate {
-        exec_id = Some(run_compose_action(&state, &svc, &user, &["up", "-d", "--remove-orphans"]).await);
+        exec_id =
+            Some(run_compose_action(&state, &svc, &user, &["up", "-d", "--remove-orphans"]).await);
     }
-    Ok(ok(serde_json::json!({ "saved": true, "execution_id": exec_id })))
+    Ok(ok(
+        serde_json::json!({ "saved": true, "execution_id": exec_id }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -468,9 +483,7 @@ pub async fn put_unit(
             .run("systemctl", &["restart".into(), format!("{name}.service")])
             .await;
     }
-    state
-        .audit
-        .record(&user.user.name, "unit_write", &name, "");
+    state.audit.record(&user.user.name, "unit_write", &name, "");
     Ok(ok(true))
 }
 
@@ -578,11 +591,20 @@ async fn run_compose_action(
     );
     argv.extend(args.iter().map(|s| s.to_string()));
     let title = format!("compose {} ({})", args.join(" "), svc.name);
-    let script = format!("cd {} && {} {}", shell(&svc.dir.to_string_lossy()), prog, argv.join(" "));
+    let script = format!(
+        "cd {} && {} {}",
+        shell(&svc.dir.to_string_lossy()),
+        prog,
+        argv.join(" ")
+    );
     let item = shell_item(&title, &script, ".");
-    state
-        .exec
-        .run_item(item, HashMap::new(), &user.user.name, Some(svc.name.clone()), false)
+    state.exec.run_item(
+        item,
+        HashMap::new(),
+        &user.user.name,
+        Some(svc.name.clone()),
+        false,
+    )
 }
 
 fn shell(s: &str) -> String {
@@ -653,9 +675,12 @@ pub async fn action(
         }
         other => return Err(bad_request(format!("unknown action '{other}'"))),
     };
-    state
-        .audit
-        .record(&user.user.name, &format!("service_{}", req.action), &name, "");
+    state.audit.record(
+        &user.user.name,
+        &format!("service_{}", req.action),
+        &name,
+        "",
+    );
     Ok(ok(serde_json::json!({ "execution_id": execution_id })))
 }
 
@@ -874,7 +899,9 @@ pub async fn backup_forget(
         Some(name.clone()),
         true,
     );
-    state.audit.record(&user.user.name, "backup_forget", &name, "");
+    state
+        .audit
+        .record(&user.user.name, "backup_forget", &name, "");
     Ok(ok(serde_json::json!({ "execution_id": id })))
 }
 

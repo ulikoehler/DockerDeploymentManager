@@ -23,6 +23,7 @@ fn view(u: &User) -> UserView {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn require_admin(user: &AuthUser) -> Result<(), Response> {
     if user.user.is_admin() {
         Ok(())
@@ -81,11 +82,8 @@ pub async fn create(
         return Err(bad_request("name required; password min 8 chars"));
     }
     for r in &req.access {
-        crate::users::parse_access_spec(
-            &format!("{}:{}", r.kind.as_str(), r.pattern),
-            r.effect,
-        )
-        .map_err(|e| bad_request(format!("invalid access rule: {e}")))?;
+        crate::users::parse_access_spec(&format!("{}:{}", r.kind.as_str(), r.pattern), r.effect)
+            .map_err(|e| bad_request(format!("invalid access rule: {e}")))?;
     }
     state
         .users
@@ -144,7 +142,9 @@ pub async fn update(
         })
         .await
         .map_err(|e| not_found(e.to_string()))?;
-    state.audit.record(&user.user.name, "user_update", &name, "");
+    state
+        .audit
+        .record(&user.user.name, "user_update", &name, "");
     Ok(ok(view(&state.users.get(&name).await.unwrap())))
 }
 
@@ -162,7 +162,9 @@ pub async fn delete(
         .mutate(|f| crate::users::cli_remove_user(f, &name))
         .await
         .map_err(|e| not_found(e.to_string()))?;
-    state.audit.record(&user.user.name, "user_delete", &name, "");
+    state
+        .audit
+        .record(&user.user.name, "user_delete", &name, "");
     Ok(ok(true))
 }
 
@@ -203,11 +205,8 @@ pub async fn set_access(
 ) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
     require_admin(&user)?;
     for r in &rules {
-        crate::users::parse_access_spec(
-            &format!("{}:{}", r.kind.as_str(), r.pattern),
-            r.effect,
-        )
-        .map_err(|e| bad_request(format!("invalid access rule: {e}")))?;
+        crate::users::parse_access_spec(&format!("{}:{}", r.kind.as_str(), r.pattern), r.effect)
+            .map_err(|e| bad_request(format!("invalid access rule: {e}")))?;
     }
     let n = name.clone();
     state
@@ -228,5 +227,3 @@ pub async fn set_access(
         .record(&user.user.name, "user_access", &name, "");
     Ok(ok(true))
 }
-
-

@@ -40,6 +40,7 @@ fn unit_matches_group(cfg: &AppConfig, unit: &str) -> Option<String> {
 }
 
 /// Gate: systemd endpoints are for operator/admin by default.
+#[allow(clippy::result_large_err)]
 fn require_operator(user: &AuthUser) -> Result<(), Response> {
     if user.user.has_role("operator") {
         Ok(())
@@ -90,7 +91,12 @@ pub async fn group_status(
 
 fn unit_shell(title: &str, unit: &str, op: &str, cfg: &AppConfig) -> crate::config::CommandItem {
     let script = format!("systemctl {op} '{}'", unit.replace('\'', ""));
-    host_shell_item(title, &script, cfg.paths.host_exec, cfg.paths.nsenter_target)
+    host_shell_item(
+        title,
+        &script,
+        cfg.paths.host_exec,
+        cfg.paths.nsenter_target,
+    )
 }
 
 pub async fn unit_restart(
@@ -159,6 +165,7 @@ pub struct ExecuteRequest {
     pub command_id: String,
 }
 
+#[allow(clippy::result_large_err, clippy::type_complexity)]
 fn build_custom_command(
     cfg: &AppConfig,
     group_id: &str,
@@ -184,16 +191,21 @@ fn build_custom_command(
     let compose = cfg.docker.compose_command.join(" ");
     let steps: Vec<(String, Vec<String>)> = match cmd {
         SystemdCommand::DockerComposePull { .. } => {
-            vec![("bash".into(), vec!["-c".into(), format!("cd '{work_dir}' && {compose} pull")])]
+            vec![(
+                "bash".into(),
+                vec!["-c".into(), format!("cd '{work_dir}' && {compose} pull")],
+            )]
         }
         SystemdCommand::DockerComposePullRestart { .. } => vec![
-            ("bash".into(), vec!["-c".into(), format!("cd '{work_dir}' && {compose} pull")]),
+            (
+                "bash".into(),
+                vec!["-c".into(), format!("cd '{work_dir}' && {compose} pull")],
+            ),
             ("systemctl".into(), vec!["restart".into(), unit.to_string()]),
         ],
-        SystemdCommand::Shell { program, args, .. } => vec![(
-            subst(program),
-            args.iter().map(|a| subst(a)).collect(),
-        )],
+        SystemdCommand::Shell { program, args, .. } => {
+            vec![(subst(program), args.iter().map(|a| subst(a)).collect())]
+        }
     };
     Ok((work_dir, steps, title))
 }
@@ -224,7 +236,12 @@ pub async fn unit_execute(
         .collect::<Vec<_>>()
         .join(" && ");
     let id = state.exec.run_item(
-        host_shell_item(&title, &script, cfg.paths.host_exec, cfg.paths.nsenter_target),
+        host_shell_item(
+            &title,
+            &script,
+            cfg.paths.host_exec,
+            cfg.paths.nsenter_target,
+        ),
         HashMap::new(),
         &user.user.name,
         None,

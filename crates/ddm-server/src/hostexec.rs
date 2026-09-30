@@ -40,7 +40,7 @@ pub trait HostExec: Send + Sync {
             .run("sh", &["-c".to_string(), format!("command -v {binary}")])
             .await?;
         let path = out.stdout.trim().to_string();
-        Ok(out.success().then(|| path).filter(|p| !p.is_empty()))
+        Ok(out.success().then_some(path).filter(|p| !p.is_empty()))
     }
 }
 
@@ -85,7 +85,15 @@ impl HostExec for NsenterExec {
         script: &str,
         on_line: &(dyn for<'a, 'b> Fn(&'a str, &'b str) + Send + Sync),
     ) -> Result<i32> {
-        let (p, a) = self.wrap("bash", &["-euo".into(), "pipefail".into(), "-c".into(), script.to_string()]);
+        let (p, a) = self.wrap(
+            "bash",
+            &[
+                "-euo".into(),
+                "pipefail".into(),
+                "-c".into(),
+                script.to_string(),
+            ],
+        );
         run_streaming(&p, &a, on_line).await
     }
 }
@@ -109,7 +117,12 @@ impl HostExec for LocalExec {
     ) -> Result<i32> {
         run_streaming(
             "bash",
-            &["-euo".into(), "pipefail".into(), "-c".into(), script.to_string()],
+            &[
+                "-euo".into(),
+                "pipefail".into(),
+                "-c".into(),
+                script.to_string(),
+            ],
             on_line,
         )
         .await
@@ -154,10 +167,7 @@ async fn run_streaming(
                 Some(line) => on_line(&line, "stdout"),
                 None => break,
             },
-            l = err_lines.next_line() => match l? {
-                Some(line) => on_line(&line, "stderr"),
-                None => {},
-            },
+            l = err_lines.next_line() => if let Some(line) = l? { on_line(&line, "stderr") },
         }
     }
     while let Ok(Some(line)) = err_lines.next_line().await {
@@ -170,16 +180,19 @@ async fn run_streaming(
 // Mock for tests
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 type Script = Arc<dyn Fn(&str, &[String]) -> HostOutput + Send + Sync>;
 
 /// Scripted mock: handlers are tried in order; first matching program prefix
 /// wins. Unmatched commands fail with exit 127.
+#[allow(dead_code)]
 #[derive(Default)]
 pub struct MockExec {
     handlers: Mutex<Vec<(String, Script)>>,
     pub calls: Mutex<Vec<(String, Vec<String>)>>,
 }
 
+#[allow(dead_code)]
 impl MockExec {
     pub fn new() -> Self {
         Self::default()

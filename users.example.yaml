@@ -1,0 +1,35 @@
+# users.yaml — managed via the API, the web UI, or `ddm-server user ...`.
+# password_hash values are argon2 PHC strings — generate with
+# `ddm-server hash` or let `user add --generate` create them.
+users:
+  - name: admin
+    password_hash: "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME"
+    roles: [admin]
+    access: []                       # admin bypasses access rules anyway
+    compose_policy: unrestricted
+
+  - name: deploy-bot
+    password_hash: "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME"
+    roles: [operator]
+    access:
+      # first match wins — put denies before allows
+      - { type: exact, pattern: core, effect: deny }
+      - { type: glob, pattern: "web-*", effect: allow }
+      - { type: regex, pattern: "^stg-[0-9]+$", effect: allow }
+    features:
+      create_services: true
+      edit_compose: true
+      edit_units: false
+      run_commands: true
+      manage_backup: true
+      manage_monitoring: false
+    compose_policy: strict
+
+  - name: oncall
+    password_hash: "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME"
+    roles: [viewer]
+    access:
+      - { type: glob, pattern: "*", effect: allow }   # read-only on everything
+    features:
+      run_commands: false
+    compose_policy: strict

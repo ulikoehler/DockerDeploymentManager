@@ -30,7 +30,13 @@ fn redact(cfg: &crate::config::AppConfig) -> serde_json::Value {
     if let Some(n) = v.pointer_mut("/monitoring/notifiers") {
         if let Some(arr) = n.as_array_mut() {
             for item in arr.iter_mut() {
-                for key in ["url", "url_env", "bot_token_env", "password_env", "username_env"] {
+                for key in [
+                    "url",
+                    "url_env",
+                    "bot_token_env",
+                    "password_env",
+                    "username_env",
+                ] {
                     if let Some(map) = item.as_object_mut() {
                         if let Some(val) = map.get_mut(key) {
                             if !val.is_null() {
@@ -183,7 +189,9 @@ pub async fn monitor_status(
         return Err(forbidden());
     }
     let st = state.monitor.status().await;
-    Ok(ok(serde_json::to_value(st.get(&name)).unwrap_or(serde_json::Value::Null)))
+    Ok(ok(
+        serde_json::to_value(st.get(&name)).unwrap_or(serde_json::Value::Null)
+    ))
 }
 
 #[derive(Deserialize)]

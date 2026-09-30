@@ -1,0 +1,24 @@
+services:
+  ddm:
+    build: .
+    image: ddm:latest
+    restart: unless-stopped
+    # required: host PID + privileged so `nsenter -t 1` reaches the host
+    pid: host
+    privileged: true
+    ports:
+      - "8080:8080"
+    environment:
+      DDM_JWT_SECRET: ${DDM_JWT_SECRET:?set DDM_JWT_SECRET}
+      # NOTIFIER secrets, e.g.:
+      # SLACK_WEBHOOK_URL: ...
+      # TELEGRAM_BOT_TOKEN: ...
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # service root: same path on both sides so generated units work
+      - /opt/ddm-services:/opt/ddm-services
+      # host systemd unit dir (read/write, for generated units)
+      - /etc/systemd/system:/host/systemd
+      # config + users + monitor state persist here
+      - ./data:/etc/ddm
+      - ./data-state:/var/lib/ddm

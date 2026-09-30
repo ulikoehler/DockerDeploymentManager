@@ -50,7 +50,10 @@ pub fn api_router() -> Router<AppState> {
             "/api/services/:name/backup",
             get(services::get_backup).put(services::put_backup),
         )
-        .route("/api/services/:name/backup/check", get(services::backup_check))
+        .route(
+            "/api/services/:name/backup/check",
+            get(services::backup_check),
+        )
         .route(
             "/api/services/:name/backup/provision",
             post(services::backup_provision),
@@ -110,10 +113,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/api/systemd/units/:unit/logs", get(systemd_api::unit_logs))
         // generic commands
         .route("/api/commands", get(commands_api::list))
-        .route(
-            "/api/commands/:section/:item",
-            post(commands_api::run),
-        )
+        .route("/api/commands/:section/:item", post(commands_api::run))
         // misc
         .route("/api/config", get(misc::get_config))
         .route("/api/config/status", get(misc::config_status))

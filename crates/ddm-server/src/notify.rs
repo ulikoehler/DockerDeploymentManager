@@ -58,8 +58,8 @@ async fn send_once(cfg: &NotifierConfig, n: &Notification) -> Result<()> {
         .build()?;
     match cfg {
         NotifierConfig::SlackWebhook { url, url_env, .. } => {
-            let url = env_or(url, url_env)
-                .context("slack notifier has no url/url_env configured")?;
+            let url =
+                env_or(url, url_env).context("slack notifier has no url/url_env configured")?;
             let text = format!("*{}*\n```{body}```", n.title, body = n.body);
             client
                 .post(&url)
@@ -126,6 +126,7 @@ async fn send_once(cfg: &NotifierConfig, n: &Notification) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_email(
     host: &str,
     port: u16,
@@ -173,7 +174,13 @@ pub fn describe(notifiers: &[NotifierConfig]) -> Vec<serde_json::Value> {
         .map(|n| {
             let mut v = serde_json::to_value(n).unwrap_or_default();
             // strip secret-bearing fields
-            for key in ["url", "url_env", "bot_token_env", "password_env", "username_env"] {
+            for key in [
+                "url",
+                "url_env",
+                "bot_token_env",
+                "password_env",
+                "username_env",
+            ] {
                 if let Some(map) = v.as_object_mut() {
                     if let Some(val) = map.get_mut(key) {
                         *val = serde_json::Value::String("***".into());
@@ -186,6 +193,7 @@ pub fn describe(notifiers: &[NotifierConfig]) -> Vec<serde_json::Value> {
 }
 
 /// Index notifiers by id.
+#[allow(dead_code)]
 pub fn index(notifiers: &[NotifierConfig]) -> HashMap<String, NotifierConfig> {
     notifiers
         .iter()

@@ -1,13 +1,12 @@
+use crate::config::SharedConfig;
 use crate::config::{
-    AppConfig, AutoAction, HealthCheckConfig, HealthCheckKind, LogAlertConfig,
-    MonitorDefaults,
+    AppConfig, AutoAction, HealthCheckConfig, HealthCheckKind, LogAlertConfig, MonitorDefaults,
 };
 use crate::docker::{ContainerInfo, DockerApi};
 use crate::hostexec::HostExec;
 use crate::permissions::matcher_matches;
 use crate::protocol::{AlertEvent, EventMessage};
 use crate::services::discover_services;
-use crate::config::SharedConfig;
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use regex::Regex;
@@ -28,6 +27,7 @@ struct EffectiveLogAlert {
     container: String,
     notify: Vec<String>,
     cooldown_secs: u64,
+    #[allow(dead_code)]
     max_per_cooldown: u32,
     context_lines: usize,
     actions: Vec<AutoAction>,
@@ -124,7 +124,9 @@ impl Monitor {
 
     /// Effective per-service monitoring config = meta.yaml merged with
     /// global rules (services matcher) + defaults.
-    async fn desired(&self) -> Result<HashMap<String, (Option<EffectiveHealth>, Vec<EffectiveLogAlert>)>> {
+    async fn desired(
+        &self,
+    ) -> Result<HashMap<String, (Option<EffectiveHealth>, Vec<EffectiveLogAlert>)>> {
         let cfg = self.cfg.get().await;
         if !cfg.monitoring.enabled {
             return Ok(HashMap::new());
@@ -234,8 +236,15 @@ impl Monitor {
                         )
                         .await;
                     }
-                    self.update(&service, &format!("{:?}", check.kind), "health", &state, failures, None)
-                        .await;
+                    self.update(
+                        &service,
+                        &format!("{:?}", check.kind),
+                        "health",
+                        &state,
+                        failures,
+                        None,
+                    )
+                    .await;
                 }
                 Ok(false) | Err(_) => {
                     successes = 0;
@@ -354,7 +363,8 @@ impl Monitor {
             return Ok(());
         }
         // Merge container log streams into one task-local loop.
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<(ContainerInfo, crate::docker::LogLine)>(512);
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel::<(ContainerInfo, crate::docker::LogLine)>(512);
         for (c, mut s) in streams {
             let txc = tx.clone();
             tokio::spawn(async move {
@@ -378,7 +388,11 @@ impl Monitor {
                 // maintain context buffer per alert
                 let buf = context_buffers.entry(a.id.clone()).or_default();
                 let matches = a.regex.is_match(text)
-                    && !a.exclude.as_ref().map(|x| x.is_match(text)).unwrap_or(false);
+                    && !a
+                        .exclude
+                        .as_ref()
+                        .map(|x| x.is_match(text))
+                        .unwrap_or(false);
                 if matches {
                     // dedup by hash of service+rule+line
                     let h = fxhash(&format!("{}|{}|{}", service, a.id, text));
@@ -409,7 +423,13 @@ impl Monitor {
         !d.insert(h)
     }
 
-    async fn handle_log_match(&self, service: &str, a: &EffectiveLogAlert, line: &str, excerpt: String) {
+    async fn handle_log_match(
+        &self,
+        service: &str,
+        a: &EffectiveLogAlert,
+        line: &str,
+        excerpt: String,
+    ) {
         // notify cooldown + rate limit
         let key = format!("{service}:{}", a.id);
         {
@@ -461,15 +481,10 @@ impl Monitor {
                     max_attempts.unwrap_or(3),
                     window_secs.unwrap_or(900),
                 ),
-                AutoAction::Stop { cooldown_secs } => (
-                    "stop".to_string(),
-                    cooldown_secs.unwrap_or(600),
-                    1,
-                    3600,
-                ),
-                AutoAction::ExecCommand {
-                    cooldown_secs, ..
-                } => (
+                AutoAction::Stop { cooldown_secs } => {
+                    ("stop".to_string(), cooldown_secs.unwrap_or(600), 1, 3600)
+                }
+                AutoAction::ExecCommand { cooldown_secs, .. } => (
                     "exec_command".to_string(),
                     cooldown_secs.unwrap_or(600),
                     3,
@@ -505,7 +520,9 @@ impl Monitor {
                     "action",
                     &name,
                     "firing",
-                    format!("auto-action '{name}' exhausted ({max_attempts}/{window}s); suppressed"),
+                    format!(
+                        "auto-action '{name}' exhausted ({max_attempts}/{window}s); suppressed"
+                    ),
                     None,
                     &[],
                 )
@@ -580,6 +597,7 @@ impl Monitor {
     // State / events
     // ------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     async fn emit(
         &self,
         service: &str,
@@ -714,10 +732,7 @@ fn effective_health(
     })
 }
 
-fn effective_alert(
-    a: &LogAlertConfig,
-    defaults: &MonitorDefaults,
-) -> Option<EffectiveLogAlert> {
+fn effective_alert(a: &LogAlertConfig, defaults: &MonitorDefaults) -> Option<EffectiveLogAlert> {
     Some(EffectiveLogAlert {
         id: a.id.clone(),
         regex: Regex::new(&a.regex).ok()?,

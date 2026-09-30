@@ -38,7 +38,11 @@ impl JwtKeys {
         }
     }
 
-    pub fn issue(&self, user: &User, ttl_minutes: i64) -> Result<String, jsonwebtoken::errors::Error> {
+    pub fn issue(
+        &self,
+        user: &User,
+        ttl_minutes: i64,
+    ) -> Result<String, jsonwebtoken::errors::Error> {
         let now = chrono::Utc::now().timestamp();
         let claims = Claims {
             sub: user.name.clone(),
@@ -91,6 +95,7 @@ impl JwtKeys {
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub user: User,
+    #[allow(dead_code)]
     pub claims: Claims,
 }
 
@@ -135,9 +140,8 @@ impl FromRequestParts<crate::AppState> for AuthUser {
         parts: &mut Parts,
         state: &crate::AppState,
     ) -> Result<Self, Self::Rejection> {
-        let token = bearer_token(parts).ok_or_else(|| {
-            error_response(StatusCode::UNAUTHORIZED, "missing bearer token")
-        })?;
+        let token = bearer_token(parts)
+            .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
         let claims = state
             .jwt
             .verify(token)

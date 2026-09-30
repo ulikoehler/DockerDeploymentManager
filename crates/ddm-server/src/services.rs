@@ -20,7 +20,12 @@ pub const META_FILE: &str = "meta.yaml";
 /// Locate a compose file in `dir` honoring `compose_file` preference then
 /// common alternatives.
 pub fn find_compose_file(dir: &Path, preferred: &str) -> Option<PathBuf> {
-    for name in [preferred, "compose.yaml", "compose.yml", "docker-compose.yaml"] {
+    for name in [
+        preferred,
+        "compose.yaml",
+        "compose.yml",
+        "docker-compose.yaml",
+    ] {
         let p = dir.join(name);
         if p.is_file() {
             return Some(p);

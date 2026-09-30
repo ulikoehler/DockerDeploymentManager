@@ -1,0 +1,18 @@
+[Unit]
+Description=Docker Compose service ${service_name}
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=${service_dir}
+User=root
+Group=docker
+TimeoutStopSec=15
+Restart=always
+ExecStartPre=${compose_bin} -f ${compose_file} down
+ExecStart=${compose_bin} -f ${compose_file} up
+ExecStop=${compose_bin} -f ${compose_file} down
+
+[Install]
+WantedBy=multi-user.target
