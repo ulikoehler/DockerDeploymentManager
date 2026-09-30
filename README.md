@@ -6,6 +6,22 @@ host. ddm itself runs as a **privileged docker service** (`privileged: true`,
 backups, and monitoring/alerting — all behind a web UI, REST API, and a
 Python CLI.
 
+## How it works
+
+ddm watches a directory of compose projects (the *service root*). Each
+subdirectory containing a `docker-compose.yml` is a *service*. From the UI,
+API, or CLI you can pull/update/restart them, edit their compose files and
+generated systemd units, stream filtered logs, schedule restic backups, and
+get notified on health-check failures or error patterns in logs.
+
+Because it needs to control the **host**'s systemd and docker, ddm runs as a
+privileged container with `pid: host`; host commands are executed via
+`nsenter` into PID 1's namespaces. Compose files live on a bind mount shared
+with the host so generated systemd units reference real paths.
+
+**Host requirements**: docker + compose, systemd, optionally `restic` for
+backups.
+
 ## Features
 
 - **Service management** — discover compose projects under a service root;
