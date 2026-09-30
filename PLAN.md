@@ -40,7 +40,7 @@ inspired by `~/dev/Noxeco/NoxecoDeploymentManager` but fully vendor-neutral.
 
 | Component      | Choice                                                              |
 |----------------|---------------------------------------------------------------------|
-| Backend        | Rust 2021, axum 0.7 (HTTP + WS), tokio, serde/serde_yaml, notify    |
+| Backend        | Rust 2021, axum 0.7 (HTTP + WS), tokio, serde/serde_yaml, notify, clap (server CLI) |
 | Docker access  | `bollard` for the Docker socket API; `docker compose` CLI for compose ops |
 | Host access    | `nsenter` into PID 1 namespaces (trait `HostExec`, swappable)         |
 | Auth           | JWT (`jsonwebtoken`), password hashing via `argon2`                 |
@@ -63,6 +63,7 @@ crates/
     Cargo.toml
     src/
       main.rs              bootstrap, router, config watch, shutdown
+      cli.rs               clap subcommands (serve, user *, hash, check-config)
       config.rs            config schema, load, hot-reload broadcast
       users.rs             user store (users.yaml), roles, matchers, write-back
       auth.rs              JWT issue/verify, axum extractors, login
@@ -339,6 +340,37 @@ WebSockets authenticate via `Sec-WebSocket-Protocol: bearer.<token>`
 - `GET /api/audit` — audit log (admin)
 - `GET /api/health`
 
+### 7a. Server CLI — user management inside the running container
+
+The `ddm-server` binary doubles as an admin CLI (clap subcommands). It works
+directly on `users.yaml`, so it functions **inside the running container**
+(`docker compose exec ddm ddm-server user …`) and even when the HTTP API is
+down — covering first-admin bootstrap and lockout recovery. Writes are
+atomic (tmp+rename under `flock`); the running server picks them up via the
+same hot-reload watch, no restart needed.
+
+```
+ddm-server serve [--config /etc/ddm/config.yaml]     # default: run the daemon
+ddm-server user list
+ddm-server user add <name> --role admin [--password P | --generate | --prompt]
+ddm-server user remove <name>
+ddm-server user passwd <name> [--password P | --generate | --prompt]
+ddm-server user set-roles <name> --role operator --role viewer
+ddm-server user set-access <name> \
+    --allow 'glob:web-*' --allow 'regex:^stg-[0-9]+$' --deny 'exact:core'
+ddm-server user set-features <name> --create-services --no-edit-units
+ddm-server user set-policy <name> --policy strict|relaxed|unrestricted
+ddm-server user show <name>
+ddm-server hash [password]              # print an argon2 hash for manual edits
+ddm-server check-config [--config …]    # validate config + users, exit non-0 on error
+ddm-server unit-template <name> --dir /services/x   # print rendered unit (debug)
+```
+
+`--generate` prints a random password once; without secrets on the CLI it
+prompts on TTY. All CLI ops are journaled to stderr/audit like API calls.
+Bootstrap path for fresh installs: `docker compose exec ddm ddm-server user
+add admin --role admin --generate` (documented in README quickstart).
+
 ## 8. Compose security policy
 
 `policy.rs` parses compose YAML (via `serde_yaml` → typed model with
@@ -490,6 +522,8 @@ Websocket via `websockets`; REST via `httpx`; `pytest` suite using
   - logs: filter pipeline correctness (grep/regex/since/stream)
   - commands: arg building (value/variable/conditional/optional — ported
     from the original), sequence stop-on-failure
+  - cli: `user add/passwd/set-access` against a tempdir users.yaml (assert
+    file round-trips, hashes verify, watcher-free standalone operation)
 - **Integration tests** (`crates/ddm-server/tests/`): spin the axum `Router`
   against a `tempdir` services root with a **scripted `MockHostExec`** and a
   docker-socket shim; exercise login → service create → policy rejection →
@@ -510,14 +544,15 @@ Websocket via `websockets`; REST via `httpx`; `pytest` suite using
   hardening notes (why `privileged`/`pid:host` is needed, socket risk).
 - `docs/deployment.md`: self-install as compose service + optional systemd
   unit for the manager itself; upgrades.
-- `docs/web-ui.md`, `docs/client.md`, `docs/development.md`.
+- `docs/web-ui.md`, `docs/client.md`, `docs/development.md`, and a
+  `docs/server-cli.md` covering in-container user management/recovery.
 - `examples/`: ready-to-run config, users (with a printed bootstrap-password
   note), hello-world service, template, unit template, client demo.
 
 ## 13. Milestones
 
 1. Workspace scaffold; config + users schema, hot reload, `HostExec`
-2. Auth (JWT/argon2) + permission engine + tests
+2. Auth (JWT/argon2) + permission engine + server CLI user management + tests
 3. Docker layer (bollard status/logs) + compose CLI wrapper + service registry
 4. Execution engine + broadcast channels + WS streaming
 5. Service CRUD + compose policy validator + systemd unit management
