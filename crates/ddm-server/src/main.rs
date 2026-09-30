@@ -9,6 +9,7 @@ mod docker;
 mod exec;
 mod files;
 mod gitops;
+mod gitsync;
 mod hostexec;
 mod logs;
 mod monitor;
@@ -36,6 +37,7 @@ pub struct AppState {
     pub exec: Arc<exec::ExecutionManager>,
     pub monitor: Arc<monitor::Monitor>,
     pub audit: Arc<audit::AuditLog>,
+    pub gitsync: Arc<gitsync::Gitsync>,
 }
 
 #[tokio::main]
@@ -127,6 +129,17 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
         tokio::spawn(async move { m.run().await });
     }
 
+    let gitsync = Arc::new(gitsync::Gitsync::new());
+    {
+        let gs = gitsync.clone();
+        let sc = shared.clone();
+        let dir = config_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        tokio::spawn(async move { gs.run(sc, dir).await });
+    }
+
     let state = AppState {
         config: shared,
         users,
@@ -136,6 +149,7 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
         exec,
         monitor,
         audit,
+        gitsync,
     };
 
     let mut app = api::api_router().with_state(state.clone());

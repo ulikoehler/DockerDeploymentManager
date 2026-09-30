@@ -163,3 +163,12 @@ Unit names must match a configured group's `unit_regex` (admins bypass).
 | `WS /ws/executions/{id}` | execution stream: `{"type":"execution_started"|"log_output"|"execution_finished", "data":{...}}` |
 | `WS /ws/execute` | same, plus client may send `{"type":"run","section":i,"item":j,"params":{}}` |
 | `WS /ws/events` | monitoring events: `monitor_state`, `alert_fired`, `alert_resolved`, `auto_action`, `config_reloaded` |
+
+## GitOps
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/gitops/status` | sync status: url, branch, targets, last result, pending count |
+| POST | `/api/gitops/sync` | admin: pull + apply now |
+| POST | `/api/gitops/push` | admin: commit & push pending local changes (no-op unless `push_changes`) |
+| POST | `/api/gitops/webhook` | **public**, secret-verified (GitHub `X-Hub-Signature-256` or GitLab `X-Gitlab-Token`); triggers an async sync |

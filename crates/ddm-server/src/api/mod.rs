@@ -137,6 +137,11 @@ pub fn api_router() -> Router<AppState> {
         // generic commands
         .route("/api/commands", get(commands_api::list))
         .route("/api/commands/:section/:item", post(commands_api::run))
+        // gitops (webhook is public, secret-verified)
+        .route("/api/gitops/status", get(misc::gitops_status))
+        .route("/api/gitops/sync", post(misc::gitops_sync))
+        .route("/api/gitops/push", post(misc::gitops_push))
+        .route("/api/gitops/webhook", post(misc::gitops_webhook))
         // misc
         .route("/api/config", get(misc::get_config))
         .route("/api/config/status", get(misc::config_status))

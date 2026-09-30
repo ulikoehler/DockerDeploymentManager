@@ -9,6 +9,7 @@ import './ddm-create';
 import './ddm-users';
 import './ddm-commands';
 import './ddm-monitor-panel';
+import './ddm-gitops-panel';
 import './ddm-events-view';
 
 type View = { name: string; service?: string };
@@ -93,6 +94,7 @@ export class DdmApp extends LitElement {
           ${this.navLink('monitor', 'Monitoring')}
           ${this.navLink('events', 'Events')}
           ${this.isAdmin ? this.navLink('users', 'Users') : ''}
+          ${this.isAdmin ? this.navLink('gitops', 'GitOps') : ''}
         </nav>
         <span class="spacer"></span>
         <span class="muted">${this.userName}</span>
@@ -116,6 +118,10 @@ export class DdmApp extends LitElement {
         return html`<ddm-commands></ddm-commands>`;
       case 'monitor':
         return html`<ddm-monitor-panel .admin=${this.isAdmin}></ddm-monitor-panel>`;
+      case 'gitops':
+        return this.isAdmin
+          ? html`<ddm-gitops-panel .admin=${this.isAdmin}></ddm-gitops-panel>`
+          : html`<p class="error">forbidden</p>`;
       case 'events':
         return html`<ddm-events-view></ddm-events-view>`;
       default:

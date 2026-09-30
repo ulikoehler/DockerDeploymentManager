@@ -188,3 +188,6 @@ export const apiTemplates = () => api('/api/templates');
 export const apiPolicy = () => api('/api/policy');
 export const apiConfigStatus = () => api('/api/config/status');
 export const apiAudit = () => api('/api/audit');
+export const apiGitopsStatus = () => api('/api/gitops/status');
+export const apiGitopsSync = () => api('/api/gitops/sync', { method: 'POST' });
+export const apiGitopsPush = () => api('/api/gitops/push', { method: 'POST' });

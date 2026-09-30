@@ -50,6 +50,9 @@ backups.
   (`admin`/`operator`/`viewer`), ordered `exact`/`glob`/`regex` access rules,
   per-user feature flags and compose policies. Manageable via API, web UI,
   and an offline in-container CLI (`ddm-server user …`).
+- **GitOps** — mirror a git repo into the service root/config dir via
+  webhook (HMAC/GitLab-token verified) or interval pull; optional opt-in
+  push-back of local changes.
 - **Backups** — restic per-service repos (`repository_base` + service name),
   streamed `pg_dump`-style stdin dumps, file backups with excludes,
   systemd timer scheduling, `snapshots`/`forget`/`restore`.
@@ -95,7 +98,7 @@ web/                 Lit + TypeScript web UI (esbuild → web/dist)
 python/              ddm_client package + `ddm` CLI (httpx, websockets)
 examples/            hello-world service, pg-app (backup+monitoring), templates
 docs/                API.md CONFIG.md SECURITY.md DEPLOYMENT.md CLIENT.md
-                     BACKUP.md MONITORING.md SERVER_CLI.md ARCHITECTURE.md
+                     BACKUP.md MONITORING.md SERVER_CLI.md ARCHITECTURE.md GITOPS.md
 Dockerfile           multi-stage build → runtime image
 docker-compose.yml   self-deployment (privileged, pid: host)
 ```
@@ -123,4 +126,5 @@ docker build -t ddm .
 | [docs/BACKUP.md](docs/BACKUP.md) | restic setup, timers, restore |
 | [docs/MONITORING.md](docs/MONITORING.md) | checks, alerts, notifiers, auto-actions |
 | [docs/CLIENT.md](docs/CLIENT.md) | Python client + `ddm` CLI reference |
+| [docs/GITOPS.md](docs/GITOPS.md) | repo → services/config sync, webhook, push-back |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | hacking on ddm |

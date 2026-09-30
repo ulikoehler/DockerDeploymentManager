@@ -51,6 +51,15 @@ fn redact(cfg: &crate::config::AppConfig) -> serde_json::Value {
             }
         }
     }
+    if let Some(g) = v.pointer_mut("/gitops") {
+        for key in ["token", "token_env", "webhook_secret", "webhook_secret_env"] {
+            if let Some(val) = g.get_mut(key) {
+                if !val.is_null() {
+                    *val = serde_json::Value::String("***".into());
+                }
+            }
+        }
+    }
     v
 }
 
@@ -424,6 +433,93 @@ pub async fn notifier_delete(
     state
         .audit
         .record(&user.user.name, "notifier_delete", &id, "");
+    Ok(ok(true))
+}
+
+// ---------------------------------------------------------------------------
+// gitops
+// ---------------------------------------------------------------------------
+
+pub async fn gitops_status(
+    _user: AuthUser,
+    State(state): State<AppState>,
+) -> Json<crate::auth::SuccessResponse<crate::gitsync::GitsyncStatus>> {
+    ok(state.gitsync.status().await)
+}
+
+pub async fn gitops_sync(
+    user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
+    if !user.user.is_admin() {
+        return Err(forbidden());
+    }
+    let cfg = state.config.get().await;
+    let dir = state.config.dir();
+    state
+        .gitsync
+        .sync(&cfg, &dir)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    state
+        .audit
+        .record(&user.user.name, "gitops_sync", "gitops", "");
+    Ok(ok(true))
+}
+
+pub async fn gitops_push(
+    user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
+    if !user.user.is_admin() {
+        return Err(forbidden());
+    }
+    let cfg = state.config.get().await;
+    let dir = state.config.dir();
+    let pushed = state
+        .gitsync
+        .push(&cfg, &dir)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    state
+        .audit
+        .record(&user.user.name, "gitops_push", "gitops", "");
+    Ok(ok(pushed))
+}
+
+/// GitHub/GitLab webhook — unauthenticated but secret-verified.
+/// GitHub: X-Hub-Signature-256: sha256=<hmac(body)>.
+/// GitLab: X-Gitlab-Token: <secret>.
+pub async fn gitops_webhook(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
+    let cfg = state.config.get().await;
+    if !cfg.gitops.enabled {
+        return Err(not_found("gitops disabled"));
+    }
+    let sig = headers
+        .get("x-hub-signature-256")
+        .and_then(|v| v.to_str().ok());
+    let gl = headers.get("x-gitlab-token").and_then(|v| v.to_str().ok());
+    if !crate::gitsync::verify_webhook(
+        &cfg.gitops.webhook_secret,
+        &cfg.gitops.webhook_secret_env,
+        sig,
+        gl,
+        &body,
+    ) {
+        return Err(forbidden());
+    }
+    let dir = state.config.dir();
+    let gs = state.gitsync.clone();
+    let cfga = cfg.clone();
+    tokio::spawn(async move {
+        if let Err(e) = gs.sync(&cfga, &dir).await {
+            tracing::warn!("gitops webhook sync failed: {e:#}");
+        }
+    });
     Ok(ok(true))
 }
 

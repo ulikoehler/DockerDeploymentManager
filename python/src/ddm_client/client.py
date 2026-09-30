@@ -277,6 +277,17 @@ class DdmClient:
     def delete_notifier(self, id: str) -> None:
         self._req("DELETE", f"/api/monitoring/notifiers/{id}")
 
+    # -- gitops ---------------------------------------------------------------
+
+    def gitops_status(self) -> dict:
+        return self._req("GET", "/api/gitops/status")
+
+    def gitops_sync(self) -> dict:
+        return self._req("POST", "/api/gitops/sync", {})
+
+    def gitops_push(self) -> dict:
+        return self._req("POST", "/api/gitops/push", {})
+
     # -- users ----------------------------------------------------------------
 
     def users(self) -> list[dict]:

@@ -168,3 +168,22 @@ sections:
                 variable: all
                 true_args: ["-a"]
                 false_args: []
+
+# GitOps: sync a git repo into the service root and/or config dir.
+# Triggered by POST /api/gitops/webhook (GitHub X-Hub-Signature-256 HMAC or
+# GitLab X-Gitlab-Token) and/or periodic polling.
+gitops:
+  enabled: false
+  # url: https://github.com/org/ddm-config.git
+  # branch: main
+  # token_env: GITOPS_TOKEN            # PAT for https clone/push
+  # interval_secs: 300                 # 0 = webhook only
+  # webhook_secret_env: GITOPS_WEBHOOK_SECRET
+  # push_changes: false                # OPT-IN: commit local changes back
+  # push_interval_secs: 60
+  # commit_name: ddm
+  # commit_email: ddm@example.com
+  # prune: false                       # delete files missing from the repo
+  # targets:
+  #   - { into: services, path: services }  # repo/services → /opt/services
+  #   - { into: config,   path: config }    # repo/config   → config dir

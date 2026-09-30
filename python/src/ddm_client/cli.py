@@ -113,6 +113,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("item", type=int)
     s.add_argument("--param", action="append", default=[], help="key=value")
 
+    s = sub.add_parser("gitops")
+    s.add_argument("op", choices=["status", "sync", "push"])
+
     sub.add_parser("commands")
     sub.add_parser("events")
     sub.add_parser("audit")
@@ -351,6 +354,13 @@ def dispatch(args) -> int:
                 out(c.create_notifier(body))
             else:
                 out(c.update_notifier(args.id or body["id"], body))
+    elif cmd == "gitops":
+        if args.op == "status":
+            out(c.gitops_status())
+        elif args.op == "sync":
+            out(c.gitops_sync())
+        elif args.op == "push":
+            out(c.gitops_push())
     elif cmd == "users":
         return users_cmd(c, args)
     elif cmd == "exec":

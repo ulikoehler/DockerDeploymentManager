@@ -29,6 +29,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub monitoring: MonitoringConfig,
     #[serde(default)]
+    pub gitops: GitOpsConfig,
+    #[serde(default)]
     pub service_templates: Vec<ServiceTemplate>,
     #[serde(default)]
     pub systemd: SystemdConfig,
@@ -53,6 +55,7 @@ impl Default for AppConfig {
             security: SecurityConfig::default(),
             backup: BackupConfig::default(),
             monitoring: MonitoringConfig::default(),
+            gitops: GitOpsConfig::default(),
             service_templates: vec![],
             systemd: SystemdConfig::default(),
             sections: vec![],
@@ -572,6 +575,106 @@ fn default_smtp_port() -> u16 {
     587
 }
 
+// ---------------------------------------------------------------------------
+// GitOps — sync a git repo into services_root / config dir
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitOpsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Clone URL (https recommended). Token auth via `token_env`.
+    #[serde(default)]
+    pub url: String,
+    #[serde(default = "default_branch")]
+    pub branch: String,
+    /// Personal access token inserted into https URLs (prefer `token_env`).
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub token_env: Option<String>,
+    /// Poll interval; 0 = webhook only.
+    #[serde(default = "default_gitops_interval")]
+    pub interval_secs: u64,
+    /// Webhook secret for HMAC (X-Hub-Signature-256) or GitLab token
+    /// (X-Gitlab-Token). Prefer `webhook_secret_env`. Required for the
+    /// webhook endpoint to accept requests.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+    #[serde(default)]
+    pub webhook_secret_env: Option<String>,
+    /// Opt-in: commit local changes back to the repo.
+    #[serde(default)]
+    pub push_changes: bool,
+    /// How often dirty targets are committed+pushed (when push_changes).
+    #[serde(default = "default_push_interval")]
+    pub push_interval_secs: u64,
+    #[serde(default = "default_commit_name")]
+    pub commit_name: String,
+    #[serde(default = "default_commit_email")]
+    pub commit_email: String,
+    /// Delete files in the target that are missing from the repo.
+    /// .git and .restic_* files are never pruned.
+    #[serde(default)]
+    pub prune: bool,
+    #[serde(default)]
+    pub targets: Vec<GitOpsTarget>,
+}
+
+fn default_branch() -> String {
+    "main".into()
+}
+fn default_gitops_interval() -> u64 {
+    300
+}
+fn default_push_interval() -> u64 {
+    60
+}
+fn default_commit_name() -> String {
+    "ddm".into()
+}
+fn default_commit_email() -> String {
+    "ddm@localhost".into()
+}
+
+impl Default for GitOpsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: String::new(),
+            branch: default_branch(),
+            token: None,
+            token_env: None,
+            interval_secs: default_gitops_interval(),
+            webhook_secret: None,
+            webhook_secret_env: None,
+            push_changes: false,
+            push_interval_secs: default_push_interval(),
+            commit_name: default_commit_name(),
+            commit_email: default_commit_email(),
+            prune: false,
+            targets: vec![],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitOpsTargetKind {
+    /// Repo subdir → `paths.services_root`.
+    Services,
+    /// Repo subdir → the config directory (contains config.yaml).
+    Config,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitOpsTarget {
+    pub into: GitOpsTargetKind,
+    /// Subdirectory inside the repo mapped to the target ("" = repo root).
+    #[serde(default)]
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SmtpTls {
@@ -1085,6 +1188,19 @@ pub fn validate_config(cfg: &AppConfig) -> Result<()> {
             anyhow::bail!("service template with empty id");
         }
     }
+    if cfg.gitops.enabled && cfg.gitops.url.is_empty() {
+        anyhow::bail!("gitops.enabled requires gitops.url");
+    }
+    for t in &cfg.gitops.targets {
+        let p = &t.path;
+        if p.is_empty()
+            || p.starts_with('/')
+            || p.starts_with('\\')
+            || p.split('/').any(|seg| seg == ".." || seg.is_empty())
+        {
+            anyhow::bail!("invalid gitops target path '{p}'");
+        }
+    }
     Ok(())
 }
 
@@ -1153,6 +1269,14 @@ impl SharedConfig {
     /// needed elsewhere; handlers use `get().await`.
     pub async fn reload_status(&self) -> ReloadStatus {
         self.last_reload.read().await.clone()
+    }
+
+    /// Directory containing the loaded config file.
+    pub fn dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     /// Spawn a file watcher that hot-reloads the config on change.

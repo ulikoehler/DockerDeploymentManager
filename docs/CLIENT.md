@@ -86,3 +86,13 @@ print(r["execution_id"])
 
 `DdmError` carries `.status` and `.message`. `stream_execution(id)` is an
 async iterator of `ServerMessage` dicts (same for `follow_logs`).
+
+### GitOps
+
+```python
+c.gitops_status(); c.gitops_sync(); c.gitops_push()
+```
+
+```bash
+ddm gitops status|sync|push
+```

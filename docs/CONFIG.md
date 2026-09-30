@@ -185,3 +185,21 @@ monitoring:
   health: { kind: docker_healthcheck, interval_secs: 30, notify: [...], actions: [...] }
   log_alerts: [{ id, regex, exclude_regex?, container, notify?, cooldown_secs?, actions? }]
 ```
+
+## `gitops` — repository sync
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | master switch |
+| `url` | — | clone URL (https recommended) |
+| `branch` | `main` | tracked branch |
+| `token` / `token_env` | — | PAT injected into the https remote URL |
+| `interval_secs` | `300` | poll interval; `0` = webhook only |
+| `webhook_secret` / `webhook_secret_env` | — | HMAC (GitHub) or token (GitLab) for `POST /api/gitops/webhook`; required for the endpoint to accept anything |
+| `push_changes` | `false` | opt-in: commit local target changes back |
+| `push_interval_secs` | `60` | how often dirty targets are pushed |
+| `commit_name` / `commit_email` | `ddm` / `ddm@localhost` | commit identity |
+| `prune` | `false` | delete files missing from the repo (never touches `.git`, `.restic_*`, `*.lock`, `*.tmp`, or the users file in a config target) |
+| `targets` | `[]` | `{into: services|config, path: <repo subdir>}` mappings |
+
+See [GITOPS.md](GITOPS.md).
