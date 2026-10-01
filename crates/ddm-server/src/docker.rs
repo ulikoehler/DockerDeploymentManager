@@ -19,7 +19,7 @@ pub struct ContainerInfo {
 }
 
 /// Line from a container log stream.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LogLine {
     pub text: String,
     pub stream: String, // stdout|stderr

@@ -1,7 +1,6 @@
 services:
   ddm:
-    build: .
-    image: ddm:latest
+    image: ulikoehler/ddm:latest
     restart: unless-stopped
     # required: host PID + privileged so `nsenter -t 1` reaches the host
     pid: host

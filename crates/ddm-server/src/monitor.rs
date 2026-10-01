@@ -69,14 +69,13 @@ pub struct Monitor {
     cfg: Arc<SharedConfig>,
     docker: Arc<dyn DockerApi>,
     host: Arc<dyn HostExec>,
-    audit: Arc<crate::audit::AuditLog>,
+    core: Arc<crate::agent::AgentCore>,
     events: broadcast::Sender<EventMessage>,
     states: Mutex<HashMap<String, ServiceMonitorState>>,
     tasks: Mutex<HashMap<String, Vec<JoinHandle<()>>>>,
     history: Mutex<VecDeque<AlertEvent>>,
     /// action attempt timestamps: key → instants within window
     action_attempts: Mutex<HashMap<String, VecDeque<Instant>>>,
-    exec: Arc<crate::exec::ExecutionManager>,
     /// last notification instant per alert key
     notify_cooldown: Mutex<HashMap<String, Instant>>,
     /// seen line hashes for dedup
@@ -88,17 +87,15 @@ impl Monitor {
         cfg: Arc<SharedConfig>,
         docker: Arc<dyn DockerApi>,
         host: Arc<dyn HostExec>,
-        audit: Arc<crate::audit::AuditLog>,
         events: broadcast::Sender<EventMessage>,
-        exec: Arc<crate::exec::ExecutionManager>,
+        core: Arc<crate::agent::AgentCore>,
     ) -> Arc<Self> {
         Arc::new(Self {
             cfg,
             docker,
             host,
-            audit,
+            core,
             events,
-            exec,
             states: Mutex::new(HashMap::new()),
             tasks: Mutex::new(HashMap::new()),
             history: Mutex::new(VecDeque::with_capacity(512)),
@@ -537,8 +534,11 @@ impl Monitor {
                 action: name.clone(),
                 result: result.clone(),
             });
-            self.audit
-                .record("system", &format!("auto_{name}"), service, result);
+            self.core.justify_internal(
+                "system",
+                &format!("auto_{name}"),
+                &format!("{service}: {result}"),
+            );
         }
     }
 
@@ -577,13 +577,11 @@ impl Monitor {
                     .cloned();
                 match item {
                     Some(item) => {
-                        let on_host = item.on_host;
-                        let id = self.exec.run_item(
+                        let id = self.core.exec_internal(
                             item,
                             HashMap::new(),
-                            "monitor",
                             Some(service.to_string()),
-                            on_host,
+                            "monitor",
                         );
                         format!("triggered execution {id}")
                     }

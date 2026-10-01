@@ -1,6 +1,6 @@
 use crate::auth::{bad_request, ok, AuthUser};
 use crate::AppState;
-use axum::{extract::State, response::Response, Json};
+use axum::{extract::State, http::StatusCode, response::Response, Json};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -21,25 +21,40 @@ pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<crate::auth::SuccessResponse<LoginResponse>>, Response> {
-    let user = state
-        .users
-        .authenticate(&req.name, &req.password)
+    // Authentication (argon2 verify + throttle + signing) happens entirely
+    // inside the agent — the server never sees key material.
+    let res: crate::agent::proto::AuthResult = match state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::Authenticate {
+            name: req.name.clone(),
+            password: req.password,
+        })
         .await
-        .ok_or_else(|| bad_request("invalid credentials"))?;
-    let cfg = state.config.get().await;
-    let token = state
-        .jwt
-        .issue(&user, cfg.server.token_ttl_minutes, None)
-        .map_err(|e| crate::auth::internal(format!("token issue failed: {e}")))?;
-    let expires_at = chrono::Utc::now().timestamp() + cfg.server.token_ttl_minutes * 60;
+    {
+        Ok(v) => match serde_json::from_value(v) {
+            Ok(r) => r,
+            Err(_) => return Err(bad_request("invalid credentials")),
+        },
+        Err(e) => {
+            let msg = e.to_string();
+            return if msg.contains("too many failed attempts") {
+                Err(crate::auth::error_response(
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    &msg,
+                ))
+            } else {
+                Err(bad_request("invalid credentials"))
+            };
+        }
+    };
     state
         .audit
-        .record(&user.name, "login", "session", "token issued");
+        .record(&res.user.name, "login", "session", "token issued");
     Ok(ok(LoginResponse {
-        token,
-        name: user.name,
-        roles: user.roles,
-        expires_at,
+        token: res.token,
+        name: res.user.name,
+        roles: res.user.roles,
+        expires_at: res.expires_at,
     }))
 }
 
@@ -70,52 +85,29 @@ pub async fn issue_token(
     State(state): State<AppState>,
     Json(req): Json<TokenRequest>,
 ) -> Result<Json<crate::auth::SuccessResponse<TokenResponse>>, Response> {
-    let cfg = state.config.get().await;
-    // A token cannot outlive the token that issued it.
+    // The agent verifies the parent token, intersects scopes and caps the
+    // lifetime itself — the server cannot widen or extend what it relays.
     let now = chrono::Utc::now().timestamp();
-    let remaining_min = ((user.claims.exp - now) / 60).max(1);
-    let ttl = req
-        .ttl_minutes
-        .unwrap_or(60)
-        .clamp(1, cfg.server.token_ttl_minutes.min(remaining_min));
-    // Merge with the caller's own token scope: a scoped token can only mint
-    // equally-or-more-restricted tokens, never escape its scope.
-    let intersect = |parent: &Option<Vec<String>>, child: Option<Vec<String>>| match (parent, child)
-    {
-        (Some(p), Some(c)) => Some(p.iter().filter(|x| c.contains(x)).cloned().collect()),
-        (Some(p), None) => Some(p.clone()),
-        (None, c) => c,
-    };
-    let req_scope =
-        (req.services.is_some() || req.actions.is_some()).then(|| crate::auth::TokenScope {
+    let ttl_secs = req.ttl_minutes.unwrap_or(60).clamp(1, 10_000) * 60;
+    let v = state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::Mint {
+            token: user.token.clone(),
+            ttl_minutes: req.ttl_minutes,
             services: req.services.clone(),
             actions: req.actions.clone(),
-        });
-    let scope = match (&user.claims.scope, req_scope) {
-        (None, r) => r,
-        (Some(parent), req) => Some(crate::auth::TokenScope {
-            services: intersect(
-                &parent.services,
-                req.as_ref().and_then(|r| r.services.clone()),
-            ),
-            actions: intersect(
-                &parent.actions,
-                req.as_ref().and_then(|r| r.actions.clone()),
-            ),
-        }),
-    };
-    let token = state
-        .jwt
-        .issue(&user.user, ttl, scope)
-        .map_err(|e| crate::auth::internal(format!("token issue failed: {e}")))?;
-    let expires_at = chrono::Utc::now().timestamp() + ttl * 60;
+        })
+        .await
+        .map_err(|e| crate::auth::error_response(StatusCode::UNAUTHORIZED, format!("{e:#}")))?;
+    let token = v["token"].as_str().unwrap_or_default().to_string();
+    let expires_at = v["expires_at"].as_i64().unwrap_or(now);
     let fmt = |v: &Option<Vec<String>>| match v {
         Some(s) if !s.is_empty() => s.join(","),
         Some(_) => "none".into(),
         None => "*".into(),
     };
     let detail = format!(
-        "ttl={ttl}m services={} actions={}",
+        "ttl={ttl_secs}s services={} actions={}",
         fmt(&req.services),
         fmt(&req.actions)
     );
@@ -151,7 +143,13 @@ pub async fn logout_all(
     if !user.user.is_admin() {
         return Err(crate::auth::forbidden());
     }
-    state.jwt.rotate();
+    state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::Rotate {
+            token: user.token.clone(),
+        })
+        .await
+        .map_err(|e| crate::auth::internal(format!("{e:#}")))?;
     state.audit.record(
         &user.user.name,
         "logout_all",

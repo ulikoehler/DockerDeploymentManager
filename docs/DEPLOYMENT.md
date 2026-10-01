@@ -9,7 +9,7 @@ namespace.
 ```yaml
 services:
   ddm:
-    image: ddm:latest          # or build: .
+    image: ulikoehler/ddm:latest   # or build: .
     restart: unless-stopped
     pid: host                  # nsenter -t 1 needs the host PID ns
     privileged: true           # nsenter needs CAP_SYS_ADMIN
@@ -54,7 +54,7 @@ mkdir -p data data-state /opt/services
 cp config.example.yaml data/config.yaml
 cp -r examples/templates data/templates
 # users.yaml can start empty — bootstrap in-container:
-docker compose up -d --build
+docker compose pull && docker compose up -d
 docker compose exec ddm ddm-server user add admin --role admin --generate
 ```
 

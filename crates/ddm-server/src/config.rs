@@ -235,6 +235,18 @@ pub struct SecurityConfig {
     /// Role required to write raw unit files. Default admin.
     #[serde(default = "default_unit_edit_role")]
     pub unit_edit_requires: String,
+    /// Unix socket for the privileged agent. When set, the server process
+    /// holds no secrets and performs no privileged operations itself.
+    #[serde(default)]
+    pub agent_socket: Option<String>,
+    /// UID allowed to connect to the agent socket (enforced via SO_PEERCRED).
+    /// When unset, any uid may connect — rely on socket file permissions.
+    #[serde(default)]
+    pub agent_peer_uid: Option<u32>,
+    /// File containing the password pepper (root-readable only). Used by the
+    /// agent for password hashing/verification.
+    #[serde(default)]
+    pub pepper_file: Option<String>,
 }
 
 fn default_policy_name() -> String {
@@ -262,6 +274,9 @@ impl Default for SecurityConfig {
             default_policy: default_policy_name(),
             policies,
             unit_edit_requires: default_unit_edit_role(),
+            agent_socket: None,
+            agent_peer_uid: None,
+            pepper_file: None,
         }
     }
 }

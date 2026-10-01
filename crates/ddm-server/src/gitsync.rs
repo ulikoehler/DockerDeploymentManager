@@ -8,14 +8,14 @@ use crate::config::{AppConfig, GitOpsTarget, GitOpsTargetKind};
 use crate::gitops::git;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default, Deserialize)]
 pub struct GitsyncStatus {
     pub enabled: bool,
     pub url: String,
@@ -459,9 +459,15 @@ pub fn verify_webhook(
     if secret.is_empty() {
         return false; // an empty secret must never authenticate anything
     }
-    // GitLab: plain token compare
+    // GitLab: plain token compare (constant-time to avoid a timing oracle)
     if let Some(t) = gitlab_token {
-        return !t.is_empty() && t == secret;
+        let (a, b) = (t.as_bytes(), secret.as_bytes());
+        return !a.is_empty()
+            && a.len() == b.len()
+            && a.iter()
+                .zip(b.iter())
+                .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+                == 0;
     }
     // GitHub/generic: HMAC-SHA256
     if let Some(sig) = sig_header.and_then(|s| s.strip_prefix("sha256=")) {

@@ -90,6 +90,25 @@ impl ExecutionManager {
         id
     }
 
+    /// Register an externally-executed execution (the agent runs it; we
+    /// forward its frames). Returns the broadcast sender for frames.
+    pub fn adopt(
+        &self,
+        id: &str,
+        title: &str,
+        service: Option<String>,
+        user: &str,
+    ) -> broadcast::Sender<ServerMessage> {
+        let tx = self.register(id);
+        self.push_history(id, title, service, user);
+        tx
+    }
+
+    /// Mark an adopted execution finished (frame forwarded by the caller).
+    pub fn note_finished(&self, id: &str, success: bool) {
+        self.mark_finished(id, success);
+    }
+
     fn push_history(&self, id: &str, title: &str, service: Option<String>, user: &str) {
         let mut h = self.history.lock().unwrap();
         if h.len() >= self.max_history {
@@ -180,7 +199,23 @@ pub async fn run_command_sequence(
             title: item.title.clone(),
         })
         .await;
+    let ok = run_steps(item, params, tx.clone(), execution_id.clone()).await;
+    let _ = tx
+        .send(ServerMessage::ExecutionFinished {
+            id: execution_id,
+            success: ok,
+        })
+        .await;
+}
 
+/// Run only the command loop — no ExecutionStarted/Finished frames. Used by
+/// the agent, which controls framing itself.
+pub async fn run_steps(
+    item: CommandItem,
+    params: HashMap<String, String>,
+    tx: mpsc::Sender<ServerMessage>,
+    execution_id: String,
+) -> bool {
     let mut overall_success = true;
 
     for cmd_def in &item.command_sequence {
@@ -214,12 +249,7 @@ pub async fn run_command_sequence(
         }
     }
 
-    let _ = tx
-        .send(ServerMessage::ExecutionFinished {
-            id: execution_id,
-            success: overall_success,
-        })
-        .await;
+    overall_success
 }
 
 async fn spawn_and_stream(

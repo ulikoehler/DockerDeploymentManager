@@ -4,7 +4,7 @@
 //! are off-limits to the file API.
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
 /// Max size for file reads through the API (larger → `truncated`).
@@ -13,14 +13,14 @@ pub const READ_LIMIT: u64 = 1 << 19; // 512 KiB
 const DENIED_COMPONENTS: &[&str] = &[".git"];
 const DENIED_FILES: &[&str] = &[".restic_password", ".restic_inited"];
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FileEntry {
     pub name: String,
     pub kind: String, // "dir" | "file" | "symlink" | "other"
     pub size: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum FileNode {
     Dir {

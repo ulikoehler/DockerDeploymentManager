@@ -129,6 +129,13 @@ pub fn hash_password(password: &str) -> Result<String> {
     Ok(hash.to_string())
 }
 
+/// A throwaway argon2 hash used to equalize timing for unknown users.
+pub fn dummy_hash() -> String {
+    static H: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    H.get_or_init(|| hash_password("ddm-timing-equalizer").unwrap_or_default())
+        .clone()
+}
+
 pub fn verify_password(password: &str, hash: &str) -> bool {
     match PasswordHash::new(hash) {
         Ok(parsed) => Argon2::default()
@@ -192,13 +199,18 @@ impl UserStore {
 
     /// Verify credentials; returns the user on success.
     pub async fn authenticate(&self, name: &str, password: &str) -> Option<User> {
-        let user = self.get(name).await?;
-        if verify_password(password, &user.password_hash) {
-            Some(user)
-        } else {
-            warn!("failed login for user '{name}'");
-            None
+        let user = self.get(name).await;
+        // Always run one argon2 verification — including for unknown users —
+        // so response timing doesn't reveal whether a username exists.
+        let hash = match &user {
+            Some(u) => u.password_hash.clone(),
+            None => dummy_hash(),
+        };
+        if user.is_some() && verify_password(password, &hash) {
+            return user;
         }
+        warn!("failed login for user '{name}'");
+        None
     }
 
     /// Apply a mutation and persist atomically (tmp + rename under flock).

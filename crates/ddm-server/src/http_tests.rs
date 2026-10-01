@@ -3,7 +3,7 @@
 //! and audit behaviour are exercised exactly as over the wire.
 
 use crate::{
-    api, audit, auth, config, docker, exec, gitsync, hostexec, mcp, monitor, users, AppState,
+    agent, api, audit, auth, config, docker, exec, gitsync, hostexec, mcp, users, AppState,
 };
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -39,8 +39,35 @@ security:
     strict: {{}}
 gitops:
   enabled: true
-  url: "https://example.com/repo.git"
+  url: "https://deploy:secret123@example.com/repo.git"
   webhook_secret: "s3cret"
+systemd:
+  groups:
+    - id: svc
+      title: services
+      unit_regex: "^svc.*\\.service$"
+      custom_commands:
+        - type: shell
+          id: inspect
+          label: inspect
+          program: echo
+          args: ["${{unit}}"]
+          work_dir_template: "{root}/svc/{{service}}"
+sections:
+  - title: ops
+    items:
+      - title: echo
+        command_sequence:
+          - program: echo
+            args:
+              - type: value
+                value: hi
+  - title: admin-only
+    required_role: admin
+    items:
+      - title: echo2
+        command_sequence:
+          - program: echo
 "#,
         root = root.display()
     )
@@ -96,26 +123,27 @@ async fn harness() -> Harness {
     let docker: Arc<dyn docker::DockerApi> = Arc::new(docker::MockDocker::default());
     let exec = Arc::new(exec::ExecutionManager::new(50));
     let audit = Arc::new(audit::AuditLog::new(64));
-    let (events_tx, _) = tokio::sync::broadcast::channel(16);
-    let monitor = monitor::Monitor::new(
-        shared.clone(),
-        docker.clone(),
-        host.clone(),
-        audit.clone(),
-        events_tx,
-        exec.clone(),
+    let core = Arc::new(
+        agent::AgentCore::new(
+            shared.clone(),
+            root.to_path_buf(),
+            users_path.clone(),
+            auth::JwtKeys::new("test-secret".into()),
+            String::new(),
+            docker,
+            host,
+            Arc::new(gitsync::Gitsync::new()),
+            &root.join("justification.log"),
+        )
+        .unwrap(),
     );
 
     let state = AppState {
         config: shared,
         users,
-        jwt: Arc::new(auth::JwtKeys::new("test-secret".into())),
-        host,
-        docker,
+        agent: agent::Agent::Local(core),
         exec,
-        monitor,
         audit,
-        gitsync: Arc::new(gitsync::Gitsync::new()),
     };
     let app = api::api_router()
         .merge(mcp::router(state.clone()))
@@ -124,6 +152,45 @@ async fn harness() -> Harness {
         app,
         state,
         _dir: dir,
+    }
+}
+
+/// Harness talking to the privileged core over a real unix socket — same
+/// wire protocol the production `ddm-server agent` split uses.
+async fn harness_remote() -> Harness {
+    let h = harness().await;
+    let core = match &h.state.agent {
+        agent::Agent::Local(c) => c.clone(),
+        _ => unreachable!(),
+    };
+    let sock = h._dir.path().join("agent.sock");
+    {
+        let core = core.clone();
+        let sock = sock.clone();
+        tokio::spawn(async move {
+            let _ = agent::transport::serve(core, &sock).await;
+        });
+    }
+    for _ in 0..100 {
+        if sock.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let state = AppState {
+        config: h.state.config.clone(),
+        users: h.state.users.clone(),
+        agent: agent::Agent::Remote(agent::transport::SocketAgent::new(sock)),
+        exec: h.state.exec.clone(),
+        audit: h.state.audit.clone(),
+    };
+    let app = api::api_router()
+        .merge(mcp::router(state.clone()))
+        .with_state(state.clone());
+    Harness {
+        app,
+        state,
+        _dir: h._dir,
     }
 }
 
@@ -721,7 +788,14 @@ async fn expired_token_rejected() {
     let h = harness().await;
     let user = h.state.users.get("admin").await.unwrap();
     // issue a token that expired in the past
-    let expired = h.state.jwt.issue(&user, -10, None).unwrap();
+    let expired = h
+        .state
+        .agent
+        .local_core()
+        .unwrap()
+        .jwt
+        .issue(&user, -120, None)
+        .unwrap();
     let (st, _, _) = call(&h.app, "GET", "/api/services", Some(&expired), None).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
 }
@@ -909,14 +983,20 @@ async fn ws_endpoints_require_auth() {
 }
 
 #[tokio::test]
-async fn query_param_token_accepted() {
-    // `?token=` is supported (documented for WS clients).
+async fn query_token_only_accepted_on_ws() {
+    // `?token=` must not authenticate regular REST calls (URLs leak via
+    // logs/history); it remains supported on /ws/* for WS clients.
     let h = harness().await;
     let (_, admin) = login(&h.app, "admin", PASSWORD).await;
     let uri = format!("/api/services?token={admin}");
-    let (st, _, j) = call(&h.app, "GET", &uri, None, None).await;
-    assert_eq!(st, StatusCode::OK);
-    assert_eq!(service_names(&j).len(), 2);
+    let (st, _, _) = call(&h.app, "GET", &uri, None, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    // On /ws/* the token is accepted — the request then fails the
+    // websocket upgrade (no Upgrade headers in oneshot) but NOT with 401.
+    let uri = format!("/ws/events?token={admin}");
+    let (st, _, _) = call(&h.app, "GET", &uri, None, None).await;
+    assert_ne!(st, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -970,4 +1050,452 @@ async fn execution_ids_not_guessable_leak() {
     let h = harness().await;
     let (st, _, _) = call(&h.app, "GET", "/api/executions", None, None).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// regression tests for the 2nd audit round
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn scoped_token_cannot_change_password() {
+    // A scoped MCP token must not reset the owner's password — that would
+    // mint full credentials via a fresh login and escape the scope.
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    let (_, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/auth/token",
+        Some(&admin),
+        Some(serde_json::json!({"ttl_minutes": 10, "actions": ["admin"]})),
+    )
+    .await;
+    let scoped = j
+        .pointer("/data/token")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/users/admin/password",
+        Some(&scoped),
+        Some(serde_json::json!({"password": "newpassword123"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "scoped token changed password");
+}
+
+#[tokio::test]
+async fn self_password_change_requires_current() {
+    let h = harness().await;
+    let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
+
+    // no current password → rejected
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/users/viewer/password",
+        Some(&viewer),
+        Some(serde_json::json!({"password": "brandnewpass1"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // wrong current → rejected
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/users/viewer/password",
+        Some(&viewer),
+        Some(serde_json::json!({"password": "brandnewpass1", "current_password": "wrong"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // correct current → accepted; new password works for login
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/users/viewer/password",
+        Some(&viewer),
+        Some(serde_json::json!({"password": "brandnewpass1", "current_password": PASSWORD})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = login(&h.app, "viewer", "brandnewpass1").await;
+    assert_eq!(st, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn login_throttle_locks_after_failures() {
+    let h = harness().await;
+    for _ in 0..5 {
+        let (st, _, _) = call(
+            &h.app,
+            "POST",
+            "/api/auth/login",
+            None,
+            Some(serde_json::json!({"name": "admin", "password": "wrong"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+    // locked: further wrong attempts are throttled (429)
+    let (st, _, _) = call(
+        &h.app,
+        "POST",
+        "/api/auth/login",
+        None,
+        Some(serde_json::json!({"name": "admin", "password": "still-wrong"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+    // but a correct password must still succeed — no self-DoS — and it
+    // clears the lockout
+    let (st, _) = login(&h.app, "admin", PASSWORD).await;
+    assert_eq!(st, StatusCode::OK, "lockout blocked the real admin");
+    let (st, _) = login(&h.app, "admin", PASSWORD).await;
+    assert_eq!(st, StatusCode::OK, "lockout not cleared by success");
+    // lockout is per-user — viewer was never throttled
+    let (st, _) = login(&h.app, "viewer", PASSWORD).await;
+    assert_eq!(st, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn command_run_requires_feature_and_role() {
+    let h = harness().await;
+    let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+
+    // strip run_commands from the viewer → even ungated items are 403
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/users/viewer",
+        Some(&admin),
+        Some(serde_json::json!({"features": {"run_commands": false}})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _, _) = call(
+        &h.app,
+        "POST",
+        "/api/commands/0/0",
+        Some(&viewer),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "ran without run_commands");
+
+    // restore run_commands — ungated item works, admin-only section doesn't
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/users/viewer",
+        Some(&admin),
+        Some(serde_json::json!({"features": {"run_commands": true}})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _, _) = call(
+        &h.app,
+        "POST",
+        "/api/commands/0/0",
+        Some(&viewer),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _, _) = call(
+        &h.app,
+        "POST",
+        "/api/commands/1/0",
+        Some(&viewer),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "role-gated section ran for viewer"
+    );
+
+    // admin runs everything
+    let (st, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/commands/1/0",
+        Some(&admin),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(j.pointer("/data/execution_id").is_some());
+}
+
+#[tokio::test]
+async fn executions_scoped_to_owner() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
+
+    let (st, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/commands/0/0",
+        Some(&admin),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let eid = j.pointer("/data/execution_id").unwrap().as_str().unwrap();
+
+    // admin sees it
+    let (st, _, j) = call(&h.app, "GET", "/api/executions", Some(&admin), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(j.pointer("/data/0/user").unwrap().as_str(), Some("admin"));
+
+    // viewer sees neither the list entry nor the detail
+    let (st, _, j) = call(&h.app, "GET", "/api/executions", Some(&viewer), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        j["data"].as_array().unwrap().len(),
+        0,
+        "viewer saw admin's execution"
+    );
+    let (st, _, _) = call(
+        &h.app,
+        "GET",
+        &format!("/api/executions/{eid}"),
+        Some(&viewer),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn token_cannot_outlive_parent() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    let (_, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/auth/token",
+        Some(&admin),
+        Some(serde_json::json!({"ttl_minutes": 1})),
+    )
+    .await;
+    let parent = j
+        .pointer("/data/token")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let parent_exp = j.pointer("/data/expires_at").unwrap().as_i64().unwrap();
+
+    // ask for 120 minutes; child must be capped at the parent's exp
+    let (st, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/auth/token",
+        Some(&parent),
+        Some(serde_json::json!({"ttl_minutes": 120})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let child_exp = j.pointer("/data/expires_at").unwrap().as_i64().unwrap();
+    assert!(
+        child_exp <= parent_exp,
+        "child outlived parent: {child_exp} > {parent_exp}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// regression tests for audit round 3
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn systemd_unit_injection_rejected() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    // crafted unit names that would break `cd '{work_dir}'` or arg quoting
+    for bad in [
+        "x';id;echo '",
+        "svc a.service",
+        "../x.service",
+        "svc$(id).service",
+        "svc`id`.service",
+        "svc;x.service",
+    ] {
+        let enc: String = bad
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_') {
+                    (b as char).to_string()
+                } else {
+                    format!("%{b:02X}")
+                }
+            })
+            .collect();
+        for ep in ["execute", "restart", "logs"] {
+            let method = if ep == "logs" { "GET" } else { "POST" };
+            let uri = format!("/api/systemd/units/{enc}/{ep}");
+            let body = (ep == "execute").then(|| serde_json::json!({"command_id": "inspect"}));
+            let (st, _, _) = call(&h.app, method, &uri, Some(&admin), body).await;
+            assert!(
+                st == StatusCode::BAD_REQUEST || st == StatusCode::NOT_FOUND,
+                "{ep} on {bad:?} → {st}"
+            );
+        }
+    }
+    // a legit unit matching the group regex still works (returns execution)
+    let (st, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/systemd/units/svc_a.service/execute",
+        Some(&admin),
+        Some(serde_json::json!({"command_id": "inspect"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "legit unit_execute failed: {j}");
+}
+
+#[tokio::test]
+async fn unknown_compose_policy_fails_closed() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    // point admin's policy at a name that doesn't exist — previously this
+    // silently disabled all compose validation
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/users/admin",
+        Some(&admin),
+        Some(serde_json::json!({"compose_policy": "nonexistent"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/services",
+        Some(&admin),
+        Some(serde_json::json!({
+            "name": "evil",
+            "compose": "services:\n  a:\n    image: alpine\n    privileged: true\n",
+        })),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::BAD_REQUEST,
+        "unknown policy skipped validation: {j}"
+    );
+}
+
+#[tokio::test]
+async fn config_redacts_gitops_url_credentials() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    let (st, _, j) = call(&h.app, "GET", "/api/config", Some(&admin), None).await;
+    assert_eq!(st, StatusCode::OK);
+    let url = j.pointer("/gitops/url").unwrap().as_str().unwrap();
+    assert!(!url.contains("secret123"), "credentials leaked in {url}");
+    assert!(url.contains("***"), "url not redacted: {url}");
+}
+
+#[tokio::test]
+async fn edit_units_cannot_bypass_admin_gate() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
+    // grant edit_units + unit_edit_requires=admin → must still be 403
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/users/viewer",
+        Some(&admin),
+        Some(serde_json::json!({"features": {"edit_units": true}})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/services/svc_a/unit",
+        Some(&viewer),
+        Some(serde_json::json!({"content": "[Unit]\nDescription=x\n"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "edit_units bypassed admin gate");
+}
+
+#[tokio::test]
+async fn monitoring_target_validation() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    for bad in [
+        "file:///etc/passwd",
+        "gopher://x",
+        "https://u:p@host/",
+        "notaurl",
+    ] {
+        let (st, _, _) = call(
+            &h.app,
+            "PUT",
+            "/api/services/svc_a/monitoring",
+            Some(&admin),
+            Some(serde_json::json!({
+                "health": {"kind": "http", "target": bad},
+                "log_alerts": [],
+            })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "target {bad:?} accepted");
+    }
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/services/svc_a/monitoring",
+        Some(&admin),
+        Some(serde_json::json!({
+            "health": {"kind": "http", "target": "http://localhost:8080/health"},
+            "log_alerts": [],
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// Privilege-separated transport (unix socket)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn remote_agent_login_and_calls() {
+    let h = harness_remote().await;
+    // auth roundtrip over the socket
+    let (st, _tok) = login(&h.app, "admin", PASSWORD).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, tok) = login(&h.app, "admin", PASSWORD).await;
+    assert_eq!(st, StatusCode::OK);
+    // authenticated call + wrong creds
+    let (st, _, _) = call(&h.app, "GET", "/api/services", Some(&tok), None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = login(&h.app, "admin", "nope-nope-nope").await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    // tampered token still dies at the agent
+    let mut parts: Vec<String> = tok.split('.').map(|s| s.to_string()).collect();
+    let mut payload = parts[1].clone().into_bytes();
+    payload[0] = if payload[0] == b'A' { b'B' } else { b'A' };
+    parts[1] = String::from_utf8(payload).unwrap();
+    let forged = parts.join(".");
+    let (st, _, _) = call(&h.app, "GET", "/api/services", Some(&forged), None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    // the agent wrote a justification record for the calls above
+    let log = std::fs::read_to_string(h._dir.path().join("justification.log")).unwrap();
+    assert!(log.contains("\"authenticate\""), "no justification written");
 }

@@ -1,7 +1,5 @@
 use crate::auth::{bad_request, forbidden, internal, not_found, ok, AuthUser};
 use crate::config::{ServiceBackupConfig, ServiceMonitoringConfig};
-use crate::docker::compose_argv;
-use crate::exec::{host_shell_item, shell_item};
 use crate::logs::{CompiledFilter, LogFilter};
 use crate::permissions::{can_access_service, valid_service_name};
 use crate::policy::{self, PolicyViolation};
@@ -33,21 +31,47 @@ pub(crate) async fn require_service_access(
     if !can_access_service(&user.user, name, cfg.security.default_access) {
         return Err(forbidden());
     }
-    svc_ops::get_service(&cfg, name).map_err(|e| not_found(e.to_string()))
+    state
+        .agent
+        .call_as::<svc_ops::Service>(
+            crate::agent::proto::SyncVerb::ServiceGet {
+                name: name.to_string(),
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| not_found(e.to_string()))
 }
 
 /// The caller's compose policy name → the policy. `unrestricted` → None.
+/// An unknown policy name must NOT disable checks: fall back to the
+/// configured default policy (and ultimately to a deny-all default).
 async fn caller_policy(state: &AppState, user: &AuthUser) -> Option<crate::config::ComposePolicy> {
     let cfg = state.config.get().await;
-    let name = user
-        .user
-        .compose_policy
-        .clone()
-        .unwrap_or_else(|| cfg.security.default_policy.clone());
+    resolve_policy(&cfg, user.user.compose_policy.as_deref())
+}
+
+/// Shared resolution used by `caller_policy` and `effective_policy`.
+pub(crate) fn resolve_policy(
+    cfg: &crate::config::AppConfig,
+    user_policy: Option<&str>,
+) -> Option<crate::config::ComposePolicy> {
+    let name = user_policy.unwrap_or(&cfg.security.default_policy);
     if name == "unrestricted" {
         return None;
     }
-    cfg.security.policies.get(&name).cloned()
+    cfg.security
+        .policies
+        .get(name)
+        .cloned()
+        .or_else(|| {
+            cfg.security
+                .policies
+                .get(&cfg.security.default_policy)
+                .cloned()
+        })
+        // last resort: built-in strict policy — never fail open
+        .or_else(|| Some(crate::config::ComposePolicy::strict_defaults()))
 }
 
 fn policy_error(violations: &[PolicyViolation]) -> Response {
@@ -88,24 +112,42 @@ pub async fn list(
     State(state): State<AppState>,
 ) -> Result<Json<crate::auth::SuccessResponse<Vec<ServiceSummary>>>, Response> {
     let cfg = state.config.get().await;
-    let services = svc_ops::discover_services(&cfg);
-    let monitor_states = state.monitor.status().await;
+    let services: Vec<svc_ops::Service> = state
+        .agent
+        .call_as(crate::agent::proto::SyncVerb::ServicesList, &user.token)
+        .await
+        .unwrap_or_default();
+    let monitor_states: serde_json::Value = state
+        .agent
+        .call(crate::agent::proto::SyncVerb::MonitorStatusAll, &user.token)
+        .await
+        .unwrap_or_else(|_| serde_json::json!({}));
     let mut out = vec![];
     for svc in services {
         if !can_access_service(&user.user, &svc.name, cfg.security.default_access) {
             continue;
         }
-        let containers = state
-            .docker
-            .project_containers(&svc.name)
+        let containers: Vec<crate::docker::ContainerInfo> = state
+            .agent
+            .call_as(
+                crate::agent::proto::SyncVerb::ProjectContainers {
+                    service: svc.name.clone(),
+                },
+                &user.token,
+            )
             .await
             .unwrap_or_default();
-        let unit = unit_summary(&state, &svc.name).await;
+        let unit = unit_summary(&state, &user, &svc.name).await;
         let monitor_state = monitor_states.get(&svc.name).map(|m| {
-            if m.checks
-                .iter()
-                .any(|c| c.state == "down" || c.state == "firing")
-            {
+            let alerting = m["checks"]
+                .as_array()
+                .map(|cs| {
+                    cs.iter().any(|c| {
+                        c["state"].as_str() == Some("down") || c["state"].as_str() == Some("firing")
+                    })
+                })
+                .unwrap_or(false);
+            if alerting {
                 "alerting".to_string()
             } else {
                 "ok".to_string()
@@ -124,12 +166,27 @@ pub async fn list(
     Ok(ok(out))
 }
 
-async fn unit_summary(state: &AppState, name: &str) -> UnitSummary {
-    let cfg = state.config.get().await;
-    let path = crate::systemd::unit_path(&cfg, name);
-    let exists = path.is_file();
+async fn unit_summary(state: &AppState, user: &AuthUser, name: &str) -> UnitSummary {
+    let unit = format!("{name}.service");
+    let exists: bool = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::UnitPathExists {
+                unit: name.to_string(),
+            },
+            &user.token,
+        )
+        .await
+        .unwrap_or(false);
     let (enabled, active) = if exists {
-        crate::systemd::unit_state(&state.host, &format!("{name}.service")).await
+        state
+            .agent
+            .call_as::<(Option<String>, Option<String>)>(
+                crate::agent::proto::SyncVerb::UnitState { unit },
+                &user.token,
+            )
+            .await
+            .unwrap_or_default()
     } else {
         (None, None)
     };
@@ -157,12 +214,17 @@ pub async fn detail(
     Path(name): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<ServiceDetail>>, Response> {
     let svc = require_service_access(&state, &user, &name).await?;
-    let containers = state
-        .docker
-        .project_containers(&svc.name)
+    let containers: Vec<crate::docker::ContainerInfo> = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::ProjectContainers {
+                service: svc.name.clone(),
+            },
+            &user.token,
+        )
         .await
         .unwrap_or_default();
-    let unit = unit_summary(&state, &svc.name).await;
+    let unit = unit_summary(&state, &user, &svc.name).await;
     Ok(ok(ServiceDetail {
         name: svc.name.clone(),
         dir: svc.dir.to_string_lossy().to_string(),
@@ -244,47 +306,29 @@ pub async fn create(
         }
     }
 
-    let dir =
-        svc_ops::create_service_dir(&cfg, &req.name).map_err(|e| bad_request(e.to_string()))?;
-    let compose_path = dir.join(&cfg.paths.compose_file);
-    crate::compose::write_compose(&compose_path, &compose_text)
+    let ok_exec = state
+        .agent
+        .exec_collect(
+            crate::agent::proto::ExecVerb::ServiceCreate {
+                name: req.name.clone(),
+                compose: compose_text,
+                description: req.description.clone().unwrap_or_default(),
+                template_id: req.template_id.clone(),
+                created_by: user.user.name.clone(),
+                create_unit: req.create_unit,
+                enable: req.enable,
+                start: req.start,
+            },
+            format!("create {}", req.name),
+            Some(req.name.clone()),
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
+        .await
         .map_err(|e| internal(e.to_string()))?;
-
-    let meta = crate::config::ServiceMeta {
-        description: req.description.clone().unwrap_or_default(),
-        created_by: Some(user.user.name.clone()),
-        template: req.template_id.clone(),
-        ..Default::default()
-    };
-    svc_ops::save_meta(&dir, &meta).map_err(|e| internal(e.to_string()))?;
-
-    // optional systemd unit
-    if req.create_unit {
-        let svc = svc_ops::get_service(&cfg, &req.name).map_err(|e| internal(e.to_string()))?;
-        let unit = crate::systemd::render_unit_for(&cfg, &state.host, &svc)
-            .await
-            .map_err(|e| internal(e.to_string()))?;
-        crate::systemd::write_unit(&cfg, &state.host, &svc, &unit)
-            .await
-            .map_err(|e| internal(e.to_string()))?;
-        if req.enable {
-            let _ = state
-                .host
-                .run(
-                    "systemctl",
-                    &["enable".into(), format!("{}.service", svc.name)],
-                )
-                .await;
-        }
-        if req.start {
-            let _ = state
-                .host
-                .run(
-                    "systemctl",
-                    &["start".into(), format!("{}.service", svc.name)],
-                )
-                .await;
-        }
+    if !ok_exec {
+        return Err(internal("service creation failed"));
     }
 
     state
@@ -310,27 +354,23 @@ pub async fn delete(
     if !user.user.is_admin() {
         return Err(forbidden());
     }
-    let svc = require_service_access(&state, &user, &name).await?;
-    if q.down {
-        let _ = compose_exec(&state, &svc, &["down"]).await;
-    }
-    // remove unit
-    let cfg = state.config.get().await;
-    let unit = crate::systemd::unit_path(&cfg, &svc.name);
-    if unit.exists() {
-        let _ = state
-            .host
-            .run(
-                "systemctl",
-                &["disable".into(), "--now".into(), format!("{name}.service")],
-            )
-            .await;
-        let _ = std::fs::remove_file(&unit);
-        let _ = state.host.run("systemctl", &["daemon-reload".into()]).await;
-    }
-    if !q.keep_dir {
-        std::fs::remove_dir_all(&svc.dir).map_err(|e| internal(e.to_string()))?;
-    }
+    require_service_access(&state, &user, &name).await?;
+    state
+        .agent
+        .exec_collect(
+            crate::agent::proto::ExecVerb::ServiceDelete {
+                name: name.clone(),
+                down: q.down,
+                keep_dir: q.keep_dir,
+            },
+            format!("delete {name}"),
+            Some(name.clone()),
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
+        .await
+        .map_err(|e| internal(e.to_string()))?;
     state
         .audit
         .record(&user.user.name, "service_delete", &name, "");
@@ -353,8 +393,17 @@ pub async fn get_compose(
     Path(name): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<ComposeResponse>>, Response> {
     let svc = require_service_access(&state, &user, &name).await?;
-    let content =
-        crate::compose::read_compose(&svc.compose_path).map_err(|e| internal(e.to_string()))?;
+    let _ = svc;
+    let content: String = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::ComposeRead {
+                service: name.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| internal(e.to_string()))?;
     let violations = caller_policy(&state, &user)
         .await
         .map(|p| policy::validate_compose(&content, &p))
@@ -381,7 +430,7 @@ pub async fn put_compose(
     if !user.user.is_admin() && !user.user.features.edit_compose {
         return Err(forbidden());
     }
-    let svc = require_service_access(&state, &user, &name).await?;
+    let _svc = require_service_access(&state, &user, &name).await?;
     crate::compose::parse_check(&req.content).map_err(|e| bad_request(e.to_string()))?;
     if let Some(pol) = caller_policy(&state, &user).await {
         let v = policy::validate_compose(&req.content, &pol);
@@ -395,15 +444,39 @@ pub async fn put_compose(
             return Err(policy_error(&v));
         }
     }
-    crate::compose::write_compose(&svc.compose_path, &req.content)
+    state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::ComposeWrite {
+                service: name.clone(),
+                content: req.content.clone(),
+            },
+            &user.token,
+        )
+        .await
         .map_err(|e| internal(e.to_string()))?;
     state
         .audit
         .record(&user.user.name, "compose_write", &name, "");
     let mut exec_id = None;
     if req.recreate {
-        exec_id =
-            Some(run_compose_action(&state, &svc, &user, &["up", "-d", "--remove-orphans"]).await);
+        exec_id = Some(
+            state
+                .agent
+                .exec(
+                    crate::agent::proto::ExecVerb::Compose {
+                        service: name.clone(),
+                        op: crate::agent::proto::ComposeOp::UpRecreate,
+                    },
+                    format!("recreate {name}"),
+                    Some(name.clone()),
+                    &user.token,
+                    &user.user.name,
+                    &state.exec,
+                )
+                .await
+                .map_err(|e| internal(e.to_string()))?,
+        );
     }
     Ok(ok(
         serde_json::json!({ "saved": true, "execution_id": exec_id }),
@@ -427,15 +500,30 @@ pub async fn get_unit(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<UnitResponse>>, Response> {
-    let svc = require_service_access(&state, &user, &name).await?;
-    let cfg = state.config.get().await;
-    let path = crate::systemd::unit_path(&cfg, &svc.name);
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let rendered = crate::systemd::render_unit_for(&cfg, &state.host, &svc)
+    let _svc = require_service_access(&state, &user, &name).await?;
+    let content: Option<String> = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::UnitFileRead {
+                service: name.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .unwrap_or(None);
+    let rendered: Option<String> = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::UnitRender {
+                service: name.clone(),
+            },
+            &user.token,
+        )
         .await
         .ok();
+    let content = content.unwrap_or_default();
     Ok(ok(UnitResponse {
-        exists: path.is_file(),
+        exists: !content.is_empty(),
         generated: rendered
             .as_ref()
             .map(|r| r.trim_end() == content.trim_end())
@@ -462,26 +550,34 @@ pub async fn put_unit(
 ) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
     let cfg = state.config.get().await;
     let needed = cfg.security.unit_edit_requires.clone();
-    if !user.user.has_role(&needed) && !user.user.features.edit_units {
+    // The `edit_units` feature may satisfy a non-admin requirement, but it
+    // must never bypass a gate configured as `admin`.
+    let feature_ok = user.user.features.edit_units && needed != "admin";
+    if !user.user.has_role(&needed) && !feature_ok {
         return Err(forbidden());
     }
     drop(cfg);
-    let svc = require_service_access(&state, &user, &name).await?;
-    let cfg = state.config.get().await;
-    crate::systemd::write_unit(&cfg, &state.host, &svc, &req.content)
+    let _svc = require_service_access(&state, &user, &name).await?;
+    crate::systemd::validate_unit(&req.content).map_err(|e| bad_request(e.to_string()))?;
+    let ok_exec = state
+        .agent
+        .exec_collect(
+            crate::agent::proto::ExecVerb::UnitWrite {
+                service: name.clone(),
+                content: req.content.clone(),
+                enable: req.enable.unwrap_or(false),
+                restart: req.restart,
+            },
+            format!("write unit {name}"),
+            Some(name.clone()),
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
         .await
         .map_err(|e| bad_request(e.to_string()))?;
-    if req.enable == Some(true) {
-        let _ = state
-            .host
-            .run("systemctl", &["enable".into(), format!("{name}.service")])
-            .await;
-    }
-    if req.restart {
-        let _ = state
-            .host
-            .run("systemctl", &["restart".into(), format!("{name}.service")])
-            .await;
+    if !ok_exec {
+        return Err(internal("unit write failed"));
     }
     state.audit.record(&user.user.name, "unit_write", &name, "");
     Ok(ok(true))
@@ -492,9 +588,17 @@ pub async fn check_unit(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<crate::systemd::UnitCheckReport>>, Response> {
-    let svc = require_service_access(&state, &user, &name).await?;
-    let cfg = state.config.get().await;
-    let report = crate::systemd::check_unit(&cfg, &state.host, &svc).await;
+    let _svc = require_service_access(&state, &user, &name).await?;
+    let report: crate::systemd::UnitCheckReport = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::UnitCheck {
+                service: name.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| internal(e.to_string()))?;
     Ok(ok(report))
 }
 
@@ -515,25 +619,25 @@ pub async fn regenerate_unit(
     if !user.user.is_admin() && !user.user.features.edit_compose {
         return Err(forbidden());
     }
-    let svc = require_service_access(&state, &user, &name).await?;
-    let cfg = state.config.get().await;
-    let unit = crate::systemd::render_unit_for(&cfg, &state.host, &svc)
+    let _svc = require_service_access(&state, &user, &name).await?;
+    let ok_exec = state
+        .agent
+        .exec_collect(
+            crate::agent::proto::ExecVerb::UnitRegen {
+                service: name.clone(),
+                enable: req.enable,
+                start: req.start,
+            },
+            format!("regen unit {name}"),
+            Some(name.clone()),
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
         .await
         .map_err(|e| internal(e.to_string()))?;
-    crate::systemd::write_unit(&cfg, &state.host, &svc, &unit)
-        .await
-        .map_err(|e| internal(e.to_string()))?;
-    if req.enable {
-        let _ = state
-            .host
-            .run("systemctl", &["enable".into(), format!("{name}.service")])
-            .await;
-    }
-    if req.start {
-        let _ = state
-            .host
-            .run("systemctl", &["start".into(), format!("{name}.service")])
-            .await;
+    if !ok_exec {
+        return Err(internal("unit regeneration failed"));
     }
     state
         .audit
@@ -550,67 +654,6 @@ pub struct ActionRequest {
     pub action: String, // pull|up|down|restart|update|start|stop|enable|disable
 }
 
-async fn compose_exec(
-    state: &AppState,
-    svc: &svc_ops::Service,
-    args: &[&str],
-) -> Result<std::process::Output, std::io::Error> {
-    let cfg = state.config.get().await;
-    let (prog, mut argv) = compose_argv(&cfg.docker.compose_command, &[]);
-    argv.push("-f".into());
-    argv.push(
-        svc.compose_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string(),
-    );
-    argv.extend(args.iter().map(|s| s.to_string()));
-    tokio::process::Command::new(&prog)
-        .args(&argv)
-        .current_dir(&svc.dir)
-        .output()
-        .await
-}
-
-async fn run_compose_action(
-    state: &AppState,
-    svc: &svc_ops::Service,
-    user: &AuthUser,
-    args: &[&str],
-) -> String {
-    let cfg = state.config.get().await;
-    let (prog, mut argv) = compose_argv(&cfg.docker.compose_command, &[]);
-    argv.push("-f".into());
-    argv.push(
-        svc.compose_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string(),
-    );
-    argv.extend(args.iter().map(|s| s.to_string()));
-    let title = format!("compose {} ({})", args.join(" "), svc.name);
-    let script = format!(
-        "cd {} && {} {}",
-        shell(&svc.dir.to_string_lossy()),
-        prog,
-        argv.join(" ")
-    );
-    let item = shell_item(&title, &script, ".");
-    state.exec.run_item(
-        item,
-        HashMap::new(),
-        &user.user.name,
-        Some(svc.name.clone()),
-        false,
-    )
-}
-
-fn shell(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 pub async fn action(
     user: AuthUser,
     State(state): State<AppState>,
@@ -621,60 +664,34 @@ pub async fn action(
         return Err(forbidden());
     }
     let svc = require_service_access(&state, &user, &name).await?;
-    let cfg = state.config.get().await;
-    let execution_id = match req.action.as_str() {
-        // compose lifecycle
-        "pull" => run_compose_action(&state, &svc, &user, &["pull"]).await,
-        "up" => run_compose_action(&state, &svc, &user, &["up", "-d"]).await,
-        "down" => run_compose_action(&state, &svc, &user, &["down"]).await,
-        "restart" => run_compose_action(&state, &svc, &user, &["restart"]).await,
-        "start" => run_compose_action(&state, &svc, &user, &["start"]).await,
-        "stop" => run_compose_action(&state, &svc, &user, &["stop"]).await,
-        "update" => {
-            // pull + up -d --remove-orphans
-            let cfg2 = state.config.get().await;
-            let (prog, mut argv) = compose_argv(&cfg2.docker.compose_command, &[]);
-            argv.push("-f".into());
-            argv.push(
-                svc.compose_path
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string(),
-            );
-            let script = format!(
-                "cd {dir} && {prog} {a} pull && {prog} {a} up -d --remove-orphans",
-                dir = shell(&svc.dir.to_string_lossy()),
-                prog = prog,
-                a = argv.join(" "),
-            );
-            state.exec.run_item(
-                shell_item(&format!("update ({})", svc.name), &script, "."),
-                HashMap::new(),
-                &user.user.name,
-                Some(svc.name.clone()),
-                false,
-            )
-        }
-        // systemd enable/disable via host
-        "enable" | "disable" => {
-            let unit = format!("{}.service", svc.name);
-            let script = format!("systemctl {} {}", req.action, shell(&unit));
-            state.exec.run_item(
-                host_shell_item(
-                    &format!("systemctl {} ({})", req.action, svc.name),
-                    &script,
-                    cfg.paths.host_exec,
-                    cfg.paths.nsenter_target,
-                ),
-                HashMap::new(),
-                &user.user.name,
-                Some(svc.name.clone()),
-                true,
-            )
-        }
+    let _cfg = state.config.get().await;
+    let op = match req.action.as_str() {
+        "pull" => crate::agent::proto::ComposeOp::Pull,
+        "up" => crate::agent::proto::ComposeOp::Up,
+        "down" => crate::agent::proto::ComposeOp::Down,
+        "restart" => crate::agent::proto::ComposeOp::Restart,
+        "start" => crate::agent::proto::ComposeOp::Start,
+        "stop" => crate::agent::proto::ComposeOp::Stop,
+        "update" => crate::agent::proto::ComposeOp::Update,
+        "enable" => crate::agent::proto::ComposeOp::Enable,
+        "disable" => crate::agent::proto::ComposeOp::Disable,
         other => return Err(bad_request(format!("unknown action '{other}'"))),
     };
+    let execution_id = state
+        .agent
+        .exec(
+            crate::agent::proto::ExecVerb::Compose {
+                service: svc.name.clone(),
+                op,
+            },
+            format!("{} ({})", req.action, svc.name),
+            Some(svc.name.clone()),
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
+        .await
+        .map_err(|e| internal(e.to_string()))?;
     state.audit.record(
         &user.user.name,
         &format!("service_{}", req.action),
@@ -710,29 +727,38 @@ pub async fn logs(
         .min(cfg.logging.max_tail);
     let filter = CompiledFilter::compile(&q.filter)
         .map_err(|e| bad_request(format!("invalid filter regex: {e}")))?;
-    let containers = state
-        .docker
-        .project_containers(&svc.name)
+    let containers: Vec<crate::docker::ContainerInfo> = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::ProjectContainers {
+                service: svc.name.clone(),
+            },
+            &user.token,
+        )
         .await
         .unwrap_or_default();
     let mut lines = vec![];
     for c in &containers {
-        let mut stream = state
-            .docker
-            .logs(&c.id, tail, q.filter.since, false)
+        let logs: Vec<crate::docker::LogLine> = state
+            .agent
+            .call_as(
+                crate::agent::proto::SyncVerb::ContainerLogsCollect {
+                    id: c.id.clone(),
+                    tail,
+                    since: q.filter.since,
+                },
+                &user.token,
+            )
             .await
             .map_err(|e| internal(e.to_string()))?;
-        use futures::StreamExt;
-        while let Some(line) = stream.next().await {
-            if let Ok(l) = line {
-                if filter.matches(&l.text, &l.stream, Some(&c.service)) {
-                    lines.push(serde_json::json!({
-                        "container": c.name,
-                        "service": c.service,
-                        "stream": l.stream,
-                        "text": l.text,
-                    }));
-                }
+        for l in logs {
+            if filter.matches(&l.text, &l.stream, Some(&c.service)) {
+                lines.push(serde_json::json!({
+                    "container": c.name,
+                    "service": c.service,
+                    "stream": l.stream,
+                    "text": l.text,
+                }));
             }
         }
     }
@@ -766,14 +792,23 @@ pub async fn put_backup(
     if !user.user.is_admin() && !user.user.features.manage_backup {
         return Err(forbidden());
     }
-    let mut svc = require_service_access(&state, &user, &name).await?;
+    let _svc = require_service_access(&state, &user, &name).await?;
     for p in &bcfg.paths {
         if !svc_ops::valid_rel_path(p) {
             return Err(bad_request(format!("invalid backup path '{p}'")));
         }
     }
-    svc.meta.backup = Some(bcfg);
-    svc_ops::save_meta(&svc.dir, &svc.meta).map_err(|e| internal(e.to_string()))?;
+    state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::BackupPut {
+                service: name.clone(),
+                cfg: bcfg,
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| internal(e.to_string()))?;
     state
         .audit
         .record(&user.user.name, "backup_config", &name, "");
@@ -785,9 +820,18 @@ pub async fn backup_check(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<crate::backup::BackupCheckReport>>, Response> {
-    let svc = require_service_access(&state, &user, &name).await?;
-    let cfg = state.config.get().await;
-    Ok(ok(crate::backup::check(&cfg, &state.host, &svc).await))
+    let _svc = require_service_access(&state, &user, &name).await?;
+    let report: crate::backup::BackupCheckReport = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::BackupCheck {
+                service: name.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| internal(e.to_string()))?;
+    Ok(ok(report))
 }
 
 pub async fn backup_provision(
@@ -798,18 +842,15 @@ pub async fn backup_provision(
     if !user.user.is_admin() && !user.user.features.manage_backup {
         return Err(forbidden());
     }
-    let svc = require_service_access(&state, &user, &name).await?;
-    let cfg = state.config.get().await;
-    let bin = match cfg.backup.restic_binary.as_str() {
-        "auto" => state
-            .host
-            .which("restic")
-            .await
-            .map_err(|e| internal(e.to_string()))?
-            .unwrap_or_else(|| "restic".to_string()),
-        b => b.to_string(),
-    };
-    let steps = crate::backup::provision(&cfg, &state.host, &svc, &bin)
+    let _svc = require_service_access(&state, &user, &name).await?;
+    let steps: Vec<String> = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::BackupProvision {
+                service: name.clone(),
+            },
+            &user.token,
+        )
         .await
         .map_err(|e| internal(e.to_string()))?;
     state
@@ -826,21 +867,21 @@ pub async fn backup_run(
     if !user.user.is_admin() && !user.user.features.manage_backup {
         return Err(forbidden());
     }
-    let svc = require_service_access(&state, &user, &name).await?;
-    let cfg = state.config.get().await;
-    let script = crate::backup::run_script(&svc);
-    let id = state.exec.run_item(
-        host_shell_item(
-            &format!("backup run ({name})"),
-            &script,
-            cfg.paths.host_exec,
-            cfg.paths.nsenter_target,
-        ),
-        HashMap::new(),
-        &user.user.name,
-        Some(name.clone()),
-        true,
-    );
+    let _svc = require_service_access(&state, &user, &name).await?;
+    let id = state
+        .agent
+        .exec(
+            crate::agent::proto::ExecVerb::BackupRun {
+                service: name.clone(),
+            },
+            format!("backup run ({name})"),
+            Some(name.clone()),
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
+        .await
+        .map_err(|e| internal(e.to_string()))?;
     state.audit.record(&user.user.name, "backup_run", &name, "");
     Ok(ok(serde_json::json!({ "execution_id": id })))
 }
@@ -850,18 +891,15 @@ pub async fn backup_snapshots(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
-    let svc = require_service_access(&state, &user, &name).await?;
-    let cfg = state.config.get().await;
-    let bin = match cfg.backup.restic_binary.as_str() {
-        "auto" => state
-            .host
-            .which("restic")
-            .await
-            .map_err(|e| internal(e.to_string()))?
-            .unwrap_or_else(|| "restic".to_string()),
-        b => b.to_string(),
-    };
-    let snaps = crate::backup::snapshots(&cfg, &state.host, &svc, &bin)
+    let _svc = require_service_access(&state, &user, &name).await?;
+    let snaps: serde_json::Value = state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::BackupSnapshots {
+                service: name.clone(),
+            },
+            &user.token,
+        )
         .await
         .map_err(|e| internal(e.to_string()))?;
     Ok(ok(snaps))
@@ -875,30 +913,21 @@ pub async fn backup_forget(
     if !user.user.is_admin() && !user.user.features.manage_backup {
         return Err(forbidden());
     }
-    let svc = require_service_access(&state, &user, &name).await?;
-    let cfg = state.config.get().await;
-    let bin = match cfg.backup.restic_binary.as_str() {
-        "auto" => state
-            .host
-            .which("restic")
-            .await
-            .map_err(|e| internal(e.to_string()))?
-            .unwrap_or_else(|| "restic".to_string()),
-        b => b.to_string(),
-    };
-    let script = crate::backup::forget_script(&cfg, &svc, &bin);
-    let id = state.exec.run_item(
-        host_shell_item(
-            &format!("backup forget ({name})"),
-            &script,
-            cfg.paths.host_exec,
-            cfg.paths.nsenter_target,
-        ),
-        HashMap::new(),
-        &user.user.name,
-        Some(name.clone()),
-        true,
-    );
+    let _svc = require_service_access(&state, &user, &name).await?;
+    let id = state
+        .agent
+        .exec(
+            crate::agent::proto::ExecVerb::BackupForget {
+                service: name.clone(),
+            },
+            format!("backup forget ({name})"),
+            Some(name.clone()),
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
+        .await
+        .map_err(|e| internal(e.to_string()))?;
     state
         .audit
         .record(&user.user.name, "backup_forget", &name, "");
@@ -922,31 +951,23 @@ pub async fn backup_restore(
     if !user.user.is_admin() && !unrestricted {
         return Err(forbidden());
     }
-    let svc = require_service_access(&state, &user, &name).await?;
-    let cfg = state.config.get().await;
-    let bin = match cfg.backup.restic_binary.as_str() {
-        "auto" => state
-            .host
-            .which("restic")
-            .await
-            .map_err(|e| internal(e.to_string()))?
-            .unwrap_or_else(|| "restic".to_string()),
-        b => b.to_string(),
-    };
-    let script = crate::backup::restore_script(&cfg, &svc, &bin, &req.snapshot, &req.target_dir)
-        .map_err(|e| bad_request(e.to_string()))?;
-    let id = state.exec.run_item(
-        host_shell_item(
-            &format!("backup restore ({name})"),
-            &script,
-            cfg.paths.host_exec,
-            cfg.paths.nsenter_target,
-        ),
-        HashMap::new(),
-        &user.user.name,
-        Some(name.clone()),
-        true,
-    );
+    let _svc = require_service_access(&state, &user, &name).await?;
+    let id = state
+        .agent
+        .exec(
+            crate::agent::proto::ExecVerb::BackupRestore {
+                service: name.clone(),
+                snapshot: req.snapshot.clone(),
+                target_dir: req.target_dir.clone(),
+            },
+            format!("backup restore ({name})"),
+            Some(name.clone()),
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
+        .await
+        .map_err(|e| internal(e.to_string()))?;
     state.audit.record(
         &user.user.name,
         "backup_restore",
@@ -965,10 +986,25 @@ pub async fn get_monitoring(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
-    let svc = require_service_access(&state, &user, &name).await?;
+    let _svc = require_service_access(&state, &user, &name).await?;
+    let mon_cfg: Option<crate::config::ServiceMonitoringConfig> = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::MonitoringGet {
+                service: name.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .unwrap_or(None);
+    let all: serde_json::Value = state
+        .agent
+        .call(crate::agent::proto::SyncVerb::MonitorStatusAll, &user.token)
+        .await
+        .unwrap_or_else(|_| serde_json::json!({}));
     Ok(ok(serde_json::json!({
-        "config": svc.meta.monitoring,
-        "state": state.monitor.status().await.get(&name).cloned(),
+        "config": mon_cfg,
+        "state": all.get(&name).cloned(),
     })))
 }
 
@@ -991,9 +1027,52 @@ pub async fn put_monitoring(
             regex::Regex::new(x).map_err(|e| bad_request(format!("invalid exclude_regex: {e}")))?;
         }
     }
-    let mut svc = require_service_access(&state, &user, &name).await?;
-    svc.meta.monitoring = Some(m);
-    svc_ops::save_meta(&svc.dir, &svc.meta).map_err(|e| internal(e.to_string()))?;
+    // health-check targets are probed by the server — keep them sane:
+    // http checks must be plain http(s) without credentials; tcp checks a
+    // bare host[:port] (validated for charset, no spaces/schemes).
+    if let Some(h) = &m.health {
+        match (h.kind, h.target.as_deref()) {
+            (crate::config::HealthCheckKind::Http, Some(t)) => {
+                // authority = text between "://" and the next /?#
+                let authority = t
+                    .split_once("://")
+                    .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""))
+                    .unwrap_or("");
+                let ok = (t.starts_with("http://") || t.starts_with("https://"))
+                    && !authority.is_empty()
+                    && !authority.contains('@')
+                    && t.len() <= 2048;
+                if !ok {
+                    return Err(bad_request(
+                        "http health check target must be a credential-free http(s) URL",
+                    ));
+                }
+            }
+            (crate::config::HealthCheckKind::Tcp, Some(t)) => {
+                let host = t.split(':').next().unwrap_or("");
+                if host.is_empty()
+                    || !host
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+                {
+                    return Err(bad_request("invalid tcp health check target"));
+                }
+            }
+            _ => {}
+        }
+    }
+    let _svc = require_service_access(&state, &user, &name).await?;
+    state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::MonitoringPut {
+                service: name.clone(),
+                cfg: m,
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| internal(e.to_string()))?;
     state
         .audit
         .record(&user.user.name, "monitoring_config", &name, "");
@@ -1006,9 +1085,14 @@ pub async fn monitoring_test(
     Path(name): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
     let svc = require_service_access(&state, &user, &name).await?;
-    let containers = state
-        .docker
-        .project_containers(&svc.name)
+    let containers: Vec<crate::docker::ContainerInfo> = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::ProjectContainers {
+                service: svc.name.clone(),
+            },
+            &user.token,
+        )
         .await
         .unwrap_or_default();
     let mut health = vec![];

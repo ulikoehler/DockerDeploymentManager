@@ -6,10 +6,10 @@
 
 use crate::files;
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RepoInfo {
     /// Path relative to the service dir ("." = the service dir itself).
     pub path: String,
@@ -18,7 +18,7 @@ pub struct RepoInfo {
     pub dirty: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RepoStatus {
     pub path: String,
     pub branch: String,
@@ -29,7 +29,7 @@ pub struct RepoStatus {
     pub tracking: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RepoBranches {
     pub current: String,
     pub local: Vec<String>,

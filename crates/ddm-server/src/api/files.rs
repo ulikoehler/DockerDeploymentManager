@@ -1,5 +1,4 @@
-use crate::auth::{bad_request, forbidden, not_found, ok, AuthUser};
-use crate::exec::shell_item;
+use crate::auth::{bad_request, forbidden, ok, AuthUser};
 use crate::{files, gitops, AppState};
 use axum::{
     extract::{Path, Query, State},
@@ -7,7 +6,6 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use std::collections::HashMap;
 
 use super::services::require_service_access;
 
@@ -38,9 +36,19 @@ pub async fn list_files(
     Query(q): Query<PathQuery>,
 ) -> Result<Json<crate::auth::SuccessResponse<files::FileNode>>, Response> {
     let svc = require_service_access(&state, &user, &name).await?;
-    files::read_node(&svc.dir, &q.path)
-        .map(ok)
-        .map_err(|e| bad_request(e.to_string()))
+    let _ = svc;
+    let node: files::FileNode = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::FileNode {
+                service: name.clone(),
+                path: q.path.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(ok(node))
 }
 
 #[derive(Deserialize)]
@@ -56,8 +64,19 @@ pub async fn write_file(
     Json(req): Json<WriteRequest>,
 ) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
     require_edit_files(&user)?;
-    let svc = require_service_access(&state, &user, &name).await?;
-    files::write_file(&svc.dir, &req.path, &req.content).map_err(|e| bad_request(e.to_string()))?;
+    let _svc = require_service_access(&state, &user, &name).await?;
+    state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::FileWrite {
+                service: name.clone(),
+                path: req.path.clone(),
+                content: req.content.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
     state
         .audit
         .record(&user.user.name, "file_write", &name, &req.path);
@@ -76,8 +95,18 @@ pub async fn mkdir(
     Json(req): Json<MkdirRequest>,
 ) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
     require_edit_files(&user)?;
-    let svc = require_service_access(&state, &user, &name).await?;
-    files::mkdir(&svc.dir, &req.path).map_err(|e| bad_request(e.to_string()))?;
+    let _svc = require_service_access(&state, &user, &name).await?;
+    state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::FileMkdir {
+                service: name.clone(),
+                path: req.path.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
     state
         .audit
         .record(&user.user.name, "mkdir", &name, &req.path);
@@ -97,8 +126,19 @@ pub async fn rename(
     Json(req): Json<RenameRequest>,
 ) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
     require_edit_files(&user)?;
-    let svc = require_service_access(&state, &user, &name).await?;
-    files::rename(&svc.dir, &req.from, &req.to).map_err(|e| bad_request(e.to_string()))?;
+    let _svc = require_service_access(&state, &user, &name).await?;
+    state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::FileRename {
+                service: name.clone(),
+                from: req.from.clone(),
+                to: req.to.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
     state.audit.record(
         &user.user.name,
         "file_rename",
@@ -115,8 +155,18 @@ pub async fn delete_file(
     Query(q): Query<PathQuery>,
 ) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
     require_edit_files(&user)?;
-    let svc = require_service_access(&state, &user, &name).await?;
-    files::delete(&svc.dir, &q.path).map_err(|e| bad_request(e.to_string()))?;
+    let _svc = require_service_access(&state, &user, &name).await?;
+    state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::FileDelete {
+                service: name.clone(),
+                path: q.path.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
     state
         .audit
         .record(&user.user.name, "file_delete", &name, &q.path);
@@ -133,7 +183,17 @@ pub async fn git_repos(
     Path(name): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<Vec<gitops::RepoInfo>>>, Response> {
     let svc = require_service_access(&state, &user, &name).await?;
-    Ok(ok(gitops::list_repos(&svc.dir).await))
+    let repos: Vec<gitops::RepoInfo> = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::GitRepos {
+                service: svc.name.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(ok(repos))
 }
 
 pub async fn git_status(
@@ -143,11 +203,18 @@ pub async fn git_status(
     Query(q): Query<PathQuery>,
 ) -> Result<Json<crate::auth::SuccessResponse<gitops::RepoStatus>>, Response> {
     let svc = require_service_access(&state, &user, &name).await?;
-    let repo = gitops::resolve_repo(&svc.dir, &q.path).map_err(|e| not_found(e.to_string()))?;
-    gitops::status(&repo, &svc.dir)
+    let st: gitops::RepoStatus = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::GitStatus {
+                service: svc.name.clone(),
+                path: q.path.clone(),
+            },
+            &user.token,
+        )
         .await
-        .map(ok)
-        .map_err(|e| bad_request(e.to_string()))
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(ok(st))
 }
 
 #[derive(Deserialize)]
@@ -165,11 +232,19 @@ pub async fn git_log(
     Query(q): Query<LogQuery>,
 ) -> Result<Json<crate::auth::SuccessResponse<Vec<String>>>, Response> {
     let svc = require_service_access(&state, &user, &name).await?;
-    let repo = gitops::resolve_repo(&svc.dir, &q.path).map_err(|e| not_found(e.to_string()))?;
-    gitops::log(&repo, q.n.unwrap_or(30))
+    let log: Vec<String> = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::GitLog {
+                service: svc.name.clone(),
+                path: q.path.clone(),
+                n: q.n.unwrap_or(30),
+            },
+            &user.token,
+        )
         .await
-        .map(ok)
-        .map_err(|e| bad_request(e.to_string()))
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(ok(log))
 }
 
 pub async fn git_branches(
@@ -179,11 +254,18 @@ pub async fn git_branches(
     Query(q): Query<PathQuery>,
 ) -> Result<Json<crate::auth::SuccessResponse<gitops::RepoBranches>>, Response> {
     let svc = require_service_access(&state, &user, &name).await?;
-    let repo = gitops::resolve_repo(&svc.dir, &q.path).map_err(|e| not_found(e.to_string()))?;
-    gitops::branches(&repo)
+    let br: gitops::RepoBranches = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::GitBranches {
+                service: svc.name.clone(),
+                path: q.path.clone(),
+            },
+            &user.token,
+        )
         .await
-        .map(ok)
-        .map_err(|e| bad_request(e.to_string()))
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(ok(br))
 }
 
 #[derive(Deserialize)]
@@ -204,15 +286,23 @@ pub async fn git_clone(
 ) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
     require_edit_files(&user)?;
     let svc = require_service_access(&state, &user, &name).await?;
-    let script = gitops::clone_script(&svc.dir, &req.url, &req.path, req.branch.as_deref())
+    let id = state
+        .agent
+        .exec(
+            crate::agent::proto::ExecVerb::GitClone {
+                service: svc.name.clone(),
+                url: req.url.clone(),
+                path: req.path.clone(),
+                branch: req.branch.clone(),
+            },
+            format!("git clone ({})", svc.name),
+            Some(svc.name.clone()),
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
+        .await
         .map_err(|e| bad_request(e.to_string()))?;
-    let id = state.exec.run_item(
-        shell_item(&format!("git clone ({})", svc.name), &script, "."),
-        HashMap::new(),
-        &user.user.name,
-        Some(svc.name.clone()),
-        false,
-    );
     state
         .audit
         .record(&user.user.name, "git_clone", &name, &req.url);
@@ -238,20 +328,23 @@ pub async fn git_action(
 ) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
     require_edit_files(&user)?;
     let svc = require_service_access(&state, &user, &name).await?;
-    let repo = gitops::resolve_repo(&svc.dir, &req.path).map_err(|e| not_found(e.to_string()))?;
-    let script = gitops::op_script(&req.op, &repo, req.git_ref.as_deref())
+    let id = state
+        .agent
+        .exec(
+            crate::agent::proto::ExecVerb::GitOp {
+                service: svc.name.clone(),
+                path: req.path.clone(),
+                op: req.op.clone(),
+                git_ref: req.git_ref.clone(),
+            },
+            format!("git {} ({}/{})", req.op, svc.name, req.path),
+            Some(svc.name.clone()),
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
+        .await
         .map_err(|e| bad_request(e.to_string()))?;
-    let id = state.exec.run_item(
-        shell_item(
-            &format!("git {} ({}/{})", req.op, svc.name, req.path),
-            &script,
-            ".",
-        ),
-        HashMap::new(),
-        &user.user.name,
-        Some(svc.name.clone()),
-        false,
-    );
     state.audit.record(
         &user.user.name,
         &format!("git_{}", req.op),

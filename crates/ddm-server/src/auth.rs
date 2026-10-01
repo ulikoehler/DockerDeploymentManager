@@ -109,7 +109,7 @@ impl JwtKeys {
     pub fn issue(
         &self,
         user: &User,
-        ttl_minutes: i64,
+        ttl_seconds: i64,
         scope: Option<TokenScope>,
     ) -> Result<String, jsonwebtoken::errors::Error> {
         let now = chrono::Utc::now().timestamp();
@@ -117,7 +117,32 @@ impl JwtKeys {
             sub: user.name.clone(),
             roles: user.roles.clone(),
             iat: now,
-            exp: now + ttl_minutes * 60,
+            exp: now + ttl_seconds,
+            gen: *self.generation.read().unwrap(),
+            scope,
+        };
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(self.secret.read().unwrap().as_bytes()),
+        )
+    }
+
+    /// Issue a token from raw claims fields — used by the agent when
+    /// minting scoped children (the caller's narrowed roles are preserved).
+    pub fn issue_claims(
+        &self,
+        sub: &str,
+        roles: Vec<String>,
+        ttl_seconds: i64,
+        scope: Option<TokenScope>,
+    ) -> Result<String, jsonwebtoken::errors::Error> {
+        let now = chrono::Utc::now().timestamp();
+        let claims = Claims {
+            sub: sub.to_string(),
+            roles,
+            iat: now,
+            exp: now + ttl_seconds,
             gen: *self.generation.read().unwrap(),
             scope,
         };
@@ -165,8 +190,13 @@ impl JwtKeys {
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub user: User,
+    /// Verified claims (scope already applied to `user`). Kept for
+    /// introspection (e.g. `claims.scope`, `jti`) — not currently read.
     #[allow(dead_code)]
     pub claims: Claims,
+    /// The raw bearer token — passed to the agent as the justification for
+    /// privileged ops. Never logged.
+    pub token: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -208,19 +238,25 @@ pub fn internal(msg: impl Into<String>) -> Response {
 pub async fn authenticate(parts: &Parts, state: &crate::AppState) -> Result<AuthUser, Response> {
     let token = bearer_token(parts)
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
-    let claims = state
-        .jwt
-        .verify(token)
-        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "invalid token"))?;
-    let mut user = state
-        .users
-        .get(&claims.sub)
+    let verified: serde_json::Value = state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::Verify {
+            token: token.to_string(),
+        })
         .await
-        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "unknown user"))?;
+        .map_err(|e| error_response(StatusCode::UNAUTHORIZED, e.to_string()))?;
+    let claims: Claims = serde_json::from_value(verified["claims"].clone())
+        .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "invalid token"))?;
+    let mut user: User = serde_json::from_value(verified["user"].clone())
+        .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "unknown user"))?;
     if let Some(scope) = &claims.scope {
         apply_token_scope(&mut user, scope);
     }
-    Ok(AuthUser { user, claims })
+    Ok(AuthUser {
+        user,
+        claims,
+        token: token.to_string(),
+    })
 }
 
 #[axum::async_trait]
@@ -246,12 +282,78 @@ pub fn bearer_token(parts: &Parts) -> Option<&str> {
     {
         return Some(v);
     }
+    // `?token=` is only honored on WebSocket routes — elsewhere tokens must
+    // use the Authorization header so they can't leak via URLs in logs,
+    // browser history or Referer headers.
+    if !parts.uri.path().starts_with("/ws/") {
+        return None;
+    }
     parts.uri.query().and_then(|q| {
         q.split('&').find_map(|kv| {
             let (k, v) = kv.split_once('=')?;
             matches!(k, "token" | "access_token").then_some(v)
         })
     })
+}
+
+// ---------------------------------------------------------------------------
+// Login throttling
+// ---------------------------------------------------------------------------
+
+/// Per-username login failure limiter: after `MAX_FAILS` consecutive
+/// failures the account is locked for `LOCKOUT`. In-memory only — a restart
+/// resets it, which is acceptable since the lockout's purpose is slowing
+/// online brute force, not punishing users.
+pub struct LoginThrottle {
+    inner: std::sync::Mutex<std::collections::HashMap<String, FailState>>,
+}
+
+struct FailState {
+    count: u32,
+    locked_until: Option<std::time::Instant>,
+}
+
+impl LoginThrottle {
+    const MAX_FAILS: u32 = 5;
+    const LOCKOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// True while `name` is locked out.
+    pub fn is_locked(&self, name: &str) -> bool {
+        let mut map = self.inner.lock().unwrap();
+        let Some(st) = map.get(name) else {
+            return false;
+        };
+        match st.locked_until {
+            Some(until) if until > std::time::Instant::now() => true,
+            Some(_) => {
+                map.remove(name); // lockout expired
+                false
+            }
+            None => false,
+        }
+    }
+
+    pub fn record_failure(&self, name: &str) {
+        let mut map = self.inner.lock().unwrap();
+        let st = map.entry(name.to_string()).or_insert(FailState {
+            count: 0,
+            locked_until: None,
+        });
+        st.count += 1;
+        if st.count >= Self::MAX_FAILS {
+            st.locked_until = Some(std::time::Instant::now() + Self::LOCKOUT);
+        }
+    }
+
+    pub fn record_success(&self, name: &str) {
+        self.inner.lock().unwrap().remove(name);
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -397,6 +499,14 @@ mod security_tests {
         assert_eq!(bearer_token(&parts), Some("abc"));
 
         let req = Request::builder().uri("/ws/x?tok=notit").body(()).unwrap();
+        let (parts, _) = req.into_parts();
+        assert_eq!(bearer_token(&parts), None);
+
+        // query tokens are ignored outside /ws/*
+        let req = Request::builder()
+            .uri("/api/services?token=abc")
+            .body(())
+            .unwrap();
         let (parts, _) = req.into_parts();
         assert_eq!(bearer_token(&parts), None);
 

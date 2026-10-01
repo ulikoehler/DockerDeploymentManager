@@ -8,7 +8,6 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // config
@@ -58,6 +57,10 @@ fn redact(cfg: &crate::config::AppConfig) -> serde_json::Value {
                     *val = serde_json::Value::String("***".into());
                 }
             }
+        }
+        // the remote URL may embed user:token@ credentials
+        if let Some(u) = g.get_mut("url") {
+            *u = redact_url_creds(u.as_str().unwrap_or_default());
         }
     }
     v
@@ -116,11 +119,13 @@ pub async fn effective_policy(
         .compose_policy
         .clone()
         .unwrap_or_else(|| cfg.security.default_policy.clone());
-    let policy = if name == "unrestricted" {
-        serde_json::Value::String("unrestricted".into())
-    } else {
-        serde_json::to_value(cfg.security.policies.get(&name)).unwrap_or(serde_json::Value::Null)
-    };
+    // resolve_policy falls back to default/strict for unknown names so the
+    // reported policy matches what is actually enforced
+    let policy =
+        match crate::api::services::resolve_policy(&cfg, user.user.compose_policy.as_deref()) {
+            None => serde_json::Value::String("unrestricted".into()),
+            Some(p) => serde_json::to_value(&p).unwrap_or(serde_json::Value::Null),
+        };
     ok(serde_json::json!({ "policy": name, "rules": policy }))
 }
 
@@ -156,22 +161,33 @@ pub async fn audit_entries(
 // ---------------------------------------------------------------------------
 
 pub async fn executions(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
 ) -> Json<crate::auth::SuccessResponse<Vec<crate::protocol::ExecutionInfo>>> {
-    ok(state.exec.history())
+    // Admins see everything; others only their own executions (output and
+    // args may contain secrets).
+    let hist = state.exec.history();
+    let hist = if user.user.is_admin() {
+        hist
+    } else {
+        hist.into_iter()
+            .filter(|e| e.user == user.user.name)
+            .collect()
+    };
+    ok(hist)
 }
 
 pub async fn execution(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<crate::protocol::ExecutionInfo>>, Response> {
-    state
+    let info = state
         .exec
         .get(&id)
-        .map(ok)
-        .ok_or_else(|| not_found("execution not found"))
+        .filter(|i| user.user.is_admin() || i.user == user.user.name)
+        .ok_or_else(|| not_found("execution not found"))?;
+    Ok(ok(info))
 }
 
 // ---------------------------------------------------------------------------
@@ -183,12 +199,23 @@ pub async fn monitor_status_all(
     State(state): State<AppState>,
 ) -> Json<crate::auth::SuccessResponse<serde_json::Value>> {
     let cfg = state.config.get().await;
-    let all = state.monitor.status().await;
-    let filtered: HashMap<_, _> = all
-        .into_iter()
-        .filter(|(name, _)| can_access_service(&user.user, name, cfg.security.default_access))
-        .collect();
-    ok(serde_json::to_value(filtered).unwrap_or_default())
+    let all: serde_json::Value = state
+        .agent
+        .call(crate::agent::proto::SyncVerb::MonitorStatusAll, &user.token)
+        .await
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let filtered: serde_json::Map<String, serde_json::Value> = all
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter(|(name, _)| {
+                    can_access_service(&user.user, name, cfg.security.default_access)
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    ok(serde_json::Value::Object(filtered))
 }
 
 pub async fn monitor_status(
@@ -200,10 +227,15 @@ pub async fn monitor_status(
     if !can_access_service(&user.user, &name, cfg.security.default_access) {
         return Err(forbidden());
     }
-    let st = state.monitor.status().await;
-    Ok(ok(
-        serde_json::to_value(st.get(&name)).unwrap_or(serde_json::Value::Null)
-    ))
+    let st = state
+        .agent
+        .call(crate::agent::proto::SyncVerb::MonitorStatusAll, &user.token)
+        .await
+        .unwrap_or_else(|_| serde_json::json!({}));
+    Ok(ok(st
+        .get(&name)
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)))
 }
 
 #[derive(Deserialize)]
@@ -220,7 +252,13 @@ pub async fn monitor_events(
     Query(q): Query<EventsQuery>,
 ) -> Json<crate::auth::SuccessResponse<Vec<crate::protocol::AlertEvent>>> {
     let cfg = state.config.get().await;
-    let mut evs = state.monitor.events().await;
+    let mut evs: Vec<crate::protocol::AlertEvent> = state
+        .agent
+        .call(crate::agent::proto::SyncVerb::MonitorEvents, &user.token)
+        .await
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
     evs.retain(|e| {
         let svc_ok = q.service.as_deref().map(|s| s == e.service).unwrap_or(true);
         svc_ok && can_access_service(&user.user, &e.service, cfg.security.default_access)
@@ -259,21 +297,15 @@ pub async fn notifier_test(
     if !user.user.is_admin() {
         return Err(forbidden());
     }
-    let cfg = state.config.get().await;
-    let n = cfg
-        .monitoring
-        .notifiers
-        .iter()
-        .find(|n| n.id() == id)
-        .cloned()
-        .ok_or_else(|| not_found("notifier not found"))?;
-    let notif = crate::notify::Notification {
-        title: "[ddm] test".into(),
-        body: req.message,
-        service: "test".into(),
-        severity: "info".into(),
-    };
-    crate::notify::send(&n, &notif)
+    state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::NotifyTest {
+                id: id.clone(),
+                message: req.message,
+            },
+            &user.token,
+        )
         .await
         .map_err(|e| bad_request(format!("send failed: {e:#}")))?;
     state
@@ -441,10 +473,15 @@ pub async fn notifier_delete(
 // ---------------------------------------------------------------------------
 
 pub async fn gitops_status(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
-) -> Json<crate::auth::SuccessResponse<crate::gitsync::GitsyncStatus>> {
-    ok(state.gitsync.status().await)
+) -> Json<crate::auth::SuccessResponse<serde_json::Value>> {
+    let v = state
+        .agent
+        .call(crate::agent::proto::SyncVerb::GitSyncStatus, &user.token)
+        .await
+        .unwrap_or_else(|_| serde_json::json!({"error":"agent unavailable"}));
+    ok(v)
 }
 
 pub async fn gitops_sync(
@@ -454,11 +491,9 @@ pub async fn gitops_sync(
     if !user.user.is_admin() {
         return Err(forbidden());
     }
-    let cfg = state.config.get().await;
-    let dir = state.config.dir();
     state
-        .gitsync
-        .sync(&cfg, &dir)
+        .agent
+        .call(crate::agent::proto::SyncVerb::GitSyncRun, &user.token)
         .await
         .map_err(|e| bad_request(e.to_string()))?;
     state
@@ -474,13 +509,13 @@ pub async fn gitops_push(
     if !user.user.is_admin() {
         return Err(forbidden());
     }
-    let cfg = state.config.get().await;
-    let dir = state.config.dir();
-    let pushed = state
-        .gitsync
-        .push(&cfg, &dir)
+    let pushed: bool = state
+        .agent
+        .call(crate::agent::proto::SyncVerb::GitSyncPush, &user.token)
         .await
-        .map_err(|e| bad_request(e.to_string()))?;
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or(false);
     state
         .audit
         .record(&user.user.name, "gitops_push", "gitops", "");
@@ -501,25 +536,23 @@ pub async fn gitops_webhook(
     }
     let sig = headers
         .get("x-hub-signature-256")
-        .and_then(|v| v.to_str().ok());
-    let gl = headers.get("x-gitlab-token").and_then(|v| v.to_str().ok());
-    if !crate::gitsync::verify_webhook(
-        &cfg.gitops.webhook_secret,
-        &cfg.gitops.webhook_secret_env,
-        sig,
-        gl,
-        &body,
-    ) {
-        return Err(forbidden());
-    }
-    let dir = state.config.dir();
-    let gs = state.gitsync.clone();
-    let cfga = cfg.clone();
-    tokio::spawn(async move {
-        if let Err(e) = gs.sync(&cfga, &dir).await {
-            tracing::warn!("gitops webhook sync failed: {e:#}");
-        }
-    });
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let gl = headers
+        .get("x-gitlab-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    // Signature verification + sync trigger happen atomically inside the
+    // agent — the secret never leaves it.
+    state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::WebhookSync {
+            sig256: sig,
+            gitlab_token: gl,
+            body: body.to_vec(),
+        })
+        .await
+        .map_err(|_| forbidden())?;
     Ok(ok(true))
 }
 

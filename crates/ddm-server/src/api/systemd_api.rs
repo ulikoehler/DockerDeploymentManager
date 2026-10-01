@@ -1,6 +1,5 @@
 use crate::auth::{bad_request, forbidden, not_found, ok, AuthUser};
-use crate::config::{AppConfig, SystemdCommand};
-use crate::exec::host_shell_item;
+use crate::config::AppConfig;
 use crate::AppState;
 use axum::{
     extract::{Path, Query, State},
@@ -8,7 +7,6 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Serialize)]
 pub struct GroupInfo {
@@ -37,6 +35,17 @@ fn unit_matches_group(cfg: &AppConfig, unit: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Unit names are interpolated into shell scripts — only allow characters
+/// systemd itself permits (alphanumerics plus `_.@-`), nothing that could
+/// break out of quoting or carry path traversal.
+fn valid_unit_name(unit: &str) -> bool {
+    !unit.is_empty()
+        && unit.len() <= 256
+        && unit
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '@' | '-'))
 }
 
 /// Gate: systemd endpoints are for operator/admin by default.
@@ -83,20 +92,17 @@ pub async fn group_status(
     require_operator(&user)?;
     let cfg = state.config.get().await;
     let g = find_group(&cfg, &group).ok_or_else(|| not_found("unknown group"))?;
-    let units = crate::systemd::list_units_matching(&state.host, &g.unit_regex)
+    let units: Vec<crate::systemd::SystemdUnitStatus> = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::ListUnits {
+                regex: g.unit_regex.clone(),
+            },
+            &user.token,
+        )
         .await
         .map_err(|e| bad_request(e.to_string()))?;
     Ok(ok(units))
-}
-
-fn unit_shell(title: &str, unit: &str, op: &str, cfg: &AppConfig) -> crate::config::CommandItem {
-    let script = format!("systemctl {op} '{}'", unit.replace('\'', ""));
-    host_shell_item(
-        title,
-        &script,
-        cfg.paths.host_exec,
-        cfg.paths.nsenter_target,
-    )
 }
 
 pub async fn unit_restart(
@@ -105,17 +111,25 @@ pub async fn unit_restart(
     Path(unit): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
     require_operator(&user)?;
+    checked_unit(&unit)?;
     let cfg = state.config.get().await;
     if unit_matches_group(&cfg, &unit).is_none() && !user.user.is_admin() {
         return Err(forbidden());
     }
-    let id = state.exec.run_item(
-        unit_shell(&format!("systemctl restart {unit}"), &unit, "restart", &cfg),
-        HashMap::new(),
-        &user.user.name,
-        None,
-        true,
-    );
+    let id = state
+        .agent
+        .exec(
+            crate::agent::proto::ExecVerb::SystemdRestart {
+                target: crate::agent::proto::SystemdTarget::Unit(unit.clone()),
+            },
+            format!("systemctl restart {unit}"),
+            None,
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
     state
         .audit
         .record(&user.user.name, "unit_restart", &unit, "");
@@ -130,30 +144,21 @@ pub async fn group_restart(
     require_operator(&user)?;
     let cfg = state.config.get().await;
     let g = find_group(&cfg, &group).ok_or_else(|| not_found("unknown group"))?;
-    let units = crate::systemd::list_units_matching(&state.host, &g.unit_regex)
+    let _ = g;
+    let id = state
+        .agent
+        .exec(
+            crate::agent::proto::ExecVerb::SystemdRestart {
+                target: crate::agent::proto::SystemdTarget::Group(group.clone()),
+            },
+            format!("restart group {group}"),
+            None,
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
         .await
         .map_err(|e| bad_request(e.to_string()))?;
-    let names: Vec<String> = units.iter().map(|u| u.unit.clone()).collect();
-    let script = format!(
-        "for u in {}; do systemctl restart \"$u\"; done",
-        names
-            .iter()
-            .map(|u| format!("'{}'", u.replace('\'', "")))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-    let id = state.exec.run_item(
-        host_shell_item(
-            &format!("restart group {group}"),
-            &script,
-            cfg.paths.host_exec,
-            cfg.paths.nsenter_target,
-        ),
-        HashMap::new(),
-        &user.user.name,
-        None,
-        true,
-    );
     state
         .audit
         .record(&user.user.name, "group_restart", &group, "");
@@ -165,49 +170,14 @@ pub struct ExecuteRequest {
     pub command_id: String,
 }
 
-#[allow(clippy::result_large_err, clippy::type_complexity)]
-fn build_custom_command(
-    cfg: &AppConfig,
-    group_id: &str,
-    unit: &str,
-    command_id: &str,
-) -> Result<(String, Vec<(String, Vec<String>)>, String), Response> {
-    let g = find_group(cfg, group_id).ok_or_else(|| not_found("unknown group"))?;
-    let cmd = g
-        .custom_commands
-        .iter()
-        .find(|c| c.id() == command_id)
-        .ok_or_else(|| not_found("unknown command id"))?;
-    let service = unit.strip_suffix(".service").unwrap_or(unit);
-    let template = cmd
-        .work_dir_template()
-        .or(g.compose_dir_template.as_deref())
-        .unwrap_or(".");
-    let work_dir = template
-        .replace("{unit}", unit)
-        .replace("{service}", service);
-    let subst = |s: &str| s.replace("${unit}", unit).replace("${service}", service);
-    let title = format!("{} ({})", cmd.label(), unit);
-    let compose = cfg.docker.compose_command.join(" ");
-    let steps: Vec<(String, Vec<String>)> = match cmd {
-        SystemdCommand::DockerComposePull { .. } => {
-            vec![(
-                "bash".into(),
-                vec!["-c".into(), format!("cd '{work_dir}' && {compose} pull")],
-            )]
-        }
-        SystemdCommand::DockerComposePullRestart { .. } => vec![
-            (
-                "bash".into(),
-                vec!["-c".into(), format!("cd '{work_dir}' && {compose} pull")],
-            ),
-            ("systemctl".into(), vec!["restart".into(), unit.to_string()]),
-        ],
-        SystemdCommand::Shell { program, args, .. } => {
-            vec![(subst(program), args.iter().map(|a| subst(a)).collect())]
-        }
-    };
-    Ok((work_dir, steps, title))
+/// `unit` is user-controlled (path param): it must pass the charset check;
+/// callers additionally enforce the group match / admin bypass.
+#[allow(clippy::result_large_err)]
+fn checked_unit(unit: &str) -> Result<(), Response> {
+    if !valid_unit_name(unit) {
+        return Err(bad_request("invalid unit name"));
+    }
+    Ok(())
 }
 
 pub async fn unit_execute(
@@ -217,36 +187,25 @@ pub async fn unit_execute(
     Json(req): Json<ExecuteRequest>,
 ) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
     require_operator(&user)?;
+    checked_unit(&unit)?;
     let cfg = state.config.get().await;
-    let group_id = unit_matches_group(&cfg, &unit)
+    let _group_id = unit_matches_group(&cfg, &unit)
         .ok_or_else(|| bad_request("no systemd group matches this unit"))?;
-    let (_wd, steps, title) = build_custom_command(&cfg, &group_id, &unit, &req.command_id)?;
-    let script = steps
-        .iter()
-        .map(|(prog, args)| {
-            format!(
-                "{} {}",
-                prog,
-                args.iter()
-                    .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" && ");
-    let id = state.exec.run_item(
-        host_shell_item(
-            &title,
-            &script,
-            cfg.paths.host_exec,
-            cfg.paths.nsenter_target,
-        ),
-        HashMap::new(),
-        &user.user.name,
-        None,
-        true,
-    );
+    let id = state
+        .agent
+        .exec(
+            crate::agent::proto::ExecVerb::SystemdCommand {
+                target: crate::agent::proto::SystemdTarget::Unit(unit.clone()),
+                command_id: req.command_id.clone(),
+            },
+            format!("{} ({})", req.command_id, unit),
+            None,
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
     state
         .audit
         .record(&user.user.name, "unit_execute", &unit, &req.command_id);
@@ -262,41 +221,22 @@ pub async fn group_execute(
     require_operator(&user)?;
     let cfg = state.config.get().await;
     let g = find_group(&cfg, &group).ok_or_else(|| not_found("unknown group"))?;
-    let units = crate::systemd::list_units_matching(&state.host, &g.unit_regex)
+    let _ = g;
+    let id = state
+        .agent
+        .exec(
+            crate::agent::proto::ExecVerb::SystemdCommand {
+                target: crate::agent::proto::SystemdTarget::Group(group.clone()),
+                command_id: req.command_id.clone(),
+            },
+            format!("{} on group {group}", req.command_id),
+            None,
+            &user.token,
+            &user.user.name,
+            &state.exec,
+        )
         .await
         .map_err(|e| bad_request(e.to_string()))?;
-    // build a single shell script running the command on each unit
-    let mut parts = vec![];
-    for u in &units {
-        match build_custom_command(&cfg, &group, &u.unit, &req.command_id) {
-            Ok((_wd, steps, _)) => {
-                for (prog, args) in steps {
-                    parts.push(format!(
-                        "{} {}",
-                        prog,
-                        args.iter()
-                            .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    ));
-                }
-            }
-            Err(_) => parts.push(format!("echo 'error for {}'", u.unit)),
-        }
-    }
-    let script = parts.join(" && ");
-    let id = state.exec.run_item(
-        host_shell_item(
-            &format!("{} on group {group}", req.command_id),
-            &script,
-            cfg.paths.host_exec,
-            cfg.paths.nsenter_target,
-        ),
-        HashMap::new(),
-        &user.user.name,
-        None,
-        true,
-    );
     state
         .audit
         .record(&user.user.name, "group_execute", &group, &req.command_id);
@@ -319,11 +259,20 @@ pub async fn unit_logs(
     Query(q): Query<LogsQuery>,
 ) -> Result<Json<crate::auth::SuccessResponse<String>>, Response> {
     require_operator(&user)?;
+    checked_unit(&unit)?;
     let cfg = state.config.get().await;
     if unit_matches_group(&cfg, &unit).is_none() && !user.user.is_admin() {
         return Err(forbidden());
     }
-    let text = crate::systemd::journal_logs(&state.host, &unit, q.lines)
+    let text: String = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::Journal {
+                unit: unit.clone(),
+                lines: q.lines,
+            },
+            &user.token,
+        )
         .await
         .map_err(|e| bad_request(e.to_string()))?;
     Ok(ok(text))

@@ -2,7 +2,7 @@ use crate::config::{AppConfig, BackupConfig, ServiceBackupConfig, StdinDump};
 use crate::hostexec::HostExec;
 use crate::services::{valid_rel_path, Service};
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -246,14 +246,14 @@ pub async fn provision(
 // Check report
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupIssue {
     pub code: String,
     pub message: String,
     pub fixable: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupCheckReport {
     pub service: String,
     pub enabled: bool,

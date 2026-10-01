@@ -24,6 +24,9 @@ pub enum Commands {
     /// Run the HTTP/WebSocket daemon.
     Serve,
 
+    /// Run the privileged security agent (unix socket; see docs/SECURITY.md).
+    Agent,
+
     /// Manage users (operates directly on users.yaml; the daemon hot-reloads).
     User {
         #[command(subcommand)]

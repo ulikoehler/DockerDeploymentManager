@@ -37,7 +37,14 @@ pub async fn list(
     State(state): State<AppState>,
 ) -> Result<Json<crate::auth::SuccessResponse<Vec<UserView>>>, Response> {
     require_admin(&user)?;
-    let users = state.users.list().await;
+    let users: Vec<crate::users::User> = state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::UsersList {
+            token: user.token.clone(),
+        })
+        .await
+        .and_then(|v| serde_json::from_value(v).map_err(|e| anyhow::anyhow!("{e}")))
+        .map_err(|e| crate::auth::internal(e.to_string()))?;
     Ok(ok(users.iter().map(view).collect()))
 }
 
@@ -85,24 +92,26 @@ pub async fn create(
         crate::users::parse_access_spec(&format!("{}:{}", r.kind.as_str(), r.pattern), r.effect)
             .map_err(|e| bad_request(format!("invalid access rule: {e}")))?;
     }
-    state
-        .users
-        .mutate(|f| {
-            crate::users::cli_add_user(f, &req.name, &req.password, req.roles.clone())?;
-            let u = f.users.iter_mut().find(|u| u.name == req.name).unwrap();
-            u.access = req.access.clone();
-            if let Some(feat) = &req.features {
-                u.features = feat.clone();
-            }
-            u.compose_policy = req.compose_policy.clone();
-            Ok(())
+    let v = state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::UserMutate {
+            token: user.token.clone(),
+            op: crate::agent::proto::UserMut::Create {
+                name: req.name.clone(),
+                password: req.password.clone(),
+                roles: req.roles.clone(),
+                access: req.access.clone(),
+                features: req.features.clone(),
+                compose_policy: req.compose_policy.clone(),
+            },
         })
         .await
         .map_err(|e| bad_request(e.to_string()))?;
     state
         .audit
         .record(&user.user.name, "user_create", &req.name, "");
-    let u = state.users.get(&req.name).await.unwrap();
+    let u: crate::users::User =
+        serde_json::from_value(v).map_err(|e| crate::auth::internal(e.to_string()))?;
     Ok(ok(view(&u)))
 }
 
@@ -120,32 +129,25 @@ pub async fn update(
     Json(req): Json<UpdateUser>,
 ) -> Result<Json<crate::auth::SuccessResponse<UserView>>, Response> {
     require_admin(&user)?;
-    let n = name.clone();
-    state
-        .users
-        .mutate(|f| {
-            let u = f
-                .users
-                .iter_mut()
-                .find(|u| u.name == n)
-                .ok_or_else(|| anyhow::anyhow!("user not found"))?;
-            if let Some(r) = &req.roles {
-                u.roles = r.clone();
-            }
-            if let Some(feat) = &req.features {
-                u.features = feat.clone();
-            }
-            if let Some(cp) = &req.compose_policy {
-                u.compose_policy = cp.clone();
-            }
-            Ok(())
+    let v = state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::UserMutate {
+            token: user.token.clone(),
+            op: crate::agent::proto::UserMut::Update {
+                name: name.clone(),
+                roles: req.roles.clone(),
+                features: req.features.clone(),
+                compose_policy: req.compose_policy.clone(),
+            },
         })
         .await
         .map_err(|e| not_found(e.to_string()))?;
     state
         .audit
         .record(&user.user.name, "user_update", &name, "");
-    Ok(ok(view(&state.users.get(&name).await.unwrap())))
+    let u: crate::users::User =
+        serde_json::from_value(v).map_err(|e| crate::auth::internal(e.to_string()))?;
+    Ok(ok(view(&u)))
 }
 
 pub async fn delete(
@@ -158,8 +160,11 @@ pub async fn delete(
         return Err(bad_request("cannot delete yourself"));
     }
     state
-        .users
-        .mutate(|f| crate::users::cli_remove_user(f, &name))
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::UserMutate {
+            token: user.token.clone(),
+            op: crate::agent::proto::UserMut::Delete { name: name.clone() },
+        })
         .await
         .map_err(|e| not_found(e.to_string()))?;
     state
@@ -171,6 +176,9 @@ pub async fn delete(
 #[derive(Deserialize)]
 pub struct SetPassword {
     pub password: String,
+    /// Required when a non-admin changes their own password.
+    #[serde(default)]
+    pub current_password: Option<String>,
 }
 
 pub async fn set_password(
@@ -179,18 +187,25 @@ pub async fn set_password(
     Path(name): Path<String>,
     Json(req): Json<SetPassword>,
 ) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
-    // users may change their own password; admins anyone's
-    if !user.user.is_admin() && user.user.name != name {
-        return Err(forbidden());
-    }
-    if req.password.len() < 8 {
-        return Err(bad_request("password min 8 chars"));
-    }
+    // All rules (scope check, admin-or-self, current password) are
+    // re-enforced inside the agent — do not weaken them here.
     state
-        .users
-        .mutate(|f| crate::users::cli_set_password(f, &name, &req.password))
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::SetPassword {
+            token: user.token.clone(),
+            name: name.clone(),
+            password: req.password.clone(),
+            current_password: req.current_password.clone(),
+        })
         .await
-        .map_err(|e| not_found(e.to_string()))?;
+        .map_err(|e| match format!("{e:#}").as_str() {
+            m if m.contains("scoped") => forbidden(),
+            m if m.contains("another user") => forbidden(),
+            m if m.contains("current password incorrect") => forbidden(),
+            m if m.contains("required") => bad_request(m),
+            m if m.contains("too short") => bad_request(m),
+            m => not_found(m),
+        })?;
     state
         .audit
         .record(&user.user.name, "user_password", &name, "");
@@ -208,17 +223,14 @@ pub async fn set_access(
         crate::users::parse_access_spec(&format!("{}:{}", r.kind.as_str(), r.pattern), r.effect)
             .map_err(|e| bad_request(format!("invalid access rule: {e}")))?;
     }
-    let n = name.clone();
     state
-        .users
-        .mutate(|f| {
-            let u = f
-                .users
-                .iter_mut()
-                .find(|u| u.name == n)
-                .ok_or_else(|| anyhow::anyhow!("user not found"))?;
-            u.access = rules.clone();
-            Ok(())
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::UserMutate {
+            token: user.token.clone(),
+            op: crate::agent::proto::UserMut::SetAccess {
+                name: name.clone(),
+                access: rules.clone(),
+            },
         })
         .await
         .map_err(|e| not_found(e.to_string()))?;

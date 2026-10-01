@@ -20,7 +20,7 @@ pub enum ServerMessage {
 }
 
 /// Snapshot of a finished (or running) execution for the history API.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionInfo {
     pub id: String,
     pub title: String,

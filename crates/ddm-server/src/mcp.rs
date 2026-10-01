@@ -368,6 +368,9 @@ pub struct UserUpdateArgs {
 pub struct PasswordArgs {
     pub name: String,
     pub password: String,
+    /// Required when a non-admin changes their own password.
+    #[serde(default)]
+    pub current_password: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -502,6 +505,7 @@ impl DdmMcp {
                 Path(p.name),
                 Json(api::users::SetPassword {
                     password: p.password,
+                    current_password: p.current_password,
                 }),
             )
             .await,

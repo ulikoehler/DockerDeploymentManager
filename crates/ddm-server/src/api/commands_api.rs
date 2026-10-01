@@ -1,6 +1,5 @@
 use crate::auth::{bad_request, forbidden, ok, AuthUser};
 use crate::config::AppConfig;
-use crate::exec::host_shell_item;
 use crate::AppState;
 use axum::{extract::Path, extract::State, response::Response, Json};
 use serde::{Deserialize, Serialize};
@@ -76,6 +75,41 @@ pub async fn list(
     Ok(ok(out))
 }
 
+/// Shared authorization for running a config command item — used by the
+/// REST handler and the WebSocket run channel so both enforce the same
+/// rules: `run_commands` feature (or admin) plus section- and item-level
+/// `required_role`. Returns the cloned item on success.
+pub fn authorized_item(
+    user: &crate::users::User,
+    cfg: &AppConfig,
+    si: usize,
+    ii: usize,
+) -> Result<crate::config::CommandItem, Response> {
+    if !user.is_admin() && !user.features.run_commands {
+        return Err(forbidden());
+    }
+    let section = cfg
+        .sections
+        .get(si)
+        .ok_or_else(|| bad_request("invalid section index"))?;
+    if let Some(r) = &section.required_role {
+        if !user.has_role(r) {
+            return Err(forbidden());
+        }
+    }
+    let item = section
+        .items
+        .get(ii)
+        .ok_or_else(|| bad_request("invalid item index"))?
+        .clone();
+    if let Some(r) = &item.required_role {
+        if !user.has_role(r) {
+            return Err(forbidden());
+        }
+    }
+    Ok(item)
+}
+
 #[derive(Deserialize)]
 pub struct RunRequest {
     #[serde(default)]
@@ -88,67 +122,25 @@ pub async fn run(
     Path((si, ii)): Path<(usize, usize)>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
-    if !user.user.is_admin() && !user.user.features.run_commands {
-        return Err(forbidden());
-    }
     let cfg = state.config.get().await;
-    let section = cfg
-        .sections
-        .get(si)
-        .ok_or_else(|| bad_request("invalid section index"))?;
-    if let Some(r) = &section.required_role {
-        if !user.user.has_role(r) {
-            return Err(forbidden());
-        }
-    }
-    let item = section
-        .items
-        .get(ii)
-        .ok_or_else(|| bad_request("invalid item index"))?
-        .clone();
-    if let Some(r) = &item.required_role {
-        if !user.user.has_role(r) {
-            return Err(forbidden());
-        }
-    }
+    let _item = authorized_item(&user.user, &cfg, si, ii)?;
 
-    // host commands: wrap each command in `nsenter ... bash -c` equivalent —
-    // we keep per-command structure by converting to a script when on_host.
-    let id = if item.on_host {
-        let script = item
-            .command_sequence
-            .iter()
-            .map(|c| {
-                let args = crate::exec::build_args(&c.args, &req.params);
-                format!(
-                    "cd '{}' && {} {}",
-                    item.work_dir.replace('\'', ""),
-                    c.program,
-                    args.iter()
-                        .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" && ");
-        state.exec.run_item(
-            host_shell_item(
-                &item.title,
-                &script,
-                cfg.paths.host_exec,
-                cfg.paths.nsenter_target,
-            ),
-            HashMap::new(),
-            &user.user.name,
+    let id = state
+        .agent
+        .exec(
+            crate::agent::proto::ExecVerb::SectionItem {
+                section: si,
+                item: ii,
+                params: req.params.clone(),
+            },
+            format!("command {si}/{ii}"),
             None,
-            true,
+            &user.token,
+            &user.user.name,
+            &state.exec,
         )
-    } else {
-        state
-            .exec
-            .run_item(item, req.params, &user.user.name, None, false)
-    };
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
     state
         .audit
         .record(&user.user.name, "command_run", &format!("{si}/{ii}"), "");

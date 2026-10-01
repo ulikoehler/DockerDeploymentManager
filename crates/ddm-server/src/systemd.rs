@@ -2,7 +2,7 @@ use crate::config::AppConfig;
 use crate::hostexec::HostExec;
 use crate::services::Service;
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -151,14 +151,14 @@ pub async fn unit_state(host: &Arc<dyn HostExec>, unit: &str) -> (Option<String>
 // UnitCheckReport — checks for existing services
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnitIssue {
     pub code: String,
     pub message: String,
     pub fixable: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnitCheckReport {
     pub service: String,
     pub exists: bool,
@@ -290,7 +290,7 @@ pub async fn check_unit(
 // Host systemd helpers (groups / status / journal)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemdUnitStatus {
     pub unit: String,
     pub load: String,
