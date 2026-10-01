@@ -194,18 +194,31 @@ impl AgentCore {
         }
     }
 
-    /// Verify the justification token (signature + generation) and log it.
-    fn justify_token(&self, token: &str, verb: &str, detail: &str) -> Result<Claims> {
+    /// Verify the justification token (signature + generation), confirm the
+    /// user still exists in `users.yaml`, and log the request. The fresh
+    /// user record is returned alongside the claims so role checks cannot
+    /// rely on stale claims — a demoted admin loses agent privileges
+    /// immediately, not when the token expires.
+    fn justify_token(&self, token: &str, verb: &str, detail: &str) -> Result<(Claims, User)> {
         let claims = self
             .jwt
             .verify(token)
             .ok_or_else(|| anyhow!("invalid justification token"))?;
+        let file = self.users_file()?;
+        let user = file
+            .users
+            .iter()
+            .find(|u| u.name == claims.sub)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown user"))?;
         self.justify(&claims, verb, detail);
-        Ok(claims)
+        Ok((claims, user))
     }
 
-    fn require_admin(claims: &Claims) -> Result<()> {
-        if claims.roles.iter().any(|r| r == "admin") {
+    /// Admin check against the *fresh* user record, not the signed claims —
+    /// a compromised server may present an old token whose role set is stale.
+    fn require_admin(user: &User) -> Result<()> {
+        if user.roles.iter().any(|r| r == "admin") {
             Ok(())
         } else {
             bail!("admin role required")
@@ -246,8 +259,8 @@ impl AgentCore {
                 actions,
             } => self.do_mint(&token, ttl_minutes, services, actions).await,
             CryptoOp::Rotate { token } => {
-                let claims = self.justify_token(&token, "rotate", "")?;
-                Self::require_admin(&claims)?;
+                let (_claims, user) = self.justify_token(&token, "rotate", "")?;
+                Self::require_admin(&user)?;
                 self.jwt.rotate();
                 Ok(serde_json::json!(true))
             }
@@ -304,8 +317,8 @@ impl AgentCore {
                     .await
             }
             CryptoOp::UsersList { token } => {
-                let claims = self.justify_token(&token, "users_list", "")?;
-                Self::require_admin(&claims)?;
+                let (_claims, user) = self.justify_token(&token, "users_list", "")?;
+                Self::require_admin(&user)?;
                 let mut file = self.users_file()?;
                 for u in &mut file.users {
                     u.password_hash.clear();
@@ -334,12 +347,14 @@ impl AgentCore {
             bail!("invalid credentials");
         }
         self.throttle.record_success(name);
-        let user = user.unwrap().clone();
+        let mut user = user.unwrap().clone();
         let cfg = self.cfg.get().await;
         let ttl = cfg.server.token_ttl_minutes.max(1) * 60;
         let token = self.jwt.issue(&user, ttl, None)?;
         let claims = self.jwt.verify(&token).unwrap();
         self.justify(&claims, "authenticate", name);
+        // Never let the hash cross into the unprivileged process.
+        user.password_hash.clear();
         Ok(serde_json::to_value(AuthResult {
             user,
             token,
@@ -358,6 +373,15 @@ impl AgentCore {
             .jwt
             .verify(parent)
             .ok_or_else(|| anyhow!("invalid parent token"))?;
+        // The fresh user record is authoritative: a deleted user cannot
+        // mint, and roles are intersected so a demoted user's children
+        // cannot resurrect the old (wider) role set from stale claims.
+        let file = self.users_file()?;
+        let fresh = file
+            .users
+            .iter()
+            .find(|u| u.name == parent_claims.sub)
+            .ok_or_else(|| anyhow!("unknown user"))?;
         let now = chrono::Utc::now().timestamp();
         let remaining = parent_claims.exp - now;
         if remaining <= 0 {
@@ -374,9 +398,15 @@ impl AgentCore {
                 actions: intersect(&parent_claims.scope, |s| &s.actions, &actions),
             }),
         };
-        let token =
-            self.jwt
-                .issue_claims(&parent_claims.sub, parent_claims.roles.clone(), ttl, scope)?;
+        let roles: Vec<String> = parent_claims
+            .roles
+            .iter()
+            .filter(|r| fresh.roles.contains(r))
+            .cloned()
+            .collect();
+        let token = self
+            .jwt
+            .issue_claims(&parent_claims.sub, roles, ttl, scope)?;
         let claims = self.jwt.verify(&token).unwrap();
         self.justify(&claims, "mint", &parent_claims.sub);
         Ok(serde_json::json!({ "token": token, "expires_at": claims.exp }))
@@ -389,12 +419,12 @@ impl AgentCore {
         password: &str,
         current: Option<&str>,
     ) -> Result<serde_json::Value> {
-        let claims = self.justify_token(token, "set_password", name)?;
+        let (claims, caller) = self.justify_token(token, "set_password", name)?;
         // Scoped tokens must not be able to escape their scope.
         if claims.scope.is_some() {
             bail!("scoped tokens cannot change passwords");
         }
-        let admin = claims.roles.iter().any(|r| r == "admin");
+        let admin = caller.roles.iter().any(|r| r == "admin");
         if !admin {
             if claims.sub != name {
                 bail!("cannot change another user's password");
@@ -425,8 +455,8 @@ impl AgentCore {
     }
 
     async fn do_user_mutate(&self, token: &str, op: UserMut) -> Result<serde_json::Value> {
-        let claims = self.justify_token(token, "user_mutate", "")?;
-        Self::require_admin(&claims)?;
+        let (claims, caller) = self.justify_token(token, "user_mutate", "")?;
+        Self::require_admin(&caller)?;
         let mut file = self.users_file()?;
         match op {
             UserMut::Create {
@@ -638,8 +668,8 @@ impl AgentCore {
                 )?)
             }
             SyncVerb::NotifierMut { op } => {
-                let claims = self.justify_token(token, "notifier_mut", "")?;
-                Self::require_admin(&claims)?;
+                let (_claims, caller) = self.justify_token(token, "notifier_mut", "")?;
+                Self::require_admin(&caller)?;
                 self.cfg
                     .mutate(move |c| {
                         match op {
@@ -650,14 +680,27 @@ impl AgentCore {
                                 }
                                 c.monitoring.notifiers.push(notifier);
                             }
-                            NotifierMut::Update { id, notifier } => {
+                            NotifierMut::Update { id, patch } => {
                                 let slot = c
                                     .monitoring
                                     .notifiers
                                     .iter_mut()
                                     .find(|x| x.id() == id)
                                     .ok_or_else(|| anyhow!("notifier not found"))?;
-                                *slot = notifier;
+                                // Merge against the real stored notifier:
+                                // secret fields left empty or "***" keep
+                                // their existing values. Done here — the
+                                // server only ever sees redacted config.
+                                let old_v = serde_json::to_value(&*slot).unwrap_or_default();
+                                let mut merged = patch.clone();
+                                merge_notifier_secrets(&mut merged, Some(&old_v));
+                                let n: crate::config::NotifierConfig =
+                                    serde_json::from_value(merged)
+                                        .map_err(|e| anyhow!("invalid notifier: {e}"))?;
+                                if n.id() != id {
+                                    bail!("id cannot be changed");
+                                }
+                                *slot = n;
                             }
                             NotifierMut::Delete { id } => {
                                 let before = c.monitoring.notifiers.len();
@@ -781,7 +824,10 @@ impl AgentCore {
                 }
             }
             SyncVerb::NotifyTest { id, message } => {
-                self.justify_token(token, "notify_test", &id)?;
+                let (_claims, caller) = self.justify_token(token, "notify_test", &id)?;
+                // Fires real outbound webhooks to configured targets —
+                // admin-only, re-checked here against the fresh record.
+                Self::require_admin(&caller)?;
                 let n = cfg
                     .monitoring
                     .notifiers
@@ -861,7 +907,7 @@ impl AgentCore {
         title: String,
         token: &str,
     ) -> Result<mpsc::Receiver<ServerMessage>> {
-        let claims = self.justify_token(token, &title, "")?;
+        let (claims, _user) = self.justify_token(token, &title, "")?;
         let cfg = self.cfg.get().await;
         let (tx, rx) = mpsc::channel::<ServerMessage>(256);
         let core = Arc::clone(self);
@@ -1003,6 +1049,9 @@ impl AgentCore {
             } => {
                 if !crate::gitops::valid_clone_url(url) {
                     bail!("invalid clone url");
+                }
+                if crate::gitops::is_local_clone_url(url) && !cfg.security.allow_local_git_clone {
+                    bail!("local clone URLs disabled (security.allow_local_git_clone)");
                 }
                 if let Some(b) = branch {
                     if !crate::gitops::valid_ref(b) {
@@ -1456,4 +1505,41 @@ fn check_unit_name(unit: &str) -> Result<()> {
         bail!("invalid unit name");
     }
     Ok(())
+}
+
+/// Secret-bearing notifier fields — on update, values left empty or set to
+/// "***" keep the stored value (the UI never sends real secrets back).
+const NOTIFIER_SECRET_KEYS: &[&str] = &[
+    "url",
+    "url_env",
+    "bot_token",
+    "bot_token_env",
+    "username",
+    "password",
+    "password_env",
+    "username_env",
+    "headers",
+];
+
+fn merge_notifier_secrets(new: &mut serde_json::Value, old: Option<&serde_json::Value>) {
+    let Some(old) = old else { return };
+    for key in NOTIFIER_SECRET_KEYS {
+        let keep = match new.get(*key) {
+            None | Some(serde_json::Value::Null) => true,
+            Some(serde_json::Value::String(s)) => s.is_empty() || s == "***",
+            _ => false,
+        };
+        if keep {
+            match old.get(*key) {
+                Some(v) if !v.is_null() => {
+                    new.as_object_mut()
+                        .unwrap()
+                        .insert(key.to_string(), v.clone());
+                }
+                _ => {
+                    new.as_object_mut().unwrap().remove(*key);
+                }
+            }
+        }
+    }
 }

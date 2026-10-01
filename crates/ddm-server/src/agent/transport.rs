@@ -31,10 +31,17 @@ pub async fn serve(core: Arc<AgentCore>, socket_path: &Path) -> Result<()> {
     );
     let allowed_uid = core.cfg.get().await.security.agent_peer_uid;
     info!("agent listening on {}", socket_path.display());
+    // Bound concurrent connections — each spawns a task and buffers input.
+    let permits = Arc::new(tokio::sync::Semaphore::new(64));
     loop {
         let (sock, _addr) = listener.accept().await?;
         let core = Arc::clone(&core);
+        let permit = Arc::clone(&permits);
         tokio::spawn(async move {
+            let _permit = match permit.try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => return, // saturated — drop the connection
+            };
             if let Err(e) = handle_conn(core, sock, allowed_uid).await {
                 warn!("agent connection error: {e:#}");
             }
@@ -55,11 +62,14 @@ async fn handle_conn(
         }
     }
     let (r, mut w) = sock.into_split();
-    let mut lines = BufReader::new(r).lines();
+    // Bound the read itself: a peer could otherwise send a newline-free
+    // stream and exhaust agent memory before the size check ever ran.
+    const MAX_REQ: u64 = 16 * 1024 * 1024;
+    let mut lines = BufReader::new(tokio::io::AsyncReadExt::take(r, MAX_REQ + 1)).lines();
     let Some(line) = lines.next_line().await? else {
         return Ok(());
     };
-    if line.len() > 16 * 1024 * 1024 {
+    if line.len() as u64 > MAX_REQ {
         bail!("request too large");
     }
     let req: AgentRequest = serde_json::from_str(&line).context("bad request")?;

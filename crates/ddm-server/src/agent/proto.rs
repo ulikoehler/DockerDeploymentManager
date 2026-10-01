@@ -393,7 +393,10 @@ pub enum NotifierMut {
     },
     Update {
         id: String,
-        notifier: crate::config::NotifierConfig,
+        /// Raw JSON body — the agent merges secret fields against the
+        /// existing notifier itself (the server holds redacted config and
+        /// cannot merge values it never sees).
+        patch: serde_json::Value,
     },
     Delete {
         id: String,

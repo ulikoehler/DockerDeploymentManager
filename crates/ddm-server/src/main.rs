@@ -72,11 +72,23 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
     let web_dir = cfg.server.web_dir.clone();
     let history = cfg.logging.history_executions;
     let users_path = config::resolve_users_path(&config_path, &cfg);
+    let separated = cfg.security.agent_socket.is_some();
 
-    let shared = Arc::new(config::SharedConfig::new(cfg, config_path.clone()));
+    // In privilege-separated mode this process holds only a redacted
+    // config — secrets live exclusively in the agent.
+    let shared = if separated {
+        Arc::new(config::SharedConfig::new_redacted(cfg, config_path.clone()))
+    } else {
+        Arc::new(config::SharedConfig::new(cfg, config_path.clone()))
+    };
     shared.spawn_watcher();
 
-    let users = Arc::new(users::UserStore::load(&users_path)?);
+    // Separated mode: this process keeps only the public view (no hashes).
+    let users = Arc::new(if separated {
+        users::UserStore::load_public(&users_path)?
+    } else {
+        users::UserStore::load(&users_path)?
+    });
     users.spawn_watcher();
     if users.list().await.is_empty() {
         warn!(

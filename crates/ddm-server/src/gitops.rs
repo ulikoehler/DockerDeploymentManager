@@ -201,6 +201,13 @@ pub fn valid_ref(r: &str) -> bool {
         && !r.contains("..")
 }
 
+/// True for clone URLs that reference the local filesystem — these let the
+/// (privileged) clone read arbitrary host paths and are gated on
+/// `security.allow_local_git_clone`.
+pub fn is_local_clone_url(u: &str) -> bool {
+    u.starts_with("file://") || u.starts_with('/') || u.starts_with('.')
+}
+
 /// Validate a clone URL: https/git/ssh/scp-style/file paths allowed.
 pub fn valid_clone_url(u: &str) -> bool {
     !u.is_empty()

@@ -318,17 +318,6 @@ pub async fn notifier_test(
 // notifier CRUD — writes through to config.yaml via SharedConfig::mutate
 // ---------------------------------------------------------------------------
 
-const SECRET_KEYS: &[&str] = &[
-    "url",
-    "url_env",
-    "bot_token",
-    "bot_token_env",
-    "username",
-    "password",
-    "password_env",
-    "username_env",
-];
-
 fn valid_notifier_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
@@ -340,30 +329,6 @@ fn valid_notifier_id(id: &str) -> bool {
 #[allow(clippy::result_large_err)]
 fn parse_notifier(v: &serde_json::Value) -> Result<crate::config::NotifierConfig, Response> {
     serde_json::from_value(v.clone()).map_err(|e| bad_request(format!("invalid notifier: {e}")))
-}
-
-/// On update, secret fields left empty or "***" keep the existing values.
-fn merge_secrets(new: &mut serde_json::Value, old: Option<&serde_json::Value>) {
-    let Some(old) = old else { return };
-    for key in SECRET_KEYS {
-        let keep = match new.get(*key) {
-            None | Some(serde_json::Value::Null) => true,
-            Some(serde_json::Value::String(s)) => s.is_empty() || s == "***",
-            _ => false,
-        };
-        if keep {
-            match old.get(*key) {
-                Some(v) if !v.is_null() => {
-                    new.as_object_mut()
-                        .unwrap()
-                        .insert(key.to_string(), v.clone());
-                }
-                _ => {
-                    new.as_object_mut().unwrap().remove(*key);
-                }
-            }
-        }
-    }
 }
 
 pub async fn notifier_create(
@@ -404,18 +369,18 @@ pub async fn notifier_update(
     if !user.user.is_admin() {
         return Err(forbidden());
     }
+    // Secret merge happens inside the agent against the real stored
+    // notifier — this process only ever holds redacted config.
     let cfg = state.config.get().await;
-    let old_v = cfg
-        .monitoring
-        .notifiers
-        .iter()
-        .find(|n| n.id() == id)
-        .map(|n| serde_json::to_value(n).unwrap_or_default())
-        .ok_or_else(|| not_found("notifier not found"))?;
-    let mut merged = body.clone();
-    merge_secrets(&mut merged, Some(&old_v));
-    let n = parse_notifier(&merged)?;
-    if n.id() != id {
+    if !cfg.monitoring.notifiers.iter().any(|n| n.id() == id) {
+        return Err(not_found("notifier not found"));
+    }
+    if body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|v| v != id)
+        .unwrap_or(false)
+    {
         return Err(bad_request("id cannot be changed"));
     }
     state
@@ -424,7 +389,7 @@ pub async fn notifier_update(
             crate::agent::proto::SyncVerb::NotifierMut {
                 op: crate::agent::proto::NotifierMut::Update {
                     id: id.clone(),
-                    notifier: n,
+                    patch: body,
                 },
             },
             &user.token,
@@ -568,32 +533,6 @@ pub async fn access_test(Query(q): Query<AccessTestQuery>) -> Json<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn merge_secrets_keeps_old() {
-        let old = json!({"type": "telegram", "id": "tg", "bot_token": "secret", "chat_id": "1"});
-        let mut new = json!({"type": "telegram", "id": "tg", "chat_id": "2"});
-        merge_secrets(&mut new, Some(&old));
-        assert_eq!(new["bot_token"], "secret");
-        assert_eq!(new["chat_id"], "2");
-    }
-
-    #[test]
-    fn merge_secrets_stars_keep_old() {
-        let old = json!({"type": "slack_webhook", "id": "s", "url": "https://x"});
-        let mut new = json!({"type": "slack_webhook", "id": "s", "url": "***"});
-        merge_secrets(&mut new, Some(&old));
-        assert_eq!(new["url"], "https://x");
-    }
-
-    #[test]
-    fn merge_secrets_new_value_wins() {
-        let old = json!({"type": "slack_webhook", "id": "s", "url": "https://old"});
-        let mut new = json!({"type": "slack_webhook", "id": "s", "url": "https://new"});
-        merge_secrets(&mut new, Some(&old));
-        assert_eq!(new["url"], "https://new");
-    }
 
     #[test]
     fn valid_ids() {

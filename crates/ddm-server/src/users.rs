@@ -161,11 +161,24 @@ pub fn generate_password() -> String {
 pub struct UserStore {
     inner: RwLock<UsersFile>,
     path: PathBuf,
+    /// When true, `password_hash` is stripped from every load/reload — the
+    /// unprivileged server never holds hashes; only the agent does.
+    redact_hashes: bool,
 }
 
 impl UserStore {
     pub fn load(path: &Path) -> Result<Self> {
-        let file = if path.exists() {
+        Self::load_inner(path, false)
+    }
+
+    /// Server-side variant: password hashes are stripped so a compromised
+    /// server holds no crackable material.
+    pub fn load_public(path: &Path) -> Result<Self> {
+        Self::load_inner(path, true)
+    }
+
+    fn load_inner(path: &Path, redact_hashes: bool) -> Result<Self> {
+        let mut file = if path.exists() {
             let f = std::fs::File::open(path)
                 .with_context(|| format!("opening users file {}", path.display()))?;
             serde_yaml::from_reader(f)
@@ -173,9 +186,15 @@ impl UserStore {
         } else {
             UsersFile::default()
         };
+        if redact_hashes {
+            for u in &mut file.users {
+                u.password_hash.clear();
+            }
+        }
         Ok(Self {
             inner: RwLock::new(file),
             path: path.to_path_buf(),
+            redact_hashes,
         })
     }
 
@@ -214,10 +233,14 @@ impl UserStore {
     }
 
     /// Apply a mutation and persist atomically (tmp + rename under flock).
+    /// Refused on a redacted store — writing it would blank all hashes.
     pub async fn mutate<F>(&self, f: F) -> Result<()>
     where
         F: FnOnce(&mut UsersFile) -> Result<()>,
     {
+        if self.redact_hashes {
+            anyhow::bail!("user mutations run in the privileged agent only");
+        }
         let mut guard = self.inner.write().await;
         let mut new_file = guard.clone();
         f(&mut new_file)?;
@@ -232,7 +255,12 @@ impl UserStore {
             return Ok(());
         }
         let f = std::fs::File::open(&self.path)?;
-        let file: UsersFile = serde_yaml::from_reader(f)?;
+        let mut file: UsersFile = serde_yaml::from_reader(f)?;
+        if self.redact_hashes {
+            for u in &mut file.users {
+                u.password_hash.clear();
+            }
+        }
         *self.inner.write().await = file;
         Ok(())
     }
@@ -288,6 +316,12 @@ pub fn write_users_atomic(path: &Path, file: &UsersFile) -> Result<()> {
     {
         let f = std::fs::File::create(&tmp)?;
         serde_yaml::to_writer(f, file)?;
+    }
+    // The file carries password hashes — never leave it world-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640))?;
     }
     std::fs::rename(&tmp, path)?;
     let _ = std::fs::remove_file(&lock_path);
@@ -435,5 +469,29 @@ mod security_tests {
         assert!(store.authenticate("bob", "wrong").await.is_none());
         assert!(store.authenticate("mallory", "pw1").await.is_none());
         assert!(store.authenticate("bob", "").await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn load_public_strips_hashes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("users.yaml");
+        std::fs::write(
+            &path,
+            format!(
+                "users:\n  - name: a\n    password_hash: \"{}\"\n    roles: [admin]\n",
+                hash_password("x").unwrap()
+            ),
+        )
+        .unwrap();
+        let store = UserStore::load_public(&path).unwrap();
+        let u = store.get("a").await.unwrap();
+        assert!(u.password_hash.is_empty(), "public store held a hash");
+        // write-back from a redacted store must be refused
+        assert!(store.mutate(|_| Ok(())).await.is_err());
     }
 }

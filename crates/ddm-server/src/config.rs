@@ -45,6 +45,65 @@ fn default_users_file() -> String {
     "users.yaml".to_string()
 }
 
+impl AppConfig {
+    /// Strip all credential material in place — used by the unprivileged
+    /// server in privilege-separated mode so a compromise exposes no
+    /// notifier tokens, git credentials, webhook secrets, or backup env.
+    /// `*_env` names are kept: they are variable *names*, not secrets.
+    pub fn redact_secrets(&mut self) {
+        const MASK: &str = "***";
+        let mask_opt = |v: &mut Option<String>| {
+            if v.is_some() {
+                *v = Some(MASK.into());
+            }
+        };
+        // notifiers — every secret-bearing field
+        for n in &mut self.monitoring.notifiers {
+            match n {
+                NotifierConfig::SlackWebhook { url, .. } => mask_opt(url),
+                NotifierConfig::Telegram { bot_token, .. } => mask_opt(bot_token),
+                NotifierConfig::Email {
+                    username, password, ..
+                } => {
+                    mask_opt(username);
+                    mask_opt(password);
+                }
+                NotifierConfig::Webhook { url, headers, .. } => {
+                    if !url.is_empty() {
+                        *url = MASK.into();
+                    }
+                    for v in headers.values_mut() {
+                        *v = MASK.into();
+                    }
+                }
+            }
+        }
+        // gitops — token + webhook secret + creds embedded in the URL
+        mask_opt(&mut self.gitops.token);
+        mask_opt(&mut self.gitops.webhook_secret);
+        self.gitops.url = strip_url_creds(&self.gitops.url);
+        // backup — repo URL creds + env values (AWS keys, restic password, …)
+        self.backup.repository_base = strip_url_creds(&self.backup.repository_base);
+        if let Some(t) = &mut self.backup.repository_template {
+            *t = strip_url_creds(t);
+        }
+        for v in self.backup.extra_env.values_mut() {
+            *v = MASK.into();
+        }
+    }
+}
+
+/// Remove `user:pass@` from a URL, preserving scheme and host.
+fn strip_url_creds(u: &str) -> String {
+    match u.split_once("://") {
+        Some((scheme, rest)) => match rest.split_once('@') {
+            Some((_creds, host)) => format!("{scheme}://***:***@{host}"),
+            None => u.to_string(),
+        },
+        None => u.to_string(),
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -247,6 +306,11 @@ pub struct SecurityConfig {
     /// agent for password hashing/verification.
     #[serde(default)]
     pub pepper_file: Option<String>,
+    /// Permit `git clone` from local paths / file:// URLs. Off by default:
+    /// the clone runs in the privileged agent, so a local URL could copy a
+    /// host repository (e.g. an etckeeper /etc) into a service dir.
+    #[serde(default)]
+    pub allow_local_git_clone: bool,
 }
 
 fn default_policy_name() -> String {
@@ -277,6 +341,7 @@ impl Default for SecurityConfig {
             agent_socket: None,
             agent_peer_uid: None,
             pepper_file: None,
+            allow_local_git_clone: false,
         }
     }
 }
@@ -1228,6 +1293,10 @@ pub struct SharedConfig {
     path: PathBuf,
     /// Last reload outcome.
     last_reload: Arc<RwLock<ReloadStatus>>,
+    /// When true, every loaded config is secret-redacted — used by the
+    /// unprivileged server process in privilege-separated mode so it never
+    /// holds notifier/git/backup credentials in memory.
+    redact: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1250,7 +1319,18 @@ impl SharedConfig {
                 error: None,
                 at: Some(chrono::Utc::now()),
             })),
+            redact: false,
         }
+    }
+
+    /// Server-side config in privilege-separated mode: identical loads and
+    /// reloads, but secrets are stripped so the network-facing process
+    /// never holds them. `mutate` is disabled — the agent owns writes.
+    pub fn new_redacted(mut cfg: AppConfig, path: PathBuf) -> Self {
+        cfg.redact_secrets();
+        let mut s = Self::new(cfg, path);
+        s.redact = true;
+        s
     }
 
     pub async fn get(&self) -> Arc<AppConfig> {
@@ -1264,6 +1344,9 @@ impl SharedConfig {
     where
         F: FnOnce(&mut AppConfig) -> Result<()>,
     {
+        if self.redact {
+            anyhow::bail!("config mutations run in the privileged agent only");
+        }
         let mut new_cfg = self.inner.read().await.clone();
         f(&mut new_cfg)?;
         validate_config(&new_cfg)?;
@@ -1343,7 +1426,10 @@ async fn watch_loop(state: Arc<SharedConfig>, path: PathBuf) -> Result<()> {
         while rx.try_recv().is_ok() {}
         info!("config file changed, reloading");
         match load_config(&path) {
-            Ok(new_cfg) => {
+            Ok(mut new_cfg) => {
+                if state.redact {
+                    new_cfg.redact_secrets();
+                }
                 let arc = Arc::new(new_cfg);
                 *state.inner.write().await = (*arc).clone();
                 *state.last_reload.write().await = ReloadStatus {
@@ -1459,5 +1545,81 @@ mod security_tests {
         c.monitoring.notifiers.push(n.clone());
         c.monitoring.notifiers.push(n);
         assert!(validate_config(&c).is_err());
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::*;
+
+    fn cfg_with_secrets() -> AppConfig {
+        let mut c = AppConfig::default();
+        c.monitoring.notifiers = vec![
+            NotifierConfig::SlackWebhook {
+                id: "s".into(),
+                url: Some("https://hooks.slack.com/secret".into()),
+                url_env: Some("SLACK_URL".into()),
+            },
+            NotifierConfig::Telegram {
+                id: "t".into(),
+                bot_token: Some("123:abc".into()),
+                bot_token_env: Some("TG_TOKEN".into()),
+                chat_id: "42".into(),
+            },
+            NotifierConfig::Webhook {
+                id: "w".into(),
+                url: "https://user:pass@hooks.example.com/x".into(),
+                headers: HashMap::from([("Authorization".into(), "Bearer xyz".into())]),
+            },
+        ];
+        c.gitops.token = Some("ghp_secret".into());
+        c.gitops.webhook_secret = Some("whsec".into());
+        c.gitops.url = "https://deploy:pw@example.com/repo.git".into();
+        c.backup.repository_base = "s3://key:secret@host/bucket".into();
+        c.backup
+            .extra_env
+            .insert("AWS_SECRET".into(), "leak".into());
+        c
+    }
+
+    #[test]
+    fn redact_secrets_strips_credentials() {
+        let mut c = cfg_with_secrets();
+        c.redact_secrets();
+        let s = serde_yaml::to_string(&c).unwrap();
+        for leaked in [
+            "hooks.slack.com/secret",
+            "123:abc",
+            "ghp_secret",
+            "whsec",
+            "deploy:pw",
+            "key:secret",
+            "leak",
+            "Bearer xyz",
+        ] {
+            assert!(
+                !s.contains(leaked),
+                "redacted config still contains {leaked}"
+            );
+        }
+        // env-var *names* stay — they are not secrets
+        assert!(s.contains("SLACK_URL") && s.contains("TG_TOKEN"));
+    }
+
+    #[tokio::test]
+    async fn redacted_store_cannot_mutate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        let cfg = cfg_with_secrets();
+        std::fs::write(&path, serde_yaml::to_string(&cfg).unwrap()).unwrap();
+        let sc = SharedConfig::new_redacted(cfg, path.clone());
+        // stored view is already redacted
+        let live = sc.get().await;
+        assert_eq!(live.gitops.token.as_deref(), Some("***"));
+        // and mutations are refused — the agent owns writes
+        assert!(sc.mutate(|_| Ok(())).await.is_err());
+        // the file on disk is untouched (real secrets intact)
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("ghp_secret"));
     }
 }

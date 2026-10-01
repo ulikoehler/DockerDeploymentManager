@@ -162,6 +162,7 @@ security:
   agent_socket: /run/ddm/agent.sock   # enables privilege-separated mode
   agent_peer_uid: 1001                # optional SO_PEERCRED restriction (uid of ddm-server)
   pepper_file: /etc/ddm/pepper        # root:ddm-agent 0440
+  allow_local_git_clone: false        # default off: file:// / local clone URLs run as root in the agent
 ```
 
 - `ddm-server agent` runs as root (or a uid with docker + systemd +
@@ -172,12 +173,30 @@ security:
   the monitor and gitsync loops, and the justification log
   (`justification.log` next to the config, root-owned append-only).
   `config.yaml` can therefore be root-owned `0640 root:ddm` — the server
-  only reads it.
+  only reads it. `users.yaml` is written `0640` (group read so the server
+  can list users; never world-accessible).
+- **Fresh-record authorization**: every justified agent call re-loads the
+  user from `users.yaml` — admin checks (`require_admin`) run against the
+  live roles, not the claims signed at login. Deleting or demoting a user
+  kills their privilege at the agent boundary immediately, before token
+  expiry; minted child tokens carry roles intersected with the fresh
+  record, so demoted roles cannot be resurrected.
+- `git clone` verbs accept remote URLs only unless
+  `security.allow_local_git_clone` is set — a `file://` or local-path
+  clone would otherwise let a caller copy any root-readable repo on the
+  host into a service dir.
 - `ddm-server serve` runs unprivileged (`User=ddm`,
   `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ReadWritePaths` on the
   state dir only, **not** in the docker group) and reaches the agent via
   `security.agent_socket` (socket `0660 root:ddm`, `agent_peer_uid`
-  verified via `SO_PEERCRED`).
+  verified via `SO_PEERCRED`). In this mode it also holds **no secrets at
+  all**: its config view is redacted at load (notifier URLs/tokens, git
+  credentials, webhook secret, backup `extra_env`/repo creds are masked;
+  `*_env` variable *names* are kept), and its user store keeps no password
+  hashes. Secret-merge on notifier update runs inside the agent; config
+  and user mutations are refused outright in the redacted process.
+- The agent socket is bounded: requests capped at 16 MB *before*
+  buffering, and at most 64 concurrent connections.
 - When `agent_socket` is unset the server logs a warning and embeds the
   agent in-process — same code path, no separation. Intended for tests
   and development only.

@@ -1580,3 +1580,220 @@ async fn agent_never_returns_password_hashes() {
     let s = serde_json::to_string(&v).unwrap();
     assert!(!s.contains("$argon2"), "verify leaked a password hash: {s}");
 }
+
+/// Compromised-server case: a token whose user was deleted must fail at the
+/// AGENT boundary, not just at the server's auth extractor.
+#[tokio::test]
+async fn agent_rejects_deleted_users_token() {
+    let h = harness().await;
+    let (_, tok) = login(&h.app, "viewer", PASSWORD).await;
+    // Delete the user row directly — bypasses the API entirely.
+    let users_path = h._dir.path().join("users.yaml");
+    let yaml = std::fs::read_to_string(&users_path).unwrap();
+    let yaml = yaml.replace(
+        "  - name: viewer\n    password_hash:",
+        "  - name: gone\n    password_hash:",
+    );
+    std::fs::write(&users_path, yaml).unwrap();
+    let r = h
+        .state
+        .agent
+        .call(crate::agent::proto::SyncVerb::ServicesList, &tok)
+        .await;
+    assert!(r.is_err(), "deleted user's token still authorized at agent");
+}
+
+/// Role changes are enforced from the fresh user record inside the agent —
+/// an old admin token must not retain agent-level admin after demotion.
+#[tokio::test]
+async fn demoted_admin_loses_agent_admin() {
+    let h = harness().await;
+    let (_, tok) = login(&h.app, "admin", PASSWORD).await;
+    let users_path = h._dir.path().join("users.yaml");
+    let yaml = std::fs::read_to_string(&users_path).unwrap();
+    let yaml = yaml.replace("roles: [admin]", "roles: [viewer]");
+    std::fs::write(&users_path, yaml).unwrap();
+    let r = h
+        .state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::UsersList { token: tok.clone() })
+        .await;
+    assert!(
+        r.is_err(),
+        "demoted admin retained agent admin via stale token"
+    );
+    // Minted children must not resurrect the dropped role either.
+    let v = h
+        .state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::Mint {
+            token: tok,
+            ttl_minutes: Some(5),
+            services: None,
+            actions: None,
+        })
+        .await;
+    assert!(v.is_ok(), "mint should still work (roles narrowed)");
+    let child = v.unwrap()["token"].as_str().unwrap().to_string();
+    let v = h
+        .state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::Verify { token: child })
+        .await
+        .unwrap();
+    let roles = &v["claims"]["roles"];
+    assert!(
+        !serde_json::to_string(roles).unwrap().contains("admin"),
+        "child token resurrected admin role: {roles}"
+    );
+}
+
+/// The login response itself must not carry the password hash into the
+/// unprivileged process.
+#[tokio::test]
+async fn authenticate_never_returns_hash() {
+    let h = harness().await;
+    let v = h
+        .state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::Authenticate {
+            name: "admin".into(),
+            password: PASSWORD.into(),
+        })
+        .await
+        .unwrap();
+    let s = serde_json::to_string(&v).unwrap();
+    assert!(
+        !s.contains("$argon2"),
+        "authenticate leaked a password hash: {s}"
+    );
+}
+
+/// users.yaml must never be written world-readable — it holds password
+/// hashes.
+#[tokio::test]
+async fn users_file_written_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = harness().await;
+    let (_, tok) = login(&h.app, "admin", PASSWORD).await;
+    h.state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::UserMutate {
+            token: tok,
+            op: crate::agent::proto::UserMut::Create {
+                name: "newbie".into(),
+                password: "sufficiently-long".into(),
+                roles: vec!["viewer".into()],
+                access: vec![],
+                features: None,
+                compose_policy: None,
+            },
+        })
+        .await
+        .unwrap();
+    let mode = std::fs::metadata(h._dir.path().join("users.yaml"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    // 0640 is expected: group-read lets the unprivileged server load the
+    // user list, but the file must never be world-accessible.
+    assert_eq!(mode & 0o007, 0, "users.yaml is world-accessible: {mode:o}");
+}
+
+/// Local clone URLs let the privileged agent read arbitrary host repos —
+/// denied unless security.allow_local_git_clone is set.
+#[tokio::test]
+async fn local_clone_blocked_by_default() {
+    let h = harness().await;
+    let (_, tok) = login(&h.app, "admin", PASSWORD).await;
+    let core = h.state.agent.local_core().unwrap();
+    let mut rx = core
+        .exec(
+            crate::agent::proto::ExecVerb::GitClone {
+                service: "svc_a".into(),
+                url: "file:///etc".into(),
+                path: "loot".into(),
+                branch: None,
+            },
+            "e-test".into(),
+            "clone".into(),
+            &tok,
+        )
+        .await
+        .unwrap();
+    // Validation happens inside the exec task — failure arrives as a frame.
+    let mut failed = false;
+    while let Some(msg) = rx.recv().await {
+        if let crate::protocol::ServerMessage::ExecutionFinished { success, .. } = msg {
+            failed = !success;
+            break;
+        }
+    }
+    assert!(failed, "local clone URL accepted without opt-in");
+}
+
+/// Secret-merge on notifier update happens inside the agent: the server
+/// sends a raw patch, and "***" keeps the stored secret.
+#[tokio::test]
+async fn notifier_update_merges_secrets_in_agent() {
+    let h = harness().await;
+    let (_, tok) = login(&h.app, "admin", PASSWORD).await;
+    // create a notifier carrying a secret URL
+    let create = h
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/api/monitoring/notifiers")
+                .header("authorization", format!("Bearer {tok}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    r#"{"type":"webhook","id":"w1","url":"https://real:secret@example.com/hook"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), 200);
+    // update only the id-visible fields — url left as "***"
+    let upd = h
+        .app
+        .clone()
+        .oneshot(
+            Request::put("/api/monitoring/notifiers/w1")
+                .header("authorization", format!("Bearer {tok}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    r#"{"type":"webhook","id":"w1","url":"***"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(upd.status(), 200);
+    let on_disk = std::fs::read_to_string(h._dir.path().join("config.yaml")).unwrap();
+    assert!(
+        on_disk.contains("https://real:secret@example.com/hook"),
+        "secret lost on update: {on_disk}"
+    );
+    // and a hostile server can't steal it: the parsed config it holds
+    // (redacted view is wired in serve(); harness shares Local so check
+    // the API output path) — get_config must show ***.
+    let g = h
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/api/config")
+                .header("authorization", format!("Bearer {tok}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(g.into_body(), 1 << 20).await.unwrap();
+    let s = String::from_utf8_lossy(&body);
+    assert!(
+        !s.contains("real:secret"),
+        "config leaked notifier url: {s}"
+    );
+}
