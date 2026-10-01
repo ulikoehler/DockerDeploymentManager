@@ -12,6 +12,7 @@ mod gitops;
 mod gitsync;
 mod hostexec;
 mod logs;
+mod mcp;
 mod monitor;
 mod notify;
 mod permissions;
@@ -152,7 +153,9 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
         gitsync,
     };
 
-    let mut app = api::api_router().with_state(state.clone());
+    let mut app = api::api_router()
+        .merge(mcp::router(state.clone()))
+        .with_state(state.clone());
 
     // optional static web UI (SPA fallback → index.html)
     if let Some(dir) = web_dir {

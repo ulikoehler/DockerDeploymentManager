@@ -172,3 +172,27 @@ Unit names must match a configured group's `unit_regex` (admins bypass).
 | POST | `/api/gitops/sync` | admin: pull + apply now |
 | POST | `/api/gitops/push` | admin: commit & push pending local changes (no-op unless `push_changes`) |
 | POST | `/api/gitops/webhook` | **public**, secret-verified (GitHub `X-Hub-Signature-256` or GitLab `X-Gitlab-Token`); triggers an async sync |
+
+## MCP (Model Context Protocol)
+
+The server also exposes the entire API surface as MCP tools over streamable
+HTTP at `POST/GET /mcp` (rmcp). Authenticate the same way as the REST API:
+`Authorization: Bearer <token>` (or `?token=`); unauthenticated requests get
+401. Tool calls run the same handlers, so permissions, compose policies and
+audit logging are identical.
+
+Tool names mirror the API: `services_list`, `service_get`,
+`service_action` (`{name, action}`), `service_get_compose` /
+`service_put_compose`, `service_*_unit`, `service_logs`, `service_files` /
+`service_write_file` / `service_mkdir` / `service_rename_file` /
+`service_delete_file`, `service_git_*`, `service_backup_*`,
+`service_*_monitoring` / `monitoring_*` / `notifier_*`, `systemd_*`,
+`commands_list` / `command_run`, `gitops_*`, `user_*` / `users_list`, `me`,
+`logout_all`, `config_get` / `config_status`, `effective_policy`,
+`templates`, `audit_list`, `executions_list` / `execution_get`, `health`.
+
+Tools that launch long-running work (actions, backups, executes, clones)
+return `{"execution_id": "…"}` — poll with `execution_get`. Complex config
+bodies (`service_put_backup`, `service_put_monitoring`, `notifier_*`,
+`user_*` features/access) accept a `config`/`rules` JSON object with the
+same shape as the REST body.
