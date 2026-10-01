@@ -10,12 +10,11 @@
 //! permission checks, policy validation and audit logging are identical.
 
 use crate::api;
-use crate::auth::{bearer_token, error_response, AuthUser, SuccessResponse};
+use crate::auth::{AuthUser, SuccessResponse};
 use crate::AppState;
 use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::request::Parts;
-use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::{Json, Router};
@@ -23,9 +22,7 @@ use rmcp::handler::server::common::{AsRequestContext, FromContextPart};
 use rmcp::handler::server::wrapper::{Json as McpJson, Parameters};
 use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService,
-};
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -40,10 +37,16 @@ use std::sync::Arc;
 /// Router serving MCP over streamable HTTP at `/mcp` (requires bearer auth).
 pub fn router(state: AppState) -> Router<AppState> {
     let handler_state = state.clone();
+    // Host validation defaults to loopback-only, which would break real
+    // deployments behind a hostname — JWT auth is the actual boundary here.
+    // Origin enforcement rejects any browser-originated request instead.
+    let config = StreamableHttpServerConfig::default()
+        .disable_allowed_hosts()
+        .enforce_origin_validation();
     let service = StreamableHttpService::new(
         move || Ok(DdmMcp::new(handler_state.clone())),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+        config,
     );
     Router::new()
         .nest_service("/mcp", service)
@@ -58,21 +61,8 @@ async fn mcp_auth(
     next: Next,
 ) -> Result<Response, Response> {
     let (mut parts, body) = req.into_parts();
-    let token = bearer_token(&parts)
-        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
-    let claims = state
-        .jwt
-        .verify(token)
-        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "invalid token"))?;
-    let user = state
-        .users
-        .get(&claims.sub)
-        .await
-        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "unknown user"))?;
-    parts.extensions.insert(AuthUser {
-        user,
-        claims,
-    });
+    let auth = crate::auth::authenticate(&parts, &state).await?;
+    parts.extensions.insert(auth);
     Ok(next.run(Request::from_parts(parts, body)).await)
 }
 
@@ -577,7 +567,9 @@ impl DdmMcp {
         finish(api::services::delete(user, self.st(), Path(p.name), Query(q)).await).await
     }
 
-    #[tool(description = "Run a lifecycle action on a service (pull|up|down|restart|update|start|stop|enable|disable)")]
+    #[tool(
+        description = "Run a lifecycle action on a service (pull|up|down|restart|update|start|stop|enable|disable)"
+    )]
     async fn service_action(
         &self,
         McpUser(user): McpUser,
@@ -651,8 +643,7 @@ impl DdmMcp {
             enable: p.enable,
             start: p.start,
         };
-        finish(api::services::regenerate_unit(user, self.st(), Path(p.name), Json(req)).await)
-            .await
+        finish(api::services::regenerate_unit(user, self.st(), Path(p.name), Json(req)).await).await
     }
 
     #[tool(description = "Fetch container logs for a service")]
@@ -799,7 +790,9 @@ impl DdmMcp {
         finish(api::files::git_clone(user, self.st(), Path(p.name), Json(req)).await).await
     }
 
-    #[tool(description = "Git pull/fetch/checkout on a repo inside a service dir (returns execution_id)")]
+    #[tool(
+        description = "Git pull/fetch/checkout on a repo inside a service dir (returns execution_id)"
+    )]
     async fn service_git_action(
         &self,
         McpUser(user): McpUser,
@@ -824,7 +817,9 @@ impl DdmMcp {
         finish(api::services::get_backup(user, self.st(), Path(p.name)).await).await
     }
 
-    #[tool(description = "Set a service's backup configuration (JSON object: enabled, paths, excludes, stdin_dumps, schedule_enabled)")]
+    #[tool(
+        description = "Set a service's backup configuration (JSON object: enabled, paths, excludes, stdin_dumps, schedule_enabled)"
+    )]
     async fn service_put_backup(
         &self,
         McpUser(user): McpUser,
@@ -889,8 +884,7 @@ impl DdmMcp {
             snapshot: p.snapshot,
             target_dir: p.target_dir,
         };
-        finish(api::services::backup_restore(user, self.st(), Path(p.name), Json(req)).await)
-            .await
+        finish(api::services::backup_restore(user, self.st(), Path(p.name), Json(req)).await).await
     }
 
     // -- monitoring ---------------------------------------------------------------
@@ -911,8 +905,7 @@ impl DdmMcp {
         Parameters(p): Parameters<JsonConfigArgs>,
     ) -> Result<McpJson<Value>, ErrorData> {
         let cfg: crate::config::ServiceMonitoringConfig = parse(p.config)?;
-        finish(api::services::put_monitoring(user, self.st(), Path(p.name), Json(cfg)).await)
-            .await
+        finish(api::services::put_monitoring(user, self.st(), Path(p.name), Json(cfg)).await).await
     }
 
     #[tool(description = "Test a service's monitoring (container health snapshot)")]
@@ -925,10 +918,7 @@ impl DdmMcp {
     }
 
     #[tool(description = "Monitoring status of all accessible services")]
-    async fn monitoring_status(
-        &self,
-        McpUser(user): McpUser,
-    ) -> Result<McpJson<Value>, ErrorData> {
+    async fn monitoring_status(&self, McpUser(user): McpUser) -> Result<McpJson<Value>, ErrorData> {
         to_data(api::misc::monitor_status_all(user, self.st()).await)
     }
 
@@ -959,7 +949,9 @@ impl DdmMcp {
         finish(api::misc::notifiers(user, self.st()).await).await
     }
 
-    #[tool(description = "Create a notifier (admin). Config JSON e.g. {\"type\":\"telegram\",\"id\":\"tg\",\"bot_token\":\"...\",\"chat_id\":\"...\"}")]
+    #[tool(
+        description = "Create a notifier (admin). Config JSON e.g. {\"type\":\"telegram\",\"id\":\"tg\",\"bot_token\":\"...\",\"chat_id\":\"...\"}"
+    )]
     async fn notifier_create(
         &self,
         McpUser(user): McpUser,
@@ -968,14 +960,15 @@ impl DdmMcp {
         finish(api::misc::notifier_create(user, self.st(), Json(p.config)).await).await
     }
 
-    #[tool(description = "Update a notifier (admin). Empty/\"***\" secret fields keep their current values")]
+    #[tool(
+        description = "Update a notifier (admin). Empty/\"***\" secret fields keep their current values"
+    )]
     async fn notifier_update(
         &self,
         McpUser(user): McpUser,
         Parameters(p): Parameters<NotifierUpdateArgs>,
     ) -> Result<McpJson<Value>, ErrorData> {
-        finish(api::misc::notifier_update(user, self.st(), Path(p.id), Json(p.config)).await)
-            .await
+        finish(api::misc::notifier_update(user, self.st(), Path(p.id), Json(p.config)).await).await
     }
 
     #[tool(description = "Delete a notifier (admin)")]
@@ -994,9 +987,7 @@ impl DdmMcp {
         Parameters(p): Parameters<NotifierTestArgs>,
     ) -> Result<McpJson<Value>, ErrorData> {
         let req = api::misc::NotifierTest {
-            message: p
-                .message
-                .unwrap_or_else(|| "ddm test notification".into()),
+            message: p.message.unwrap_or_else(|| "ddm test notification".into()),
         };
         finish(api::misc::notifier_test(user, self.st(), Path(p.id), Json(req)).await).await
     }
@@ -1087,10 +1078,8 @@ impl DdmMcp {
         Parameters(p): Parameters<CommandRunArgs>,
     ) -> Result<McpJson<Value>, ErrorData> {
         let req = api::commands_api::RunRequest { params: p.params };
-        finish(
-            api::commands_api::run(user, self.st(), Path((p.section, p.item)), Json(req)).await,
-        )
-        .await
+        finish(api::commands_api::run(user, self.st(), Path((p.section, p.item)), Json(req)).await)
+            .await
     }
 
     // -- gitops -----------------------------------------------------------------

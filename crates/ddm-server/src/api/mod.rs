@@ -16,6 +16,7 @@ pub fn api_router() -> Router<AppState> {
         // auth
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/me", get(auth::me))
+        .route("/api/auth/token", post(auth::issue_token))
         .route("/api/auth/logout-all", post(auth::logout_all))
         // users (admin)
         .route("/api/users", get(users::list).post(users::create))

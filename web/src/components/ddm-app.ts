@@ -11,6 +11,7 @@ import './ddm-commands';
 import './ddm-monitor-panel';
 import './ddm-gitops-panel';
 import './ddm-events-view';
+import './ddm-token';
 
 type View = { name: string; service?: string };
 
@@ -95,6 +96,7 @@ export class DdmApp extends LitElement {
           ${this.navLink('events', 'Events')}
           ${this.isAdmin ? this.navLink('users', 'Users') : ''}
           ${this.isAdmin ? this.navLink('gitops', 'GitOps') : ''}
+          ${this.navLink('token', 'MCP')}
         </nav>
         <span class="spacer"></span>
         <span class="muted">${this.userName}</span>
@@ -124,6 +126,8 @@ export class DdmApp extends LitElement {
           : html`<p class="error">forbidden</p>`;
       case 'events':
         return html`<ddm-events-view></ddm-events-view>`;
+      case 'token':
+        return html`<ddm-token></ddm-token>`;
       default:
         return html`<ddm-service-list></ddm-service-list>`;
     }

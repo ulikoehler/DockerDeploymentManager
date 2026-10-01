@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Docker Deployment Manager — generic compose service manager"
 
+# Handlers return `Result<_, axum::Response>` everywhere by convention.
+[lints.clippy]
+result_large_err = "allow"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }

@@ -100,6 +100,11 @@ export interface UserView {
 export const apiLogin = (name: string, password: string) =>
   api<LoginResult>('/api/auth/login', { method: 'POST', body: { name, password } });
 export const apiMe = () => api('/api/auth/me');
+export const apiIssueToken = (body: {
+  ttl_minutes?: number;
+  services?: string[];
+  actions?: string[];
+}) => api<{ token: string; expires_at: number }>('/api/auth/token', { method: 'POST', body });
 export const apiServices = () => api<ServiceSummary[]>('/api/services');
 export const apiService = (name: string) => api(`/api/services/${name}`);
 export const apiAction = (name: string, action: string) =>

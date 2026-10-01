@@ -22,6 +22,74 @@ pub struct Claims {
     pub iat: i64,
     /// Secret generation; incremented on logout-all to invalidate old tokens.
     pub gen: u64,
+    /// Optional restrictions baked into the token (e.g. time-limited MCP
+    /// tokens). Applied on top of the user's own permissions — can only
+    /// narrow, never widen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<TokenScope>,
+}
+
+/// Restrictions embedded in a token. When present, the authenticated user is
+/// intersected with this scope before any permission check runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenScope {
+    /// If set, only these service names are accessible.
+    #[serde(default)]
+    pub services: Option<Vec<String>>,
+    /// If set, the token keeps only these capabilities: role names
+    /// (e.g. "operator", "admin"), feature flags (e.g. "edit_compose",
+    /// "run_commands") and "unrestricted" (compose policy bypass).
+    #[serde(default)]
+    pub actions: Option<Vec<String>>,
+}
+
+/// Apply a token scope to a user, narrowing their effective permissions.
+pub fn apply_token_scope(user: &mut User, scope: &TokenScope) {
+    use crate::users::{AccessEffect, AccessRuleType};
+    if let Some(actions) = &scope.actions {
+        let has = |a: &str| actions.iter().any(|x| x == a);
+        // Keep only the requested roles the user actually has (has_role
+        // treats admin as having every role, so an admin scoping a token to
+        // "operator" gets operator rights).
+        let kept: Vec<String> = actions
+            .iter()
+            .filter(|a| user.has_role(a))
+            .cloned()
+            .collect();
+        user.roles = kept;
+        let f = &mut user.features;
+        f.create_services &= has("create_services");
+        f.edit_compose &= has("edit_compose");
+        f.edit_units &= has("edit_units");
+        f.run_commands &= has("run_commands");
+        f.manage_backup &= has("manage_backup");
+        f.manage_monitoring &= has("manage_monitoring");
+        f.edit_files &= has("edit_files");
+        if !has("unrestricted") && user.compose_policy.as_deref() == Some("unrestricted") {
+            user.compose_policy = None; // fall back to the default policy
+        }
+    }
+    if let Some(services) = &scope.services {
+        // Intersection semantics: the user's explicit denies still apply,
+        // then exact allows for the scoped services, then deny the rest.
+        let mut rules: Vec<crate::users::AccessRule> = user
+            .access
+            .iter()
+            .filter(|r| r.effect == AccessEffect::Deny)
+            .cloned()
+            .collect();
+        rules.extend(services.iter().map(|s| crate::users::AccessRule {
+            kind: AccessRuleType::Exact,
+            pattern: s.clone(),
+            effect: AccessEffect::Allow,
+        }));
+        rules.push(crate::users::AccessRule {
+            kind: AccessRuleType::Glob,
+            pattern: "*".into(),
+            effect: AccessEffect::Deny,
+        });
+        user.access = rules;
+    }
 }
 
 /// Holds the JWT secret. Secret rotation invalidates all issued tokens.
@@ -42,6 +110,7 @@ impl JwtKeys {
         &self,
         user: &User,
         ttl_minutes: i64,
+        scope: Option<TokenScope>,
     ) -> Result<String, jsonwebtoken::errors::Error> {
         let now = chrono::Utc::now().timestamp();
         let claims = Claims {
@@ -50,6 +119,7 @@ impl JwtKeys {
             iat: now,
             exp: now + ttl_minutes * 60,
             gen: *self.generation.read().unwrap(),
+            scope,
         };
         encode(
             &Header::default(),
@@ -132,6 +202,27 @@ pub fn internal(msg: impl Into<String>) -> Response {
     error_response(StatusCode::INTERNAL_SERVER_ERROR, msg)
 }
 
+/// Verify the bearer token in `parts` (header or `?token=` query), load the
+/// user and apply any token scope. Shared by the `AuthUser` extractor and
+/// the MCP auth middleware.
+pub async fn authenticate(parts: &Parts, state: &crate::AppState) -> Result<AuthUser, Response> {
+    let token = bearer_token(parts)
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
+    let claims = state
+        .jwt
+        .verify(token)
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "invalid token"))?;
+    let mut user = state
+        .users
+        .get(&claims.sub)
+        .await
+        .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "unknown user"))?;
+    if let Some(scope) = &claims.scope {
+        apply_token_scope(&mut user, scope);
+    }
+    Ok(AuthUser { user, claims })
+}
+
 #[axum::async_trait]
 impl FromRequestParts<crate::AppState> for AuthUser {
     type Rejection = Response;
@@ -140,18 +231,7 @@ impl FromRequestParts<crate::AppState> for AuthUser {
         parts: &mut Parts,
         state: &crate::AppState,
     ) -> Result<Self, Self::Rejection> {
-        let token = bearer_token(parts)
-            .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
-        let claims = state
-            .jwt
-            .verify(token)
-            .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "invalid token"))?;
-        let user = state
-            .users
-            .get(&claims.sub)
-            .await
-            .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "unknown user"))?;
-        Ok(AuthUser { user, claims })
+        authenticate(parts, state).await
     }
 }
 
@@ -206,7 +286,7 @@ mod security_tests {
     #[test]
     fn forged_signature_rejected() {
         let keys = JwtKeys::new("secret-a".into());
-        let t = keys.issue(&u(), 60).unwrap();
+        let t = keys.issue(&u(), 60, None).unwrap();
         let other = JwtKeys::new("secret-b".into());
         assert!(other.verify(&t).is_none());
     }
@@ -214,7 +294,7 @@ mod security_tests {
     #[test]
     fn tampered_payload_rejected() {
         let keys = JwtKeys::new("s".into());
-        let t = keys.issue(&u(), 60).unwrap();
+        let t = keys.issue(&u(), 60, None).unwrap();
         // flip a char in the payload segment
         let mut parts: Vec<String> = t.split('.').map(String::from).collect();
         let payload = parts[1].as_bytes().to_vec();
@@ -229,14 +309,14 @@ mod security_tests {
     #[test]
     fn expired_rejected() {
         let keys = JwtKeys::new("s".into());
-        let t = keys.issue(&u(), -120).unwrap(); // expired (past 60s leeway)
+        let t = keys.issue(&u(), -120, None).unwrap(); // expired (past 60s leeway)
         assert!(keys.verify(&t).is_none());
     }
 
     #[test]
     fn rotate_invalidates_all_tokens() {
         let keys = JwtKeys::new("s".into());
-        let t = keys.issue(&u(), 60).unwrap();
+        let t = keys.issue(&u(), 60, None).unwrap();
         assert!(keys.verify(&t).is_some());
         keys.rotate();
         assert!(keys.verify(&t).is_none());
@@ -249,6 +329,61 @@ mod security_tests {
         for t in ["eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.", "a.b.c", ""] {
             assert!(keys.verify(t).is_none());
         }
+    }
+
+    #[test]
+    fn token_scope_narrows_but_never_widens() {
+        use crate::config::DefaultAccess;
+        use crate::permissions::can_access_service;
+        use crate::users::{AccessEffect, AccessRule, AccessRuleType};
+
+        // scope keeps only listed actions
+        let mut user = u();
+        user.features.edit_compose = true;
+        let scope = TokenScope {
+            services: Some(vec!["web1".into()]),
+            actions: Some(vec!["edit_compose".into()]),
+        };
+        apply_token_scope(&mut user, &scope);
+        assert!(!user.roles.iter().any(|r| r == "operator"));
+        assert!(user.features.edit_compose);
+        assert!(!user.features.run_commands);
+        assert!(can_access_service(&user, "web1", DefaultAccess::Allow));
+        assert!(!can_access_service(&user, "db", DefaultAccess::Allow));
+
+        // a user's own deny beats the scope's allow (intersection)
+        let mut user = u();
+        user.access = vec![AccessRule {
+            kind: AccessRuleType::Exact,
+            pattern: "web1".into(),
+            effect: AccessEffect::Deny,
+        }];
+        apply_token_scope(&mut user, &scope);
+        assert!(!can_access_service(&user, "web1", DefaultAccess::Allow));
+
+        // admin scoping to "operator" keeps operator rights (admin implies
+        // all roles) but loses admin itself
+        let mut user = u();
+        user.roles = vec!["admin".into()];
+        let scope2 = TokenScope {
+            services: None,
+            actions: Some(vec!["operator".into()]),
+        };
+        apply_token_scope(&mut user, &scope2);
+        assert!(!user.is_admin());
+        assert!(user.has_role("operator"));
+
+        // no scope = unchanged
+        let mut user = u();
+        apply_token_scope(
+            &mut user,
+            &TokenScope {
+                services: None,
+                actions: None,
+            },
+        );
+        assert_eq!(user.roles, vec!["operator"]);
+        assert!(user.access.is_empty());
     }
 
     #[test]

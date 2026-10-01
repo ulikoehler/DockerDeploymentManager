@@ -12,6 +12,7 @@ Auth: `POST /api/auth/login` → `{token}`; send as `Authorization: Bearer
 |---|---|---|
 | POST | `/api/auth/login` | `{name, password}` → `{token, name, roles, expires_at}` |
 | GET  | `/api/auth/me` | own profile (roles, features, access, compose_policy) |
+| POST | `/api/auth/token` | `{ttl_minutes?, services?[], actions?[]}` → `{token, expires_at}` — time-limited token (e.g. for MCP); `services`/`actions` intersect with the caller's permissions (only narrows) |
 | POST | `/api/auth/logout-all` | admin; rotates JWT secret → all sessions die |
 
 ## Services

@@ -22,6 +22,9 @@ mod services;
 mod systemd;
 mod users;
 
+#[cfg(test)]
+mod http_tests;
+
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
