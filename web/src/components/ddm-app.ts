@@ -28,15 +28,50 @@ export class DdmApp extends LitElement {
     sharedStyles,
     css`
       header {
-        display: flex; align-items: center; gap: 1em;
-        padding: 0.6em 1.2em; background: #11151c;
-        border-bottom: 1px solid #232a35; position: sticky; top: 0; z-index: 10;
+        display: flex; align-items: center; gap: 0.8em; flex-wrap: wrap;
+        position: sticky; top: 12px; z-index: 10;
+        margin: 12px 14px 4px; padding: 0.55em 1.1em;
+        background: rgba(14, 19, 27, 0.62);
+        -webkit-backdrop-filter: blur(24px) saturate(160%);
+        backdrop-filter: blur(24px) saturate(160%);
+        border: 1px solid var(--glass-border);
+        border-radius: 16px;
+        box-shadow:
+          0 10px 32px rgba(0, 0, 0, 0.4),
+          inset 0 1px 0 var(--glass-hi);
       }
-      header .brand { font-weight: 700; color: #60a5fa; }
-      nav a { color: #9aa4b2; text-decoration: none; padding: 0.3em 0.7em; border-radius: 6px; }
-      nav a.active { color: #fff; background: #1d4ed8; }
-      main { padding: 0 1.2em 2em; }
+      header .brand {
+        font-weight: 800; letter-spacing: 0.02em; font-size: 1.05em;
+        background: linear-gradient(120deg, #8fb0ff, #b48cff 60%, #7dd8f0);
+        -webkit-background-clip: text; background-clip: text;
+        -webkit-text-fill-color: transparent; color: transparent;
+      }
+      nav { display: flex; gap: 0.15em; flex-wrap: wrap; }
+      nav a {
+        color: var(--text-dim); text-decoration: none;
+        padding: 0.38em 0.85em; border-radius: 999px;
+        font-size: 0.88em; font-weight: 500;
+        transition: color .15s ease, background .15s ease, box-shadow .15s ease;
+      }
+      nav a:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
+      nav a.active {
+        color: #fff;
+        background: linear-gradient(135deg, rgba(99, 144, 255, 0.9), rgba(139, 92, 246, 0.9));
+        box-shadow: 0 4px 14px rgba(88, 116, 246, 0.35), inset 0 1px 0 rgba(255,255,255,0.2);
+      }
+      main { padding: 0 1.4em 2.5em; }
       .spacer { flex: 1; }
+      .user-chip {
+        display: inline-flex; align-items: center; gap: 0.45em;
+        color: var(--text-dim); font-size: 0.85em;
+        padding: 0.25em 0.7em; border-radius: 999px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.07);
+      }
+      .user-chip .dot {
+        width: 7px; height: 7px; border-radius: 999px;
+        background: #6ee7a0; box-shadow: 0 0 8px #6ee7a0aa;
+      }
     `,
   ];
 
@@ -99,7 +134,7 @@ export class DdmApp extends LitElement {
           ${this.navLink('token', 'MCP')}
         </nav>
         <span class="spacer"></span>
-        <span class="muted">${this.userName}</span>
+        <span class="user-chip"><span class="dot"></span>${this.userName}</span>
         <button class="secondary small" @click=${this.logout}>logout</button>
       </header>
       <main>

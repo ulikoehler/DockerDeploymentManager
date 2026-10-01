@@ -6,8 +6,30 @@
   <title>DDM — Docker Deployment Manager</title>
   <script type="module" src="/bundle.js"></script>
   <style>
-    html, body { margin: 0; padding: 0; background: #0f1216; color: #d7dde4;
-      font-family: system-ui, -apple-system, sans-serif; }
+    html, body { margin: 0; padding: 0; min-height: 100%; }
+    body {
+      color: #e8edf4;
+      font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      background:
+        radial-gradient(1200px 800px at 12% -10%, rgba(59, 100, 246, 0.30), transparent 60%),
+        radial-gradient(900px 700px at 88% 8%, rgba(148, 80, 246, 0.24), transparent 60%),
+        radial-gradient(1100px 900px at 50% 115%, rgba(23, 162, 200, 0.18), transparent 60%),
+        radial-gradient(700px 500px at 30% 60%, rgba(76, 60, 200, 0.12), transparent 65%),
+        linear-gradient(180deg, #090d13 0%, #0c1118 100%);
+      background-attachment: fixed;
+    }
+    ::selection { background: rgba(124, 156, 255, 0.35); }
+    /* slim glass-adjacent scrollbars */
+    *::-webkit-scrollbar { width: 10px; height: 10px; }
+    *::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      border: 2px solid transparent;
+      background-clip: padding-box;
+    }
+    *::-webkit-scrollbar-thumb:hover { background-color: rgba(255,255,255,0.22); }
+    *::-webkit-scrollbar-corner, *::-webkit-scrollbar-track { background: transparent; }
   </style>
 </head>
 <body>

@@ -123,7 +123,7 @@ export class DdmFiles extends LitElement {
                   const child = this.path ? `${this.path}/${e.name}` : e.name;
                   return html`<tr>
                     <td>
-                      <a href="#" style="color:#60a5fa;text-decoration:none"
+                      <a href="#" style="color:var(--link);text-decoration:none"
                         @click=${(ev: Event) => { ev.preventDefault(); this.browse(child); }}>
                         ${e.kind === 'dir' ? '📁 ' : ''}${e.name}</a>
                     </td>

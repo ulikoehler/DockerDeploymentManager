@@ -231,7 +231,7 @@ export class DdmMonitorPanel extends LitElement {
                 ${entries.flatMap(([svc, st]: [string, any]) =>
                   (st.checks || []).map(
                     (c: any) => html`<tr>
-                      <td><a href="#/service/${svc}" style="color:#60a5fa">${svc}</a></td>
+                      <td><a href="#/service/${svc}" style="color:var(--link)">${svc}</a></td>
                       <td class="muted">${c.kind}:${c.id}</td>
                       <td>${this.stateBadge(c.state)}</td>
                       <td>${c.failures}</td>

@@ -44,7 +44,7 @@ export class DdmEventsView extends LitElement {
           ${this.events.map(
             (e: any) => html`<tr>
               <td class="muted">${new Date(e.at).toLocaleString()}</td>
-              <td><a href="#/service/${e.service}" style="color:#60a5fa">${e.service}</a></td>
+              <td><a href="#/service/${e.service}" style="color:var(--link)">${e.service}</a></td>
               <td class="muted">${e.kind}</td>
               <td class="muted">${e.rule}</td>
               <td><span class="badge ${e.state === 'resolved' ? 'ok' : 'err'}">${e.state}</span></td>

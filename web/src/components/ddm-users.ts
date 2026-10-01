@@ -123,7 +123,7 @@ export class DdmUsers extends LitElement {
               ${this.users.map(
                 (x) => html`<tr>
                   <td><a href="#" @click=${(e: Event) => { e.preventDefault(); this.selected = x.name; }}
-                    style="color:#60a5fa">${x.name}</a></td>
+                    style="color:var(--link)">${x.name}</a></td>
                   <td class="muted">${x.roles.join(', ')}</td>
                   <td>
                     <button class="small secondary" @click=${() => this.changePw(x.name)}>pw</button>

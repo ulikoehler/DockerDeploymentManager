@@ -15,9 +15,23 @@ export class DdmServiceDetail extends LitElement {
   static styles = [
     sharedStyles,
     css`
-      .tabs button { background: transparent; color: #9aa4b2; border-radius: 6px 6px 0 0; }
-      .tabs button.active { color: #fff; background: #1d4ed8; }
-      .tabs { border-bottom: 1px solid #232a35; }
+      .tabs {
+        display: flex; gap: 0.2em; flex-wrap: wrap;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+        padding-bottom: 0.4em; margin-bottom: 0.6em;
+      }
+      .tabs button {
+        background: transparent; color: var(--text-dim);
+        border-color: transparent; border-radius: 999px;
+        box-shadow: none; padding: 0.35em 0.9em;
+      }
+      .tabs button:hover { color: #fff; background: rgba(255,255,255,0.07); transform: none; }
+      .tabs button.active {
+        color: #fff;
+        background: rgba(255, 255, 255, 0.09);
+        border-color: var(--glass-border);
+        box-shadow: inset 0 1px 0 var(--glass-hi);
+      }
     `,
   ];
 
@@ -74,7 +88,7 @@ export class DdmServiceDetail extends LitElement {
     const d = this.detail;
     return html`
       <div class="row">
-        <h2><a href="#/" style="color:#60a5fa;text-decoration:none">←</a> ${d.name}</h2>
+        <h2><a href="#/" style="color:var(--link);text-decoration:none">←</a> ${d.name}</h2>
         <span class="muted">${d.meta?.description || ''}</span>
         <span style="flex:1"></span>
         <button class="danger small" @click=${this.removeService}>delete</button>

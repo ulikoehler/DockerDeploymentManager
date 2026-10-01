@@ -23,8 +23,6 @@ export class DdmToken extends LitElement {
       .checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 0.3em; }
       .checks label { display: flex; gap: 0.4em; align-items: center; }
       .token-out { width: 100%; font-family: ui-monospace, monospace; font-size: 0.8em; }
-      fieldset { border: 1px solid #232a35; border-radius: 8px; margin: 0.6em 0; }
-      legend { color: #9aa4b2; font-size: 0.85em; padding: 0 0.4em; }
     `,
   ];
 

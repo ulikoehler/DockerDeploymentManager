@@ -71,7 +71,7 @@ export class DdmServiceList extends LitElement {
             (s) => html`
               <tr>
                 <td>
-                  <a href="#/service/${s.name}" style="color:#60a5fa">${s.name}</a>
+                  <a href="#/service/${s.name}" style="color:var(--link)">${s.name}</a>
                   <div class="muted">${s.description}</div>
                 </td>
                 <td>

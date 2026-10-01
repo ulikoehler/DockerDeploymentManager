@@ -97,7 +97,7 @@ export class DdmGit extends LitElement {
           ? html`<table><thead><tr><th>path</th><th>branch</th><th>remote</th><th>state</th></tr></thead>
               <tbody>${this.repos.map(
                 (r) => html`<tr>
-                  <td><a href="#" style="color:#60a5fa;text-decoration:none"
+                  <td><a href="#" style="color:var(--link);text-decoration:none"
                     @click=${(e: Event) => { e.preventDefault(); this.select(r.path); }}>${r.path}</a></td>
                   <td>${r.branch}</td>
                   <td class="muted" style="max-width:22em;overflow:hidden;text-overflow:ellipsis">${r.remote ?? ''}</td>
