@@ -235,6 +235,8 @@ impl AgentCore {
                     .find(|u| u.name == claims.sub)
                     .cloned()
                     .ok_or_else(|| anyhow!("unknown user"))?;
+                let mut user = user;
+                user.password_hash.clear();
                 Ok(serde_json::json!({"claims": claims, "user": user}))
             }
             CryptoOp::Mint {
@@ -249,12 +251,6 @@ impl AgentCore {
                 self.jwt.rotate();
                 Ok(serde_json::json!(true))
             }
-            CryptoOp::HashPassword { password } => Ok(serde_json::json!(users::hash_password(
-                &self.peppered(&password)
-            )?)),
-            CryptoOp::VerifyPassword { password, hash } => Ok(serde_json::json!(
-                users::verify_password(&self.peppered(&password), &hash)
-            )),
             CryptoOp::VerifyWebhook {
                 sig256,
                 gitlab_token,
@@ -310,7 +306,10 @@ impl AgentCore {
             CryptoOp::UsersList { token } => {
                 let claims = self.justify_token(&token, "users_list", "")?;
                 Self::require_admin(&claims)?;
-                let file = self.users_file()?;
+                let mut file = self.users_file()?;
+                for u in &mut file.users {
+                    u.password_hash.clear();
+                }
                 Ok(serde_json::to_value(file.users)?)
             }
             CryptoOp::UserMutate { token, op } => self.do_user_mutate(&token, op).await,
@@ -365,11 +364,8 @@ impl AgentCore {
             bail!("parent token expired");
         }
         let cfg = self.cfg.get().await;
-        let max = cfg.server.token_ttl_minutes.max(1) * 60;
-        let ttl = ttl_minutes
-            .map(|m| m.clamp(1, max))
-            .unwrap_or(max)
-            .min(remaining);
+        let max_min = cfg.server.token_ttl_minutes.max(1);
+        let ttl = (ttl_minutes.unwrap_or(max_min).clamp(1, max_min) * 60).min(remaining);
         // Intersect with the parent's scope — a child can only narrow.
         let scope = match (&parent_claims.scope, &services, &actions) {
             (None, None, None) => None,
@@ -455,8 +451,9 @@ impl AgentCore {
                     features: features.unwrap_or_default(),
                     compose_policy,
                 });
-                let u = file.users.iter().find(|u| u.name == name).unwrap().clone();
+                let mut u = file.users.iter().find(|u| u.name == name).unwrap().clone();
                 self.write_users(&file)?;
+                u.password_hash.clear();
                 Ok(serde_json::to_value(u)?)
             }
             UserMut::Update {
@@ -479,8 +476,9 @@ impl AgentCore {
                 if let Some(cp) = compose_policy {
                     u.compose_policy = cp;
                 }
-                let u = u.clone();
+                let mut u = u.clone();
                 self.write_users(&file)?;
+                u.password_hash.clear();
                 Ok(serde_json::to_value(u)?)
             }
             UserMut::Delete { name } => {
@@ -498,8 +496,9 @@ impl AgentCore {
                     .find(|u| u.name == name)
                     .ok_or_else(|| anyhow!("unknown user"))?;
                 u.access = access;
-                let u = u.clone();
+                let mut u = u.clone();
                 self.write_users(&file)?;
+                u.password_hash.clear();
                 Ok(serde_json::to_value(u)?)
             }
         }
@@ -598,14 +597,9 @@ impl AgentCore {
                     self.docker.container_health(&id).await?,
                 )?)
             }
-            SyncVerb::DockerExec { id, cmd } => {
-                self.justify_token(token, "docker_exec", &format!("{id} {:?}", cmd))?;
-                Ok(serde_json::to_value(
-                    self.docker.exec_capture(&id, &cmd).await?,
-                )?)
-            }
             SyncVerb::UnitFileRead { service } => {
                 self.justify_token(token, "unit_read", &service)?;
+                check_unit_name(&service)?;
                 let p = crate::systemd::unit_path(&cfg, &service);
                 let content = std::fs::read_to_string(&p).ok();
                 Ok(serde_json::json!(content))
@@ -626,6 +620,7 @@ impl AgentCore {
             }
             SyncVerb::UnitPathExists { unit } => {
                 self.justify_token(token, "unit_path_exists", &unit)?;
+                check_unit_name(&unit)?;
                 let p = crate::systemd::unit_path(&cfg, &unit);
                 Ok(serde_json::json!(p.exists()))
             }
@@ -642,22 +637,40 @@ impl AgentCore {
                     crate::systemd::journal_logs(&self.host, &unit, lines.min(10_000)).await?,
                 )?)
             }
-            SyncVerb::Systemctl { op, unit } => {
-                self.justify_token(token, "systemctl", &format!("{op} {unit}"))?;
-                check_unit_name(&unit)?;
-                match op.as_str() {
-                    "start" | "stop" | "restart" | "enable" | "disable" | "status"
-                    | "daemon-reload" => {}
-                    other => bail!("systemctl op '{other}' not allowed"),
-                }
-                let args: Vec<String> = if op == "daemon-reload" {
-                    vec![op.clone()]
-                } else {
-                    vec![op.clone(), unit.clone()]
-                };
-                let out = self.host.run("systemctl", &args).await?;
-                Ok(serde_json::json!({
-                    "status": out.status, "stdout": out.stdout, "stderr": out.stderr }))
+            SyncVerb::NotifierMut { op } => {
+                let claims = self.justify_token(token, "notifier_mut", "")?;
+                Self::require_admin(&claims)?;
+                self.cfg
+                    .mutate(move |c| {
+                        match op {
+                            NotifierMut::Add { notifier } => {
+                                let id = notifier.id().to_string();
+                                if c.monitoring.notifiers.iter().any(|x| x.id() == id) {
+                                    bail!("notifier '{id}' already exists");
+                                }
+                                c.monitoring.notifiers.push(notifier);
+                            }
+                            NotifierMut::Update { id, notifier } => {
+                                let slot = c
+                                    .monitoring
+                                    .notifiers
+                                    .iter_mut()
+                                    .find(|x| x.id() == id)
+                                    .ok_or_else(|| anyhow!("notifier not found"))?;
+                                *slot = notifier;
+                            }
+                            NotifierMut::Delete { id } => {
+                                let before = c.monitoring.notifiers.len();
+                                c.monitoring.notifiers.retain(|x| x.id() != id);
+                                if c.monitoring.notifiers.len() == before {
+                                    bail!("notifier '{id}' not found");
+                                }
+                            }
+                        }
+                        Ok(())
+                    })
+                    .await?;
+                Ok(serde_json::json!(true))
             }
             SyncVerb::BackupCheck { service } => {
                 self.justify_token(token, "backup_check", &service)?;
@@ -693,6 +706,7 @@ impl AgentCore {
                 if content.len() > MAX_FILE_WRITE {
                     bail!("compose file too large");
                 }
+                self.enforce_policy_floor(&cfg, &content)?;
                 let svc = svc_ops::get_service(&cfg, &service)?;
                 crate::compose::write_compose(&svc.compose_path, &content)?;
                 Ok(serde_json::json!(true))
@@ -704,6 +718,7 @@ impl AgentCore {
             }
             SyncVerb::MonitoringPut { service, cfg: m } => {
                 self.justify_token(token, "monitoring_put", &service)?;
+                crate::api::services::validate_monitoring_cfg(&m).map_err(|e| anyhow!(e))?;
                 let mut svc = svc_ops::get_service(&cfg, &service)?;
                 svc.meta.monitoring = Some(m);
                 svc_ops::save_meta(&svc.dir, &svc.meta)?;
@@ -1064,6 +1079,7 @@ impl AgentCore {
                 start,
             } => {
                 crate::compose::parse_check(compose)?;
+                self.enforce_policy_floor(cfg, compose)?;
                 let dir = svc_ops::create_service_dir(cfg, name)?;
                 crate::compose::write_compose(&dir.join(&cfg.paths.compose_file), compose)?;
                 svc_ops::save_meta(
@@ -1386,6 +1402,22 @@ impl AgentCore {
 }
 
 impl AgentCore {
+    /// Compose content floor: the agent always enforces the configured
+    /// `security.default_policy` on compose writes/creates, so a hostile
+    /// server cannot skip policy checks entirely. Per-user stricter
+    /// policies remain a server-side concern.
+    fn enforce_policy_floor(&self, cfg: &AppConfig, compose: &str) -> Result<()> {
+        if let Some(policy) =
+            crate::api::services::resolve_policy(cfg, Some(&cfg.security.default_policy))
+        {
+            let violations = crate::policy::validate_compose(compose, &policy);
+            if !violations.is_empty() {
+                bail!("compose violates default policy: {violations:?}");
+            }
+        }
+        Ok(())
+    }
+
     async fn restic_bin(&self, cfg: &AppConfig) -> Result<String> {
         Ok(match cfg.backup.restic_binary.as_str() {
             "auto" => self
@@ -1415,6 +1447,8 @@ fn intersect<F: Fn(&TokenScope) -> &Option<Vec<String>>>(
 fn check_unit_name(unit: &str) -> Result<()> {
     if unit.is_empty()
         || unit.len() > 256
+        || unit.contains("..")
+        || unit.starts_with('.')
         || !unit
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@'))

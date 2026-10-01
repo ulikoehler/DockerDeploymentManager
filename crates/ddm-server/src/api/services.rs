@@ -1020,47 +1020,7 @@ pub async fn put_monitoring(
     {
         return Err(forbidden());
     }
-    // validate regexes eagerly
-    for a in &m.log_alerts {
-        regex::Regex::new(&a.regex).map_err(|e| bad_request(format!("invalid regex: {e}")))?;
-        if let Some(x) = &a.exclude_regex {
-            regex::Regex::new(x).map_err(|e| bad_request(format!("invalid exclude_regex: {e}")))?;
-        }
-    }
-    // health-check targets are probed by the server — keep them sane:
-    // http checks must be plain http(s) without credentials; tcp checks a
-    // bare host[:port] (validated for charset, no spaces/schemes).
-    if let Some(h) = &m.health {
-        match (h.kind, h.target.as_deref()) {
-            (crate::config::HealthCheckKind::Http, Some(t)) => {
-                // authority = text between "://" and the next /?#
-                let authority = t
-                    .split_once("://")
-                    .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""))
-                    .unwrap_or("");
-                let ok = (t.starts_with("http://") || t.starts_with("https://"))
-                    && !authority.is_empty()
-                    && !authority.contains('@')
-                    && t.len() <= 2048;
-                if !ok {
-                    return Err(bad_request(
-                        "http health check target must be a credential-free http(s) URL",
-                    ));
-                }
-            }
-            (crate::config::HealthCheckKind::Tcp, Some(t)) => {
-                let host = t.split(':').next().unwrap_or("");
-                if host.is_empty()
-                    || !host
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
-                {
-                    return Err(bad_request("invalid tcp health check target"));
-                }
-            }
-            _ => {}
-        }
-    }
+    validate_monitoring_cfg(&m).map_err(bad_request)?;
     let _svc = require_service_access(&state, &user, &name).await?;
     state
         .agent
@@ -1104,4 +1064,49 @@ pub async fn monitoring_test(
         }));
     }
     Ok(ok(serde_json::json!({ "containers": health })))
+}
+
+/// Shared monitoring-config validation — enforced both in the API handler
+/// and inside the agent (a hostile server can't bypass it).
+pub(crate) fn validate_monitoring_cfg(m: &ServiceMonitoringConfig) -> Result<(), String> {
+    for a in &m.log_alerts {
+        regex::Regex::new(&a.regex).map_err(|e| format!("invalid regex: {e}"))?;
+        if let Some(x) = &a.exclude_regex {
+            regex::Regex::new(x).map_err(|e| format!("invalid exclude_regex: {e}"))?;
+        }
+    }
+    // health-check targets are probed by the agent — keep them sane:
+    // http checks must be plain http(s) without credentials; tcp checks a
+    // bare host[:port] (validated for charset, no spaces/schemes).
+    if let Some(h) = &m.health {
+        match (h.kind, h.target.as_deref()) {
+            (crate::config::HealthCheckKind::Http, Some(t)) => {
+                let authority = t
+                    .split_once("://")
+                    .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""))
+                    .unwrap_or("");
+                let ok = (t.starts_with("http://") || t.starts_with("https://"))
+                    && !authority.is_empty()
+                    && !authority.contains('@')
+                    && t.len() <= 2048;
+                if !ok {
+                    return Err(
+                        "http health check target must be a credential-free http(s) URL".into(),
+                    );
+                }
+            }
+            (crate::config::HealthCheckKind::Tcp, Some(t)) => {
+                let host = t.split(':').next().unwrap_or("");
+                if host.is_empty()
+                    || !host
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+                {
+                    return Err("invalid tcp health check target".into());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }

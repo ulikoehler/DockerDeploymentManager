@@ -1499,3 +1499,84 @@ async fn remote_agent_login_and_calls() {
     let log = std::fs::read_to_string(h._dir.path().join("justification.log")).unwrap();
     assert!(log.contains("\"authenticate\""), "no justification written");
 }
+
+// ---------------------------------------------------------------------------
+// Agent-side structural validation (compromised-server model)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn agent_rejects_unit_path_traversal() {
+    let h = harness().await;
+    let (_, tok) = login(&h.app, "admin", PASSWORD).await;
+    // Even with a valid admin token, the agent must not let a unit/service
+    // name escape the systemd dir — this is the compromised-server case.
+    for name in ["../etc/passwd", "../../x", "..", ".hidden", "a/b"] {
+        let r = h
+            .state
+            .agent
+            .call(
+                crate::agent::proto::SyncVerb::UnitPathExists { unit: name.into() },
+                &tok,
+            )
+            .await;
+        assert!(r.is_err(), "UnitPathExists accepted {name}");
+        let r = h
+            .state
+            .agent
+            .call(
+                crate::agent::proto::SyncVerb::UnitFileRead {
+                    service: name.into(),
+                },
+                &tok,
+            )
+            .await;
+        assert!(r.is_err(), "UnitFileRead accepted {name}");
+    }
+}
+
+#[tokio::test]
+async fn agent_policy_floor_cannot_be_bypassed() {
+    let h = harness().await;
+    let (_, tok) = login(&h.app, "admin", PASSWORD).await;
+    // ComposeWrite with a privileged compose must be rejected by the AGENT
+    // even though the token is valid — policy is no longer server-only.
+    let evil = "services:\n  x:\n    image: alpine\n    privileged: true\n";
+    let r = h
+        .state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::ComposeWrite {
+                service: "svc_a".into(),
+                content: evil.into(),
+            },
+            &tok,
+        )
+        .await;
+    assert!(r.is_err(), "privileged compose accepted by agent");
+}
+
+#[tokio::test]
+async fn agent_never_returns_password_hashes() {
+    let h = harness().await;
+    let (_, tok) = login(&h.app, "admin", PASSWORD).await;
+    let v = h
+        .state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::UsersList { token: tok.clone() })
+        .await
+        .unwrap();
+    let s = serde_json::to_string(&v).unwrap();
+    assert!(
+        !s.contains("$argon2"),
+        "users_list leaked a password hash: {s}"
+    );
+    // Verify returns the user — hash must be stripped there too.
+    let v = h
+        .state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::Verify { token: tok })
+        .await
+        .unwrap();
+    let s = serde_json::to_string(&v).unwrap();
+    assert!(!s.contains("$argon2"), "verify leaked a password hash: {s}");
+}

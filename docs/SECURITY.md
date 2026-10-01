@@ -167,9 +167,12 @@ security:
 - `ddm-server agent` runs as root (or a uid with docker + systemd +
   host-exec capabilities) and owns: the JWT secret (`jwt_secret_env` is
   read there — the server never loads it), the pepper, `users.yaml`
-  writes, docker/systemd/restic/git/file verbs, the monitor and gitsync
-  loops, and the justification log (`justification.log` next to the
-  config, root-owned append-only).
+  writes, `config.yaml` writes (notifier CRUD goes through a typed verb
+  and re-checks the admin claim), docker/systemd/restic/git/file verbs,
+  the monitor and gitsync loops, and the justification log
+  (`justification.log` next to the config, root-owned append-only).
+  `config.yaml` can therefore be root-owned `0640 root:ddm` — the server
+  only reads it.
 - `ddm-server serve` runs unprivileged (`User=ddm`,
   `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ReadWritePaths` on the
   state dir only, **not** in the docker group) and reaches the agent via

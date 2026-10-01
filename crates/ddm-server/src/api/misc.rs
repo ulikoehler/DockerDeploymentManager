@@ -379,16 +379,14 @@ pub async fn notifier_create(
         return Err(bad_request("id must be 1-64 chars of [a-z0-9_-]"));
     }
     let id = n.id().to_string();
-    let idc = id.clone();
     state
-        .config
-        .mutate(move |c| {
-            if c.monitoring.notifiers.iter().any(|x| x.id() == idc) {
-                anyhow::bail!("notifier '{idc}' already exists");
-            }
-            c.monitoring.notifiers.push(n);
-            Ok(())
-        })
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::NotifierMut {
+                op: crate::agent::proto::NotifierMut::Add { notifier: n },
+            },
+            &user.token,
+        )
         .await
         .map_err(|e| bad_request(e.to_string()))?;
     state
@@ -420,19 +418,17 @@ pub async fn notifier_update(
     if n.id() != id {
         return Err(bad_request("id cannot be changed"));
     }
-    let idc = id.clone();
     state
-        .config
-        .mutate(move |c| {
-            let slot = c
-                .monitoring
-                .notifiers
-                .iter_mut()
-                .find(|x| x.id() == idc)
-                .ok_or_else(|| anyhow::anyhow!("notifier not found"))?;
-            *slot = n;
-            Ok(())
-        })
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::NotifierMut {
+                op: crate::agent::proto::NotifierMut::Update {
+                    id: id.clone(),
+                    notifier: n,
+                },
+            },
+            &user.token,
+        )
         .await
         .map_err(|e| bad_request(e.to_string()))?;
     state
@@ -449,17 +445,14 @@ pub async fn notifier_delete(
     if !user.user.is_admin() {
         return Err(forbidden());
     }
-    let idc = id.clone();
     state
-        .config
-        .mutate(move |c| {
-            let before = c.monitoring.notifiers.len();
-            c.monitoring.notifiers.retain(|x| x.id() != idc);
-            if c.monitoring.notifiers.len() == before {
-                anyhow::bail!("notifier '{idc}' not found");
-            }
-            Ok(())
-        })
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::NotifierMut {
+                op: crate::agent::proto::NotifierMut::Delete { id: id.clone() },
+            },
+            &user.token,
+        )
         .await
         .map_err(|e| not_found(e.to_string()))?;
     state

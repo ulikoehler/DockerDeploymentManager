@@ -166,10 +166,6 @@ pub enum SyncVerb {
     ContainerHealth {
         id: String,
     },
-    DockerExec {
-        id: String,
-        cmd: Vec<String>,
-    },
     UnitFileRead {
         service: String,
     },
@@ -189,10 +185,9 @@ pub enum SyncVerb {
         unit: String,
         lines: usize,
     },
-    /// systemctl <op> <unit> — op restricted to a safe set.
-    Systemctl {
-        op: String,
-        unit: String,
+    /// Admin: mutate monitoring.notifiers in config.yaml (agent owns the file).
+    NotifierMut {
+        op: NotifierMut,
     },
     BackupCheck {
         service: String,
@@ -285,13 +280,6 @@ pub enum CryptoOp {
     /// Bump global token generation (logout-all). Requires admin claim.
     Rotate {
         token: String,
-    },
-    HashPassword {
-        password: String,
-    },
-    VerifyPassword {
-        password: String,
-        hash: String,
     },
     /// Verify GitHub/GitLab webhook secret for the given raw body.
     VerifyWebhook {
@@ -395,4 +383,19 @@ pub struct AuthResult {
     pub user: User,
     pub token: String,
     pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum NotifierMut {
+    Add {
+        notifier: crate::config::NotifierConfig,
+    },
+    Update {
+        id: String,
+        notifier: crate::config::NotifierConfig,
+    },
+    Delete {
+        id: String,
+    },
 }
