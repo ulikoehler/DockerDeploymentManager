@@ -28,6 +28,9 @@ pub struct FileEntry {
     pub name: String,
     pub kind: String, // "dir" | "file" | "symlink" | "other"
     pub size: u64,
+    /// Unix seconds — WebDAV `getlastmodified`/`getetag` need it.
+    #[serde(default)]
+    pub mtime: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -121,46 +124,165 @@ fn display_rel(root: &Path, abs: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Unix seconds of a path's mtime (0 when unavailable).
+pub fn mtime_secs(m: &std::fs::Metadata) -> i64 {
+    m.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn kind_of(ft: &std::fs::FileType) -> &'static str {
+    if ft.is_dir() {
+        "dir"
+    } else if ft.is_symlink() {
+        "symlink"
+    } else if ft.is_file() {
+        "file"
+    } else {
+        "other"
+    }
+}
+
+/// Metadata for one path, without reading content. Uses `symlink_metadata`
+/// so a symlink is reported as such instead of being followed.
+pub fn stat(root: &Path, rel: &str) -> Result<crate::agent::proto::FileMeta> {
+    let abs = resolve(root, rel)?;
+    let m = match std::fs::symlink_metadata(&abs) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("'{rel}' does not exist")
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok(crate::agent::proto::FileMeta {
+        kind: kind_of(&m.file_type()).to_string(),
+        size: m.len(),
+        mtime: mtime_secs(&m),
+    })
+}
+
+/// List a directory: denied names are filtered out (they are neither
+/// readable nor writable, so they must not be advertised either).
+pub fn list(root: &Path, rel: &str) -> Result<Vec<FileEntry>> {
+    let abs = resolve(root, rel)?;
+    let meta = std::fs::symlink_metadata(&abs)?;
+    if !meta.is_dir() {
+        anyhow::bail!("'{rel}' is not a directory");
+    }
+    let mut entries = vec![];
+    for e in std::fs::read_dir(&abs)? {
+        let e = e?;
+        if denied(&e.file_name().to_string_lossy()) {
+            continue;
+        }
+        let ft = e.file_type()?;
+        let m = std::fs::symlink_metadata(e.path())?;
+        entries.push(FileEntry {
+            name: e.file_name().to_string_lossy().to_string(),
+            kind: kind_of(&ft).to_string(),
+            size: m.len(),
+            mtime: mtime_secs(&m),
+        });
+    }
+    entries.sort_by(|a, b| {
+        (a.kind != "dir")
+            .cmp(&(b.kind != "dir"))
+            .then(a.name.cmp(&b.name))
+    });
+    Ok(entries)
+}
+
+// ---------------------------------------------------------------------------
+// Streaming writes (WebDAV data plane)
+// ---------------------------------------------------------------------------
+
+/// A write staged in a sibling temp file, committed by an atomic rename.
+/// Between `stage_write` and `commit_staged` the caller can inspect the
+/// staged bytes (the compose-policy gate needs the content) and abort.
+pub struct StagedWrite {
+    pub tmp: PathBuf,
+    pub abs: PathBuf,
+    pub written: u64,
+}
+
+impl StagedWrite {
+    /// Discard the staged bytes (no-op after a successful commit).
+    pub fn abort(&self) {
+        let _ = std::fs::remove_file(&self.tmp);
+    }
+}
+
+/// Stream `reader` into a sibling temp file for `rel`, bounded by `max`.
+/// Parent directories are created; the target must not be an existing
+/// directory. Nothing is visible under the final name until commit.
+pub async fn stage_write(
+    root: &Path,
+    rel: &str,
+    reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    max: u64,
+) -> Result<StagedWrite> {
+    let abs = resolve(root, rel)?;
+    if abs.is_dir() {
+        anyhow::bail!("'{rel}' is a directory");
+    }
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = tmp_sibling(&abs);
+    let mut f = tokio::fs::File::create(&tmp).await?;
+    // Read one byte past the cap so an over-size upload is detected rather
+    // than silently truncated.
+    let mut limited = tokio::io::AsyncReadExt::take(reader, max + 1);
+    let written = match tokio::io::copy(&mut limited, &mut f).await {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+    };
+    if written > max {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::bail!("file exceeds the maximum size");
+    }
+    Ok(StagedWrite { tmp, abs, written })
+}
+
+/// fsync + atomic rename of a staged write.
+pub fn commit_staged(s: StagedWrite) -> Result<()> {
+    // Durability: flush the file, then rename, then fsync the directory so
+    // the new name survives a crash.
+    let f = std::fs::OpenOptions::new().write(true).open(&s.tmp)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&s.tmp, &s.abs)?;
+    if let Some(dir) = s.abs.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
+/// Sibling temp name for an atomic rename (same filesystem).
+pub fn tmp_sibling(abs: &Path) -> PathBuf {
+    abs.with_file_name(format!(
+        ".{}.tmp",
+        abs.file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
+    ))
+}
+
 pub fn read_node(root: &Path, rel: &str) -> Result<FileNode> {
     let abs = resolve(root, rel)?;
     let root_canon = root.canonicalize()?;
     let meta = std::fs::symlink_metadata(&abs)?;
     if meta.is_dir() {
-        let mut entries = vec![];
-        for e in std::fs::read_dir(&abs)? {
-            let e = e?;
-            // denied names are neither readable nor writable — don't list them
-            if denied(&e.file_name().to_string_lossy()) {
-                continue;
-            }
-            let m = e.metadata().unwrap_or_else(|_| {
-                std::fs::metadata(e.path())
-                    .unwrap_or_else(|_| std::fs::metadata("/dev/null").unwrap())
-            });
-            let ft = e.file_type()?;
-            let kind = if ft.is_dir() {
-                "dir"
-            } else if ft.is_symlink() {
-                "symlink"
-            } else if ft.is_file() {
-                "file"
-            } else {
-                "other"
-            };
-            entries.push(FileEntry {
-                name: e.file_name().to_string_lossy().to_string(),
-                kind: kind.to_string(),
-                size: m.len(),
-            });
-        }
-        entries.sort_by(|a, b| {
-            (a.kind != "dir")
-                .cmp(&(b.kind != "dir"))
-                .then(a.name.cmp(&b.name))
-        });
         Ok(FileNode::Dir {
             path: display_rel(&root_canon, &abs),
-            entries,
+            entries: list(&root_canon, rel)?,
         })
     } else if meta.is_file() {
         let size = meta.len();
@@ -238,6 +360,47 @@ pub fn rename(root: &Path, from: &str, to: &str) -> Result<()> {
         anyhow::bail!("'{to}' already exists");
     }
     std::fs::rename(&src, &dst)?;
+    Ok(())
+}
+
+/// Copy a file or directory tree (WebDAV COPY). The destination must not
+/// exist. Symlinks are copied *verbatim* rather than followed — reading
+/// through an escaping link is already refused by `resolve`, so duplicating
+/// one grants no new reach. Denied names are skipped inside a tree, so a
+/// copy can never plant a second `meta.yaml`/`backup.sh`.
+pub fn copy(root: &Path, from: &str, to: &str) -> Result<()> {
+    let src = resolve(root, from)?;
+    std::fs::symlink_metadata(&src).with_context(|| format!("'{from}' does not exist"))?;
+    let dst = resolve(root, to)?;
+    if std::fs::symlink_metadata(&dst).is_ok() {
+        anyhow::bail!("'{to}' already exists");
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    copy_entry(&src, &dst)
+}
+
+fn copy_entry(src: &Path, dst: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(src)?;
+    let ft = meta.file_type();
+    if ft.is_symlink() {
+        let target = std::fs::read_link(src)?;
+        std::os::unix::fs::symlink(&target, dst)?;
+        return Ok(());
+    }
+    if ft.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for e in std::fs::read_dir(src)? {
+            let e = e?;
+            if denied(&e.file_name().to_string_lossy()) {
+                continue;
+            }
+            copy_entry(&e.path(), &dst.join(e.file_name()))?;
+        }
+        return Ok(());
+    }
+    std::fs::copy(src, dst)?;
     Ok(())
 }
 

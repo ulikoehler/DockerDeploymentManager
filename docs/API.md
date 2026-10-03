@@ -97,6 +97,57 @@ git mutations need the `edit_files` feature or admin.
 | POST | `/api/services/{name}/files/rename` | `{from, to}` |
 | DELETE | `/api/services/{name}/files?path=` | file or dir (recursive); refuses the root |
 
+## WebDAV (`/dav`)
+
+A standard WebDAV surface over the service directories, for file managers,
+IDEs and mountable drives. Off unless `webdav.enabled` is set, and the
+caller also needs the `mount_files` feature.
+
+| Method | Path | Notes |
+|---|---|---|
+| OPTIONS | `/dav` | advertises `DAV: 1, 2` + `Allow:` |
+| PROPFIND | `/dav/`, `/dav/{service}/{path}` | Depth 0/1 → 207 Multi-Status; `Depth: infinity` → 403 |
+| GET / HEAD | `/dav/{service}/{path}` | `Range` (incl. suffix), `If-None-Match`, `If-Modified-Since`, `ETag`, `Last-Modified` |
+| PUT | `/dav/{service}/{path}` | requires `Content-Length`; atomic (temp + fsync + rename); 201 new / 204 replaced |
+| MKCOL | `/dav/{service}/{path}` | 409 when the parent collection is missing |
+| DELETE | `/dav/{service}/{path}` | recursive for collections; the service root is refused |
+| MOVE / COPY | `/dav/{service}/{path}` | `Destination` + `Overwrite: T\|F`; same service only |
+| LOCK / UNLOCK | `/dav/{service}/{path}` | exclusive write locks — advisory, in-memory, expiring |
+
+`PROPFIND` on `/dav/` lists exactly the services the caller may access — an
+unauthorized service is absent rather than forbidden, so there is no
+existence oracle.
+
+Rights: `mount_files` (or admin) to use the surface at all, service access
+for reads, `edit_files` for writes, and `edit_compose` + the caller's
+compose policy for the compose file. `meta.yaml`, `backup.sh`, `.restic_*`
+and `.git` are denied to every method — the same rules the JSON file API
+enforces, asserted by a test that both surfaces deny identically.
+
+Authentication is the same JWT as the REST API: `Authorization: Bearer
+<jwt>`, or `Authorization: Basic base64(<user>:<jwt>)` for clients that
+only speak Basic (most OS file managers).
+
+```bash
+# rclone (any OS) — the JWT goes in the password field
+rclone config create ddm webdav url=http://host:8080/dav vendor=other \
+  user=me pass="$(cat token)"
+rclone lsf ddm:
+
+# Linux (davfs2)
+echo "http://host:8080/dav/ me <token>" >> /etc/davfs2/secrets
+mount -t davfs http://host:8080/dav/ /mnt/ddm
+
+# macOS: Finder → Go → Connect to Server → http://host:8080/dav/
+# Windows: Map network drive → http://host:8080/dav/  (needs TLS for Basic)
+```
+
+Refused by design: `Depth: infinity` PROPFIND (unbounded walk) and chunked
+uploads without `Content-Length` (the agent authorizes on a declared
+length). `COPY` always copies the whole tree — the `Depth` header is not
+honored for `COPY`. `PUT` creates missing parent directories (like the JSON
+file API), while `MKCOL` follows RFC 4918 and requires the parent to exist.
+
 ## Git (per service)
 
 Repos are discovered in the service dir and up to 3 levels deep. `path` is

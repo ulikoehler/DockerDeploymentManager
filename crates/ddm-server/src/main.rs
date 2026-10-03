@@ -22,6 +22,7 @@ mod protocol;
 mod services;
 mod systemd;
 mod users;
+mod webdav;
 
 #[cfg(test)]
 mod http_tests;
@@ -41,6 +42,8 @@ pub struct AppState {
     pub agent: agent::Agent,
     pub exec: Arc<exec::ExecutionManager>,
     pub audit: Arc<audit::AuditLog>,
+    /// WebDAV advisory locks (in-memory, per server instance).
+    pub locks: Arc<webdav::LockStore>,
 }
 
 #[tokio::main]
@@ -122,6 +125,7 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
         agent,
         exec,
         audit,
+        locks: Arc::new(webdav::LockStore::new()),
     };
 
     let mut app = api::api_router()

@@ -9,11 +9,18 @@ pub mod users;
 pub mod ws;
 
 use crate::AppState;
-use axum::routing::{get, post, put};
+use axum::routing::{any, get, post, put};
 use axum::Router;
 
 pub fn api_router() -> Router<AppState> {
     Router::new()
+        // WebDAV file surface. Off unless `webdav.enabled`; per-user gated
+        // by the `mount_files` feature (see `webdav`). The bare root and
+        // `/dav/` are the same collection — the wildcard does not match an
+        // empty remainder, and a static route must not extract `Path`.
+        .route("/dav", any(crate::webdav::handle_root))
+        .route("/dav/", any(crate::webdav::handle_root))
+        .route("/dav/*path", any(crate::webdav::handle))
         // auth
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/me", get(auth::me))

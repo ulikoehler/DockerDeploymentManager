@@ -14,6 +14,7 @@ const FEATURE_LABELS: Record<string, string> = {
   manage_monitoring: 'manage monitoring',
   edit_files: 'edit files & git',
   exec_containers: 'exec in containers',
+  mount_files: 'mount files (WebDAV)',
 };
 
 @customElement('ddm-token')

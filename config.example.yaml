@@ -17,6 +17,11 @@ docker:
   socket: /var/run/docker.sock
   compose_command: [docker, compose]
 
+webdav:                          # file surface at /dav (see docs/API.md)
+  enabled: false                 # off by default: a second write path into the service dirs
+  max_upload_bytes: 536870912    # largest single PUT
+  lock_timeout_secs: 3600        # ceiling for LOCK timeouts (advisory locks)
+
 logging:
   default_tail: 200
   max_tail: 5000

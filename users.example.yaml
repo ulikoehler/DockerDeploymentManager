@@ -23,6 +23,8 @@ users:
       run_commands: true
       manage_backup: true
       manage_monitoring: false
+      exec_containers: false       # docker exec inside the user's containers
+      mount_files: false           # WebDAV (/dav) access to the service dirs
     compose_policy: strict
 
   - name: oncall

@@ -17,6 +17,20 @@ keeps running. Check `GET /api/config/status` for the last reload result.
 | `web_dir` | — | dir with `index.html`+`bundle.js`; omitted → API only |
 | `cors_origins` | `[]` | extra allowed origins: enables a CORS layer for the listed origins and is the allowlist for `/ws/*` browser handshakes (same-origin is always allowed; empty = no CORS headers) |
 
+### `webdav`
+
+The WebDAV file surface (`/dav`) — see `docs/API.md`. Off by default: it is
+a second write path into the service directories, so enabling it is an
+explicit decision. Per-user access is controlled by the `mount_files`
+feature (reads), `edit_files` (writes) and the usual service access rules.
+
+```yaml
+webdav:
+  enabled: false              # serve /dav at all
+  max_upload_bytes: 536870912 # largest single PUT
+  lock_timeout_secs: 3600     # ceiling for LOCK timeouts
+```
+
 ### `paths`
 
 | key | default | notes |
@@ -169,6 +183,7 @@ users:
       manage_monitoring: false
       edit_files: false        # file tree editing + git ops
       exec_containers: false   # docker exec inside the user's services' containers
+      mount_files: false       # WebDAV (/dav) access to the service dirs
     compose_policy: strict
 ```
 

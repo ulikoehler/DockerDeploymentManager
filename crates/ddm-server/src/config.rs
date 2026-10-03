@@ -35,6 +35,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub systemd: SystemdConfig,
     #[serde(default)]
+    pub webdav: WebdavConfig,
+    #[serde(default)]
     pub sections: Vec<Section>,
     /// Path to the users file (relative to config dir if not absolute).
     #[serde(default = "default_users_file")]
@@ -117,8 +119,41 @@ impl Default for AppConfig {
             gitops: GitOpsConfig::default(),
             service_templates: vec![],
             systemd: SystemdConfig::default(),
+            webdav: WebdavConfig::default(),
             sections: vec![],
             users_file: default_users_file(),
+        }
+    }
+}
+
+/// WebDAV file surface (`/dav`). Off by default: it is a second write path
+/// into the service directories, so enabling it is an explicit decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebdavConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Largest single upload accepted, in bytes.
+    #[serde(default = "default_max_upload")]
+    pub max_upload_bytes: u64,
+    /// How long a `LOCK` is held before it expires (seconds).
+    #[serde(default = "default_lock_timeout")]
+    pub lock_timeout_secs: u64,
+}
+
+fn default_max_upload() -> u64 {
+    512 * 1024 * 1024
+}
+
+fn default_lock_timeout() -> u64 {
+    3600
+}
+
+impl Default for WebdavConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_upload_bytes: default_max_upload(),
+            lock_timeout_secs: default_lock_timeout(),
         }
     }
 }

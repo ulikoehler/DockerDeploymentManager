@@ -81,6 +81,10 @@ pub struct UserFeatures {
     /// Run arbitrary commands inside a service's containers (docker exec).
     #[serde(default)]
     pub exec_containers: bool,
+    /// Mount the service directories over WebDAV (`/dav`). Reads need
+    /// service access; writes additionally need `edit_files`.
+    #[serde(default)]
+    pub mount_files: bool,
 }
 
 fn bool_true() -> bool {
@@ -98,6 +102,7 @@ impl Default for UserFeatures {
             manage_monitoring: false,
             edit_files: false,
             exec_containers: false,
+            mount_files: false,
         }
     }
 }

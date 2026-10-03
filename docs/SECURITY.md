@@ -143,8 +143,8 @@ the login that produced it.
 2. **Service access rules** — ordered `exact|glob|regex` allow/deny, first
    match wins, else `security.default_access` (default `deny`).
 3. **Feature flags** — `create_services`, `edit_compose`, `edit_units`,
-   `run_commands`, `exec_containers` (docker exec), `manage_backup`,
-   `manage_monitoring`, `edit_files`.
+   `run_commands`, `exec_containers` (docker exec), `mount_files` (WebDAV),
+   `manage_backup`, `manage_monitoring`, `edit_files`.
 4. **Compose policy** — per user; fail-closed (unknown names fall back to
    `default_policy`, then built-in strict). Strict denies `privileged`,
    host namespaces, docker-socket mounts, devices, `cap_add`, `sysctls`,
@@ -164,6 +164,10 @@ the login that produced it.
    `meta.yaml` (monitoring/backup config), `backup.sh` (runs as root, holds
    repo credentials) and `.restic_*` are denied to reads, writes, renames
    and deletes; use the dedicated endpoints, which apply their own gates.
+   The check is applied to the *resolved* path, not just the request path —
+   otherwise a symlink alias inside the service dir (`data -> meta.yaml`,
+   which a cloned repo can deliver) would canonicalize straight onto a
+   privileged file and be read or written through it.
    Writing the compose file through the file API additionally requires
    `edit_compose` and is validated against the caller's compose policy and
    the configured floor (renaming *onto* the compose file is refused
@@ -179,6 +183,19 @@ the login that produced it.
    `env_file` must be a relative in-service path, and the dump service must
    exist in the compose file. Validation runs server-side *and* inside the
    agent, and rendering re-validates before writing the script.
+11. **WebDAV (`/dav`)** is a second transport into the same files, so it
+   reuses this policy rather than restating it: `webdav.enabled` (off by
+   default) plus `mount_files` to use the surface, service access for reads,
+   `edit_files` for writes, and the *shared* compose guard for compose
+   writes. Denied names, traversal and the service root are protected
+   identically to the JSON file API, and a test
+   (`webdav_matches_json_file_api_policy`) asserts both surfaces deny the
+   same operations — the point is that a new path cannot silently become a
+   weaker one. Uploads are authorized *before* the body is accepted, bounded
+   by `webdav.max_upload_bytes`, staged in a temp file, fsynced and renamed
+   atomically, and a short body (client disconnected mid-upload) is never
+   committed. Locks are advisory only: in-memory, expiring, and not shared
+   between instances.
 
 ## Transport & endpoint hardening
 

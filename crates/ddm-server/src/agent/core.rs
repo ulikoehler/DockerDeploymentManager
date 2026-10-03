@@ -20,6 +20,18 @@ use tokio::sync::mpsc;
 
 const MAX_FILE_WRITE: usize = 4 * 1024 * 1024;
 
+/// An authorized streaming upload: the target and the caller are resolved
+/// and checked before any payload is accepted.
+pub struct PendingPut {
+    pub svc: Service,
+    pub user: User,
+    pub service: String,
+    pub path: String,
+    /// Declared payload length — a short body means the client vanished
+    /// mid-upload and the staged bytes must not be committed.
+    pub len: u64,
+}
+
 fn arg(v: &str) -> CommandArg {
     CommandArg::Value {
         value: v.to_string(),
@@ -280,6 +292,7 @@ impl AgentCore {
             SyncVerb::FileWrite { service, .. }
             | SyncVerb::FileMkdir { service, .. }
             | SyncVerb::FileRename { service, .. }
+            | SyncVerb::FileCopy { service, .. }
             | SyncVerb::FileDelete { service, .. } => {
                 let (_c, u) = self.justify_service(cfg, token, service)?;
                 Self::require_feature(&u, feat(|f| f.edit_files, &u), "edit_files")?;
@@ -344,6 +357,7 @@ impl AgentCore {
                 self.justify_service(cfg, token, name).map(|x| Some(x.1))
             }
             SyncVerb::FileNode { service, .. }
+            | SyncVerb::FileStat { service, .. }
             | SyncVerb::GitRepos { service }
             | SyncVerb::GitStatus { service, .. }
             | SyncVerb::GitLog { service, .. }
@@ -892,6 +906,11 @@ impl AgentCore {
                 let node = crate::files::read_node(&svc.dir, &path)?;
                 Ok(serde_json::to_value(node)?)
             }
+            SyncVerb::FileStat { service, path } => {
+                self.justify_token(token, "file_stat", &format!("{service}:{path}"))?;
+                let svc = svc_ops::get_service(&cfg, &service)?;
+                Ok(serde_json::to_value(crate::files::stat(&svc.dir, &path)?)?)
+            }
             SyncVerb::FileWrite {
                 service,
                 path,
@@ -905,27 +924,11 @@ impl AgentCore {
                 // The compose file carries a policy boundary — a raw file
                 // write must enforce the same gates as `ComposeWrite`.
                 let abs = crate::files::resolve(&svc.dir, &path)?;
-                let compose_abs = svc.dir.canonicalize()?.join(&cfg.paths.compose_file);
-                if abs == compose_abs {
+                if Self::is_compose_file(&cfg, &svc, &abs)? {
                     let u = pre
                         .as_ref()
                         .ok_or_else(|| anyhow!("authorization state missing"))?;
-                    Self::require_feature(u, u.features.edit_compose, "edit_compose")?;
-                    if let Some(p) =
-                        crate::api::services::resolve_policy(&cfg, u.compose_policy.as_deref())
-                    {
-                        let violations = crate::policy::validate_compose(&content, &p);
-                        if !violations.is_empty() {
-                            let msg = violations
-                                .iter()
-                                .map(|v| format!("{}: {}", v.path, v.message))
-                                .collect::<Vec<_>>()
-                                .join("; ");
-                            bail!("compose policy violations: {msg}");
-                        }
-                    }
-                    crate::compose::parse_check(&content)?;
-                    self.enforce_policy_floor(&cfg, &content)?;
+                    self.guard_compose_write(&cfg, &content, u)?;
                 }
                 crate::files::write_file(&svc.dir, &path, &content)?;
                 Ok(serde_json::json!(true))
@@ -947,6 +950,18 @@ impl AgentCore {
                     bail!("rename onto compose file denied — use the compose endpoint");
                 }
                 crate::files::rename(&svc.dir, &from, &to)?;
+                Ok(serde_json::json!(true))
+            }
+            SyncVerb::FileCopy { service, from, to } => {
+                self.justify_token(token, "file_copy", &format!("{service}:{from}"))?;
+                let svc = svc_ops::get_service(&cfg, &service)?;
+                // Copying *onto* the compose file would bypass the
+                // policy-checked write gate.
+                let to_abs = crate::files::resolve(&svc.dir, &to)?;
+                if Self::is_compose_file(&cfg, &svc, &to_abs)? {
+                    bail!("copy onto compose file denied — use the compose endpoint");
+                }
+                crate::files::copy(&svc.dir, &from, &to)?;
                 Ok(serde_json::json!(true))
             }
             SyncVerb::FileDelete { service, path } => {
@@ -1317,6 +1332,162 @@ impl AgentCore {
                 )))
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // File streaming (the bulk data plane — WebDAV PUT/GET)
+    // ------------------------------------------------------------------
+    //
+    // Uploads and downloads are the only ops that move bulk bytes, so they
+    // get a two-phase shape instead of the JSON `SyncVerb` channel:
+    // authorize, hand back a handle, then stream. Authorization mirrors
+    // `precheck`'s `FileWrite`/`FileNode` arms exactly — a second transport
+    // must never become a second policy.
+
+    /// Is `abs` the service's compose file? Compose files carry a policy
+    /// boundary, so every write path (JSON file API, WebDAV PUT, rename
+    /// target) has to recognize them.
+    fn is_compose_file(cfg: &AppConfig, svc: &Service, abs: &Path) -> Result<bool> {
+        Ok(abs == svc.dir.canonicalize()?.join(&cfg.paths.compose_file))
+    }
+
+    /// Enforce `edit_compose` + the caller's compose policy + the configured
+    /// floor on a new compose file body. Shared by every write path so they
+    /// cannot drift apart.
+    fn guard_compose_write(&self, cfg: &AppConfig, content: &str, user: &User) -> Result<()> {
+        Self::require_feature(user, user.features.edit_compose, "edit_compose")?;
+        if let Some(p) = crate::api::services::resolve_policy(cfg, user.compose_policy.as_deref()) {
+            let violations = crate::policy::validate_compose(content, &p);
+            if !violations.is_empty() {
+                let msg = violations
+                    .iter()
+                    .map(|v| format!("{}: {}", v.path, v.message))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                bail!("compose policy violations: {msg}");
+            }
+        }
+        crate::compose::parse_check(content)?;
+        self.enforce_policy_floor(cfg, content)
+    }
+
+    /// Authorize a streaming upload and resolve its target. No payload is
+    /// read until this returns, so a denied write never accepts bytes.
+    pub async fn file_put_begin(
+        &self,
+        service: &str,
+        path: &str,
+        len: u64,
+        token: &str,
+    ) -> Result<PendingPut> {
+        let cfg = self.cfg.get().await;
+        let (claims, user) = self.scoped_user(token)?;
+        if !crate::permissions::can_access_service(&user, service, cfg.security.default_access) {
+            bail!("service access denied: {service}");
+        }
+        Self::require_feature(&user, user.features.edit_files, "edit_files")?;
+        if len > cfg.webdav.max_upload_bytes {
+            bail!("upload exceeds {} bytes", cfg.webdav.max_upload_bytes);
+        }
+        let svc = svc_ops::get_service(&cfg, service)?;
+        let abs = crate::files::resolve(&svc.dir, path)?;
+        if abs == svc.dir.canonicalize()? {
+            bail!("refusing to overwrite the service directory itself");
+        }
+        if abs.is_dir() {
+            bail!("'{path}' is a directory");
+        }
+        // The server's own view of the request is not trusted — record what
+        // the agent is about to write, agent-side.
+        self.justify(
+            &claims,
+            "file_put",
+            &format!("{service}:{path} ({len} bytes)"),
+        );
+        Ok(PendingPut {
+            svc,
+            user,
+            service: service.to_string(),
+            path: path.to_string(),
+            len,
+        })
+    }
+
+    /// Stream the payload into a sibling temp file and commit it with an
+    /// atomic rename. The compose-policy gate runs on the staged bytes
+    /// before anything becomes visible under the final name.
+    pub async fn file_put_stream(
+        &self,
+        cfg: &AppConfig,
+        pending: PendingPut,
+        reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> Result<crate::agent::proto::FileMeta> {
+        let staged =
+            crate::files::stage_write(&pending.svc.dir, &pending.path, reader, cfg.webdav.max_upload_bytes)
+                .await?;
+        // A short body means the uploader disconnected mid-stream: never
+        // commit a truncated file over a good one.
+        if staged.written != pending.len {
+            staged.abort();
+            bail!(
+                "incomplete upload: got {} of {} bytes",
+                staged.written,
+                pending.len
+            );
+        }
+        if Self::is_compose_file(cfg, &pending.svc, &staged.abs)? {
+            if staged.written > MAX_FILE_WRITE as u64 {
+                staged.abort();
+                bail!("compose file too large");
+            }
+            let content = match tokio::fs::read_to_string(&staged.tmp).await {
+                Ok(c) => c,
+                Err(e) => {
+                    staged.abort();
+                    return Err(e.into());
+                }
+            };
+            if let Err(e) = self.guard_compose_write(cfg, &content, &pending.user) {
+                staged.abort();
+                return Err(e);
+            }
+        }
+        crate::files::commit_staged(staged)?;
+        crate::files::stat(&pending.svc.dir, &pending.path)
+    }
+
+    /// Authorize a download and open the requested range. Returns the full
+    /// metadata, how many bytes will follow, and the reader. `len == 0`
+    /// means "to the end of the file".
+    pub async fn file_get_begin(
+        &self,
+        service: &str,
+        path: &str,
+        offset: u64,
+        len: u64,
+        token: &str,
+    ) -> Result<(crate::agent::proto::FileMeta, u64, tokio::fs::File)> {
+        let cfg = self.cfg.get().await;
+        let (claims, _user) = self.justify_service(&cfg, token, service)?;
+        let svc = svc_ops::get_service(&cfg, service)?;
+        let meta = crate::files::stat(&svc.dir, path)?;
+        if meta.kind != "file" {
+            bail!("not a regular file");
+        }
+        let abs = crate::files::resolve(&svc.dir, path)?;
+        let mut f = tokio::fs::File::open(&abs).await?;
+        if offset > 0 {
+            use tokio::io::AsyncSeekExt;
+            f.seek(std::io::SeekFrom::Start(offset)).await?;
+        }
+        let available = meta.size.saturating_sub(offset);
+        let sent = if len == 0 { available } else { len.min(available) };
+        self.justify(
+            &claims,
+            "file_get",
+            &format!("{service}:{path} [{offset}+{sent}]"),
+        );
+        Ok((meta, sent, f))
     }
 
     // ------------------------------------------------------------------

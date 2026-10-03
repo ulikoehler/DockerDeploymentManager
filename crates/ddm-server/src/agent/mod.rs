@@ -34,6 +34,55 @@ pub enum Agent {
     Remote(transport::SocketAgent),
 }
 
+/// A streaming upload in flight. Bytes are written incrementally; the target
+/// file only appears once `finish` succeeds.
+pub enum UploadSink {
+    /// In-process agent: the body is piped into the core over a duplex.
+    Pipe {
+        tx: tokio::io::DuplexStream,
+        done: tokio::sync::oneshot::Receiver<Result<proto::FileMeta>>,
+        remaining: u64,
+    },
+    /// Privileged agent: the body streams over the unix socket.
+    Remote(transport::RemoteUpload),
+}
+
+impl UploadSink {
+    pub fn remaining(&self) -> u64 {
+        match self {
+            UploadSink::Pipe { remaining, .. } => *remaining,
+            UploadSink::Remote(r) => r.remaining(),
+        }
+    }
+
+    /// Write the next chunk of the body (capped at the declared length).
+    pub async fn write(&mut self, data: &[u8]) -> Result<()> {
+        match self {
+            UploadSink::Pipe { tx, remaining, .. } => {
+                if data.len() as u64 > *remaining {
+                    anyhow::bail!("upload exceeds the declared length");
+                }
+                tx.write_all(data).await?;
+                *remaining -= data.len() as u64;
+                Ok(())
+            }
+            UploadSink::Remote(r) => r.write(data).await,
+        }
+    }
+
+    /// Complete the upload and return the committed file's metadata.
+    pub async fn finish(self) -> Result<proto::FileMeta> {
+        match self {
+            UploadSink::Pipe { tx, done, .. } => {
+                drop(tx); // EOF for the staging reader
+                done.await
+                    .map_err(|_| anyhow::anyhow!("agent task vanished"))?
+            }
+            UploadSink::Remote(r) => r.finish().await,
+        }
+    }
+}
+
 impl Agent {
     /// Crypto op — authenticate, verify, mint, rotate, password ops, webhook.
     pub async fn crypto(&self, op: CryptoOp) -> Result<serde_json::Value> {
@@ -141,6 +190,80 @@ impl Agent {
         match self {
             Agent::Local(core) => core.exec(verb, eid, "stream".into(), token).await,
             Agent::Remote(s) => exec_remote(s, &verb, &eid, "stream", None, token).await,
+        }
+    }
+
+    /// Metadata for one path inside a service dir (kind/size/mtime).
+    pub async fn file_stat(
+        &self,
+        service: &str,
+        path: &str,
+        token: &str,
+    ) -> Result<proto::FileMeta> {
+        self.call_as(
+            SyncVerb::FileStat {
+                service: service.to_string(),
+                path: path.to_string(),
+            },
+            token,
+        )
+        .await
+    }
+
+    /// Open a streaming upload of exactly `len` bytes. The agent authorizes
+    /// *before* the body is accepted, so a denied write costs no bandwidth.
+    pub async fn file_put(
+        &self,
+        service: &str,
+        path: &str,
+        len: u64,
+        token: &str,
+    ) -> Result<UploadSink> {
+        match self {
+            Agent::Local(core) => {
+                let pending = core.file_put_begin(service, path, len, token).await?;
+                // Pipe the body through a duplex so both agent flavours
+                // present the same incremental interface to callers.
+                let (tx, rx) = tokio::io::duplex(64 * 1024);
+                let (done_tx, done) = tokio::sync::oneshot::channel();
+                let core = core.clone();
+                tokio::spawn(async move {
+                    let cfg = core.cfg.get().await;
+                    let mut rx = rx;
+                    let res = core.file_put_stream(&cfg, pending, &mut rx).await;
+                    let _ = done_tx.send(res);
+                });
+                Ok(UploadSink::Pipe {
+                    tx,
+                    done,
+                    remaining: len,
+                })
+            }
+            Agent::Remote(s) => Ok(UploadSink::Remote(s.file_put(service, path, len, token).await?)),
+        }
+    }
+
+    /// Open a streaming download. `len == 0` means "to the end of the file".
+    pub async fn file_get(
+        &self,
+        service: &str,
+        path: &str,
+        offset: u64,
+        len: u64,
+        token: &str,
+    ) -> Result<(proto::FileMeta, u64, transport::DownloadStream)> {
+        match self {
+            Agent::Local(core) => {
+                let (meta, sent, f) = core
+                    .file_get_begin(service, path, offset, len, token)
+                    .await?;
+                Ok((
+                    meta,
+                    sent,
+                    transport::DownloadStream::Local(tokio::io::AsyncReadExt::take(f, sent)),
+                ))
+            }
+            Agent::Remote(s) => s.file_get(service, path, offset, len, token).await,
         }
     }
 

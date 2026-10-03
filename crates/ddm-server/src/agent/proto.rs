@@ -148,6 +148,12 @@ pub enum SyncVerb {
         from: String,
         to: String,
     },
+    /// Copy a file or directory tree inside a service dir (WebDAV COPY).
+    FileCopy {
+        service: String,
+        from: String,
+        to: String,
+    },
     FileDelete {
         service: String,
         path: String,
@@ -250,6 +256,11 @@ pub enum SyncVerb {
     /// Provision restic repo + write password file + install units.
     BackupProvision {
         service: String,
+    },
+    /// Stat one path inside a service dir (kind/size/mtime).
+    FileStat {
+        service: String,
+        path: String,
     },
     /// Monitor states for all services (agent-side monitor).
     MonitorStatusAll,
@@ -361,6 +372,37 @@ pub enum AgentRequest {
         token: String,
         service: Option<String>,
     },
+    /// Stream a file into a service dir. After this request line the server
+    /// writes exactly `len` raw bytes and half-closes. The agent authorizes
+    /// first and answers with a JSON line before the byte phase begins, so a
+    /// denied write never accepts payload.
+    FilePut {
+        service: String,
+        path: String,
+        len: u64,
+        token: String,
+    },
+    /// Stream a file (or a byte range) out of a service dir. The agent
+    /// authorizes, answers with `{ "size": n, "sent": m }` and then writes
+    /// exactly `m` raw bytes.
+    FileGet {
+        service: String,
+        path: String,
+        offset: u64,
+        len: u64,
+        token: String,
+    },
+}
+
+/// Metadata for one path inside a service dir — what a WebDAV PROPFIND or a
+/// conditional request needs, without reading any content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileMeta {
+    /// "file" | "dir" | "symlink" | "other"
+    pub kind: String,
+    pub size: u64,
+    /// Unix seconds.
+    pub mtime: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
