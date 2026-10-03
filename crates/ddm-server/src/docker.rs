@@ -45,8 +45,17 @@ pub trait DockerApi: Send + Sync {
         follow: bool,
     ) -> Result<LogStream>;
 
-    /// `docker exec` a command, returning captured stdout.
-    async fn exec_capture(&self, id: &str, cmd: &[String]) -> Result<String>;
+    /// `docker exec` a command (argv, no shell), streaming output.
+    /// Returns the output stream plus the exec id needed for
+    /// [`DockerApi::exec_exit_code`].
+    async fn exec_stream(&self, id: &str, cmd: &[String]) -> Result<(LogStream, String)>;
+
+    /// Exit code of a finished exec instance started by `exec_stream`.
+    async fn exec_exit_code(&self, exec_id: &str) -> Result<i64>;
+
+    /// Compose project owning the container (`com.docker.compose.project`
+    /// label), used to map a container id back to a managed service.
+    async fn container_project(&self, id: &str) -> Result<Option<String>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +174,7 @@ impl DockerApi for BollardDocker {
         Ok(Box::pin(stream))
     }
 
-    async fn exec_capture(&self, id: &str, cmd: &[String]) -> Result<String> {
+    async fn exec_stream(&self, id: &str, cmd: &[String]) -> Result<(LogStream, String)> {
         use bollard::exec::{CreateExecOptions, StartExecResults};
         let exec = self
             .docker
@@ -179,15 +188,51 @@ impl DockerApi for BollardDocker {
                 },
             )
             .await?;
-        let mut out = String::new();
-        if let StartExecResults::Attached { mut output, .. } =
-            self.docker.start_exec(&exec.id, None).await?
-        {
-            while let Some(Ok(msg)) = output.next().await {
-                out.push_str(&msg.to_string());
+        let started = self.docker.start_exec(&exec.id, None).await?;
+        let out = match started {
+            StartExecResults::Attached { output, .. } => output,
+            StartExecResults::Detached => {
+                return Ok((Box::pin(futures::stream::empty()), exec.id))
             }
+        };
+        let stream = out.filter_map(|item| async move {
+            use bollard::container::LogOutput;
+            match item {
+                Ok(LogOutput::StdOut { message }) => Some(Ok(LogLine {
+                    text: String::from_utf8_lossy(&message).to_string(),
+                    stream: "stdout".to_string(),
+                })),
+                Ok(LogOutput::StdErr { message }) => Some(Ok(LogLine {
+                    text: String::from_utf8_lossy(&message).to_string(),
+                    stream: "stderr".to_string(),
+                })),
+                Ok(_) => None,
+                Err(e) => Some(Err(anyhow::anyhow!("exec stream error: {e}"))),
+            }
+        });
+        Ok((Box::pin(stream), exec.id))
+    }
+
+    async fn exec_exit_code(&self, exec_id: &str) -> Result<i64> {
+        // The exit code may not be recorded the instant the attach stream
+        // closes — poll briefly before giving up rather than reporting a
+        // spurious failure for a fast command.
+        for _ in 0..10 {
+            let info = self.docker.inspect_exec(exec_id).await?;
+            if let Some(code) = info.exit_code {
+                return Ok(code);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        Ok(out)
+        Ok(-1)
+    }
+
+    async fn container_project(&self, id: &str) -> Result<Option<String>> {
+        let info = self.docker.inspect_container(id, None).await?;
+        Ok(info
+            .config
+            .and_then(|c| c.labels)
+            .and_then(|l| l.get("com.docker.compose.project").cloned()))
     }
 }
 
@@ -214,12 +259,23 @@ pub struct MockDocker {
     pub health: Mutex<HashMap<String, Option<String>>>,
     pub log_lines: Mutex<Vec<LogLine>>,
     pub exec_outputs: Mutex<HashMap<String, String>>,
+    /// container id -> compose project label, for container_project tests.
+    pub projects: Mutex<HashMap<String, String>>,
+    pub exec_exit: Mutex<i64>,
 }
 
 #[async_trait]
 impl DockerApi for MockDocker {
-    async fn project_containers(&self, _project: &str) -> Result<Vec<ContainerInfo>> {
-        Ok(self.containers.lock().unwrap().clone())
+    async fn project_containers(&self, project: &str) -> Result<Vec<ContainerInfo>> {
+        let projects = self.projects.lock().unwrap();
+        Ok(self
+            .containers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| projects.get(&c.id).map(|p| p == project).unwrap_or(false))
+            .cloned()
+            .collect())
     }
     async fn container_health(&self, id: &str) -> Result<Option<String>> {
         Ok(self.health.lock().unwrap().get(id).cloned().unwrap_or(None))
@@ -234,14 +290,30 @@ impl DockerApi for MockDocker {
         let lines = self.log_lines.lock().unwrap().clone();
         Ok(Box::pin(futures::stream::iter(lines.into_iter().map(Ok))))
     }
-    async fn exec_capture(&self, id: &str, cmd: &[String]) -> Result<String> {
+    async fn exec_stream(&self, id: &str, cmd: &[String]) -> Result<(LogStream, String)> {
         let key = format!("{id} {}", cmd.join(" "));
-        Ok(self
+        let out = self
             .exec_outputs
             .lock()
             .unwrap()
             .get(&key)
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_else(|| "mock exec output\n".to_string());
+        let line = LogLine {
+            text: out,
+            stream: "stdout".to_string(),
+        };
+        Ok((
+            Box::pin(futures::stream::iter(vec![Ok(line)])),
+            "mock-exec".to_string(),
+        ))
+    }
+
+    async fn exec_exit_code(&self, _exec_id: &str) -> Result<i64> {
+        Ok(*self.exec_exit.lock().unwrap())
+    }
+
+    async fn container_project(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.projects.lock().unwrap().get(id).cloned())
     }
 }

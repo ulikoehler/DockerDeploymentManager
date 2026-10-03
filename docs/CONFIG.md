@@ -168,6 +168,7 @@ users:
       manage_backup: false
       manage_monitoring: false
       edit_files: false        # file tree editing + git ops
+      exec_containers: false   # docker exec inside the user's services' containers
     compose_policy: strict
 ```
 

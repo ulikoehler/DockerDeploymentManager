@@ -74,7 +74,7 @@ capability. Hard rules:
   re-evaluates the same gate the server uses: service access
   (`can_access_service`), feature flags (`edit_files`, `edit_compose`,
   `manage_monitoring`, `manage_backup`, `create_services`,
-  `run_commands`), roles (`admin`, `operator`,
+  `run_commands`, `exec_containers`), roles (`admin`, `operator`,
   `security.unit_edit_requires`) and per-command `required_role`s. A
   compromised server cannot use a valid token for a verb its user may not
   perform — and because the scope is applied *before* the check, the
@@ -126,7 +126,10 @@ the login that produced it.
   id, which the agent cannot map back to a service without an extra docker
   lookup; it therefore requires a valid token but not a service-access
   check. Impact is limited to reading logs of containers the caller's
-  server-side request already resolved.
+  server-side request already resolved. (By contrast `ContainerExec` —
+  `docker exec` — does resolve the container's `com.docker.compose.project`
+  label agent-side and re-checks access to that service; unlabeled or
+  unmanaged containers require admin.)
 - **Service-account identity**: `SO_PEERCRED` ties the socket to uid `ddm`;
   if two unprivileged components ever share it, the agent can't
   distinguish them — one server process per socket/user.
@@ -140,7 +143,7 @@ the login that produced it.
 2. **Service access rules** — ordered `exact|glob|regex` allow/deny, first
    match wins, else `security.default_access` (default `deny`).
 3. **Feature flags** — `create_services`, `edit_compose`, `edit_units`,
-   `run_commands`, `manage_backup`,
+   `run_commands`, `exec_containers` (docker exec), `manage_backup`,
    `manage_monitoring`, `edit_files`.
 4. **Compose policy** — per user; fail-closed (unknown names fall back to
    `default_policy`, then built-in strict). Strict denies `privileged`,

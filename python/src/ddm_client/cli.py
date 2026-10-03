@@ -113,6 +113,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("item", type=int)
     s.add_argument("--param", action="append", default=[], help="key=value")
 
+    s = sub.add_parser("cexec",
+                       help="docker exec inside a service's container")
+    s.add_argument("service")
+    s.add_argument("container")
+    s.add_argument("cmd", nargs="+", help="argv, e.g. cexec svc c1 ls -la")
+
     s = sub.add_parser("gitops")
     s.add_argument("op", choices=["status", "sync", "push"])
 
@@ -365,6 +371,11 @@ def dispatch(args) -> int:
         return users_cmd(c, args)
     elif cmd == "exec":
         r = c.run_command(args.section, args.item, kvlist(args.param))
+        eid = r.get("execution_id")
+        print(f"execution: {eid}")
+        return asyncio.run(_stream_exec(c, eid)) if eid else 0
+    elif cmd == "cexec":
+        r = c.exec_in_container(args.service, args.container, args.cmd)
         eid = r.get("execution_id")
         print(f"execution: {eid}")
         return asyncio.run(_stream_exec(c, eid)) if eid else 0

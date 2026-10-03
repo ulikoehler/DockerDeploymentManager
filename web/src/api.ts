@@ -185,6 +185,8 @@ export const apiSetPassword = (name: string, password: string) =>
   api(`/api/users/${name}/password`, { method: 'PUT', body: { password } });
 export const apiSetAccess = (name: string, rules: unknown) =>
   api(`/api/users/${name}/access`, { method: 'PUT', body: rules });
+export const apiExecContainer = (name: string, container: string, command: string) =>
+  api(`/api/services/${name}/exec`, { method: 'POST', body: { container, command } });
 export const apiCommands = () => api('/api/commands');
 export const apiRunCommand = (section: number, item: number, params: Record<string, string>) =>
   api(`/api/commands/${section}/${item}`, { method: 'POST', body: { params } });

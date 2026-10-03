@@ -25,6 +25,8 @@ Auth: `POST /api/auth/login` → `{token}`; send as `Authorization: Bearer
 | DELETE | `/api/services/{name}?down=&keep_dir=` | admin; optionally `down`s and removes unit |
 | POST   | `/api/services/{name}/actions` | `{action}`: `pull` `up` `down` `restart` `update` `start` `stop` `enable` `disable` → `{execution_id}` |
 | GET    | `/api/services/{name}/logs?tail=&since=&grep=&regex=&exclude_regex=&stream=&container=` | filtered snapshot |
+| POST   | `/api/services/{name}/exec` | `{container, command}` — docker exec inside one of the service's containers (`exec_containers` feature or admin) → `{execution_id}` |
+| POST   | `/api/containers/{id}/exec` | `{command}` — exec in *any* container (admin only) → `{execution_id}` |
 
 ### Compose file
 
@@ -188,7 +190,7 @@ Tool names mirror the API: `services_list`, `service_get`,
 `service_write_file` / `service_mkdir` / `service_rename_file` /
 `service_delete_file`, `service_git_*`, `service_backup_*`,
 `service_*_monitoring` / `monitoring_*` / `notifier_*`, `systemd_*`,
-`commands_list` / `command_run`, `gitops_*`, `user_*` / `users_list`, `me`,
+`commands_list` / `command_run`, `container_exec`, `gitops_*`, `user_*` / `users_list`, `me`,
 `logout_all`, `config_get` / `config_status`, `effective_policy`,
 `templates`, `audit_list`, `executions_list` / `execution_get`, `health`.
 

@@ -403,6 +403,16 @@ pub struct CommandRunArgs {
     pub params: std::collections::HashMap<String, String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ContainerExecArgs {
+    /// Service name — the container must belong to its compose project.
+    pub name: String,
+    /// Container id or name within the service's project.
+    pub container: String,
+    /// Shell command string, or argv array e.g. ["sh","-c","id"].
+    pub command: Value,
+}
+
 // ---------------------------------------------------------------------------
 // MCP server handler
 // ---------------------------------------------------------------------------
@@ -1084,6 +1094,21 @@ impl DdmMcp {
         let req = api::commands_api::RunRequest { params: p.params };
         finish(api::commands_api::run(user, self.st(), Path((p.section, p.item)), Json(req)).await)
             .await
+    }
+
+    #[tool(
+        description = "Run a command inside one of a service's containers (docker exec; returns execution_id)"
+    )]
+    async fn container_exec(
+        &self,
+        McpUser(user): McpUser,
+        Parameters(p): Parameters<ContainerExecArgs>,
+    ) -> Result<McpJson<Value>, ErrorData> {
+        let req = api::containers::ExecRequest {
+            container: Some(p.container),
+            command: p.command,
+        };
+        finish(api::containers::service_exec(user, self.st(), Path(p.name), Json(req)).await).await
     }
 
     // -- gitops -----------------------------------------------------------------

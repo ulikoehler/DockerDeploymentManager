@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod commands_api;
+pub mod containers;
 pub mod files;
 pub mod misc;
 pub mod services;
@@ -47,6 +48,9 @@ pub fn api_router() -> Router<AppState> {
         )
         .route("/api/services/:name/actions", post(services::action))
         .route("/api/services/:name/logs", get(services::logs))
+        // container exec
+        .route("/api/services/:name/exec", post(containers::service_exec))
+        .route("/api/containers/:id/exec", post(containers::container_exec))
         // files + git
         .route(
             "/api/services/:name/files",

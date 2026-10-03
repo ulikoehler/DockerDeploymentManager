@@ -76,6 +76,7 @@ sections:
 struct Harness {
     app: Router<()>,
     state: AppState,
+    docker: Arc<docker::MockDocker>,
     _dir: tempfile::TempDir,
 }
 
@@ -120,7 +121,8 @@ async fn harness() -> Harness {
     let users = Arc::new(users::UserStore::load(&users_path).unwrap());
 
     let host = hostexec::build(config::HostExecKind::Local, 1);
-    let docker: Arc<dyn docker::DockerApi> = Arc::new(docker::MockDocker::default());
+    let docker_mock = Arc::new(docker::MockDocker::default());
+    let docker: Arc<dyn docker::DockerApi> = docker_mock.clone();
     let exec = Arc::new(exec::ExecutionManager::new(50));
     let audit = Arc::new(audit::AuditLog::new(64));
     let core = Arc::new(
@@ -151,6 +153,7 @@ async fn harness() -> Harness {
     Harness {
         app,
         state,
+        docker: docker_mock,
         _dir: dir,
     }
 }
@@ -190,6 +193,7 @@ async fn harness_remote() -> Harness {
     Harness {
         app,
         state,
+        docker: h.docker.clone(),
         _dir: h._dir,
     }
 }
@@ -2406,4 +2410,218 @@ async fn services_only_scope_must_not_stay_admin() {
     // admin-only surface must also be gone (scope narrows, never widens)
     let (st, _, _) = call(&h.app, "GET", "/api/users", Some(&scoped), None).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "scoped token still admin: {st}");
+}
+
+// ---------------------------------------------------------------------------
+// Container exec (docker exec inside a service's containers)
+// ---------------------------------------------------------------------------
+
+fn seed_exec_containers(h: &Harness) {
+    h.docker
+        .projects
+        .lock()
+        .unwrap()
+        .extend([("c1".to_string(), "svc_a".to_string()), ("c2".to_string(), "svc_b".to_string())]);
+    let mut cs = h.docker.containers.lock().unwrap();
+    cs.push(docker::ContainerInfo {
+        id: "c1".into(),
+        name: "svc_a-app-1".into(),
+        service: "app".into(),
+        state: "running".into(),
+        status: "Up".into(),
+        health: None,
+    });
+    cs.push(docker::ContainerInfo {
+        id: "c2".into(),
+        name: "svc_b-app-1".into(),
+        service: "app".into(),
+        state: "running".into(),
+        status: "Up".into(),
+        health: None,
+    });
+}
+
+async fn grant_exec_feature(h: &Harness, name: &str) {
+    let name = name.to_string();
+    h.state
+        .users
+        .mutate(move |f| {
+            f.users
+                .iter_mut()
+                .find(|u| u.name == name)
+                .unwrap()
+                .features
+                .exec_containers = true;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn container_exec_rights() {
+    let h = harness().await;
+    seed_exec_containers(&h);
+    let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+
+    // No exec_containers feature → denied.
+    let (st, _, _) = call(
+        &h.app,
+        "POST",
+        "/api/services/svc_a/exec",
+        Some(&viewer),
+        Some(serde_json::json!({"container": "c1", "command": "id"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // Grant the feature → allowed on an accessible service.
+    grant_exec_feature(&h, "viewer").await;
+    let (st, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/services/svc_a/exec",
+        Some(&viewer),
+        Some(serde_json::json!({"container": "c1", "command": ["id"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{j}");
+    assert!(j.pointer("/data/execution_id").is_some());
+    // container may also be addressed by name or compose service name
+    for c in ["svc_a-app-1", "app"] {
+        let (st, _, j) = call(
+            &h.app,
+            "POST",
+            "/api/services/svc_a/exec",
+            Some(&viewer),
+            Some(serde_json::json!({"container": c, "command": "id"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{c}: {j}");
+    }
+    // a container that is not part of the service is refused
+    let (st, _, _) = call(
+        &h.app,
+        "POST",
+        "/api/services/svc_a/exec",
+        Some(&viewer),
+        Some(serde_json::json!({"container": "c2", "command": "id"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // Bad command shapes are rejected before reaching docker.
+    for bad in [
+        serde_json::json!([]),
+        serde_json::json!(42),
+        serde_json::json!({"a": 1}),
+        serde_json::json!(""),
+        serde_json::json!([1, 2]),
+    ] {
+        let (st, _, _) = call(
+            &h.app,
+            "POST",
+            "/api/services/svc_a/exec",
+            Some(&viewer),
+            Some(serde_json::json!({"container": "c1", "command": bad})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    // The any-container route is admin-only — even with the feature.
+    let (st, _, _) = call(
+        &h.app,
+        "POST",
+        "/api/containers/foreign9/exec",
+        Some(&viewer),
+        Some(serde_json::json!({"command": "id"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/containers/foreign9/exec",
+        Some(&admin),
+        Some(serde_json::json!({"command": "id"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{j}");
+}
+
+/// Agent boundary (compromised server): the container's project label is
+/// resolved agent-side — a svc_a-scoped token cannot exec into svc_b's
+/// container, and an unmanaged container requires a real admin.
+#[tokio::test]
+async fn container_exec_agent_side_label_check() {
+    let h = harness_remote().await;
+    seed_exec_containers(&h);
+    // The scoped token's fresh record is admin's — give it the feature so
+    // the access check (not the feature check) is what decides.
+    grant_exec_feature(&h, "admin").await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    let (_, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/auth/token",
+        Some(&admin),
+        Some(serde_json::json!({"services": ["svc_a"], "actions": ["operator"]})),
+    )
+    .await;
+    let scoped = j.pointer("/data/token").unwrap().as_str().unwrap().to_string();
+    let exec = h.state.exec.clone();
+    let mk = |id: &str| crate::agent::proto::ExecVerb::ContainerExec {
+        container: id.to_string(),
+        command: vec!["id".to_string()],
+    };
+
+    // in-scope container → allowed and streams to completion
+    let ok = h
+        .state
+        .agent
+        .exec_collect(mk("c1"), "exec", Some("svc_a".into()), &scoped, "a", &exec)
+        .await
+        .unwrap();
+    assert!(ok);
+    // svc_b's container → denied agent-side, before the exec starts
+    let r = h
+        .state
+        .agent
+        .exec(mk("c2"), "exec".to_string(), None, &scoped, "a", &exec)
+        .await;
+    assert!(r.is_err(), "agent exec'd into an out-of-scope container");
+    // unlabeled/unmanaged container → admin only
+    let r = h
+        .state
+        .agent
+        .exec(mk("c9"), "exec".to_string(), None, &scoped, "a", &exec)
+        .await;
+    assert!(r.is_err(), "unmanaged container exec allowed for non-admin");
+    // ...but a real admin can exec there
+    let ok = h
+        .state
+        .agent
+        .exec_collect(mk("c9"), "exec", None, &admin, "a", &exec)
+        .await
+        .unwrap();
+    assert!(ok);
+    // a non-zero exit code is reported as a failed execution
+    *h.docker.exec_exit.lock().unwrap() = 7;
+    let ok = h
+        .state
+        .agent
+        .exec_collect(mk("c1"), "exec", Some("svc_a".into()), &scoped, "a", &exec)
+        .await
+        .unwrap();
+    assert!(!ok, "non-zero exit code reported as success");
+
+    // The agent's own justification log records the authoritative argv and
+    // the resolved project (the exec title alone comes from the server).
+    let log = std::fs::read_to_string(h._dir.path().join("justification.log")).unwrap();
+    assert!(log.contains("container_exec"), "no container_exec entry: {log}");
+    assert!(log.contains("project: svc_a"), "project not recorded: {log}");
+    assert!(log.contains("unmanaged"), "unmanaged exec not recorded: {log}");
+    assert!(log.contains("id"), "argv not recorded: {log}");
 }

@@ -112,6 +112,14 @@ pub enum ExecVerb {
         since: Option<i64>,
         follow: bool,
     },
+    /// `docker exec` inside a container, streamed as LogOutput lines.
+    /// The agent resolves the owning service itself from the container's
+    /// compose project label — the server cannot relabel a foreign
+    /// container as belonging to a service the caller may access.
+    ContainerExec {
+        container: String,
+        command: Vec<String>,
+    },
 }
 
 /// Operations with a single JSON response. All privileged filesystem,

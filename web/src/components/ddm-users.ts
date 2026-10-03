@@ -168,7 +168,7 @@ export class DdmUsers extends LitElement {
                 }>save</button>
               </div>
               <h4>Features</h4>
-              ${['create_services', 'edit_compose', 'edit_units', 'run_commands', 'manage_backup', 'manage_monitoring'].map(
+              ${['create_services', 'edit_compose', 'edit_units', 'run_commands', 'manage_backup', 'manage_monitoring', 'exec_containers'].map(
                 (k) => html`<label style="margin-right:1em">
                   <input type="checkbox" .checked=${!!u.features[k]}
                     @change=${() => this.toggleFeature(u, k)}> ${k}

@@ -394,7 +394,7 @@ impl AgentCore {
     }
 
     /// Same mirror for [`ExecVerb`]s.
-    fn precheck_exec(&self, cfg: &AppConfig, verb: &ExecVerb, token: &str) -> Result<User> {
+    async fn precheck_exec(&self, cfg: &AppConfig, verb: &ExecVerb, token: &str) -> Result<User> {
         use crate::users::UserFeatures as F;
         let feat = |f: fn(&F) -> bool, u: &User| f(&u.features);
         match verb {
@@ -478,6 +478,54 @@ impl AgentCore {
             // resolved the container id; token validity suffices here.
             ExecVerb::ContainerLogs { .. } => {
                 let (_c, u) = self.scoped_user(token)?;
+                Ok(u)
+            }
+            // Free-form docker exec: `exec_containers` feature (or admin),
+            // then the container's owning service from its compose project
+            // label — resolved agent-side, so a compromised server cannot
+            // relabel a foreign container into an allowed service.
+            ExecVerb::ContainerExec { container, command } => {
+                if command.is_empty() {
+                    bail!("empty command");
+                }
+                let (claims, u) = self.scoped_user(token)?;
+                Self::require_feature(
+                    &u,
+                    feat(|f| f.exec_containers, &u),
+                    "exec_containers",
+                )?;
+                let project = self
+                    .docker
+                    .container_project(container)
+                    .await
+                    .context("inspect container")?;
+                match project.as_deref() {
+                    Some(p) if svc_ops::get_service(cfg, p).is_ok() => {
+                        if !crate::permissions::can_access_service(
+                            &u,
+                            p,
+                            cfg.security.default_access,
+                        ) {
+                            bail!("service access denied: {p}");
+                        }
+                    }
+                    // No label / unknown project: unmanaged container —
+                    // it isn't covered by per-service rights, admin only.
+                    _ => Self::require_admin(&u)?,
+                }
+                // Authorized: record the argv the agent is about to run.
+                // The exec title comes from the server; this line is the
+                // authoritative one (attempts are already logged by
+                // `justify_token` in `exec`).
+                self.justify(
+                    &claims,
+                    "container_exec",
+                    &format!(
+                        "{container} (project: {}) : {}",
+                        project.as_deref().unwrap_or("unmanaged"),
+                        command.join(" ")
+                    ),
+                );
                 Ok(u)
             }
         }
@@ -1284,14 +1332,13 @@ impl AgentCore {
         title: String,
         token: &str,
     ) -> Result<mpsc::Receiver<ServerMessage>> {
-        let (claims, _user) = self.justify_token(token, &title, "")?;
+        let (_claims, _user) = self.justify_token(token, &title, "")?;
         let cfg = self.cfg.get().await;
         // Defense in depth: re-check the verb's authorization against the
         // fresh, scope-applied user before any command is assembled.
-        let _authorized = self.precheck_exec(&cfg, &verb, token)?;
+        let _authorized = self.precheck_exec(&cfg, &verb, token).await?;
         let (tx, rx) = mpsc::channel::<ServerMessage>(256);
         let core = Arc::clone(self);
-        let user = claims.sub.clone();
         tokio::spawn(async move {
             let _ = tx
                 .send(ServerMessage::ExecutionStarted {
@@ -1299,7 +1346,7 @@ impl AgentCore {
                     title: title.clone(),
                 })
                 .await;
-            let ok = match core.exec_inner(&verb, &cfg, &eid, &tx, &user).await {
+            let ok = match core.exec_inner(&verb, &cfg, &eid, &tx).await {
                 Ok(ok) => ok,
                 Err(e) => {
                     let _ = tx
@@ -1328,7 +1375,6 @@ impl AgentCore {
         cfg: &AppConfig,
         eid: &str,
         tx: &mpsc::Sender<ServerMessage>,
-        _user: &str,
     ) -> Result<bool> {
         match verb {
             ExecVerb::Compose { service, op } => {
@@ -1623,6 +1669,47 @@ impl AgentCore {
                     }
                 }
                 Ok(true)
+            }
+            ExecVerb::ContainerExec { container, command } => {
+                // Authorization ran in precheck_exec (feature + project
+                // label -> service access / admin for unmanaged).
+                let (mut stream, exec_id) =
+                    self.docker.exec_stream(container, command).await?;
+                use futures::StreamExt;
+                while let Some(line) = stream.next().await {
+                    match line {
+                        Ok(l) => {
+                            let _ = tx
+                                .send(ServerMessage::LogOutput {
+                                    id: eid.to_string(),
+                                    text: l.text,
+                                    stream: l.stream,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(ServerMessage::LogOutput {
+                                    id: eid.to_string(),
+                                    text: format!("exec stream error: {e}\n"),
+                                    stream: "stderr".into(),
+                                })
+                                .await;
+                            return Ok(false);
+                        }
+                    }
+                }
+                let code = self.docker.exec_exit_code(&exec_id).await?;
+                if code != 0 {
+                    let _ = tx
+                        .send(ServerMessage::LogOutput {
+                            id: eid.to_string(),
+                            text: format!("(exited with code {code})\n"),
+                            stream: "stderr".into(),
+                        })
+                        .await;
+                }
+                Ok(code == 0)
             }
         }
     }

@@ -1,6 +1,6 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { apiService, apiAction, apiCheckUnit, apiDeleteService } from '../api';
+import { apiService, apiAction, apiCheckUnit, apiDeleteService, apiExecContainer, wsUrl } from '../api';
 import { sharedStyles } from '../styles';
 import './ddm-log-viewer';
 import './ddm-compose-editor';
@@ -40,10 +40,55 @@ export class DdmServiceDetail extends LitElement {
   @state() private tab = 'overview';
   @state() private unitReport: any = null;
   @state() private error = '';
+  @state() private execTarget: string | null = null;
+  @state() private execLabel = '';
+  @state() private execCmd = 'sh';
+  @state() private execOutput = '';
+  @state() private execRunning = false;
+  private execWs?: WebSocket;
 
   connectedCallback() {
     super.connectedCallback();
     this.refresh();
+  }
+
+  disconnectedCallback() {
+    this.execWs?.close();
+    super.disconnectedCallback();
+  }
+
+  private openExec(c: any) {
+    this.execTarget = c.id;
+    this.execLabel = c.name;
+    this.execOutput = '';
+  }
+
+  private async runExec() {
+    if (!this.execTarget || !this.execCmd.trim()) return;
+    this.execOutput = '';
+    this.execRunning = true;
+    try {
+      const r: any = await apiExecContainer(this.name, this.execTarget, this.execCmd);
+      const id = r.execution_id;
+      this.execWs = new WebSocket(wsUrl(`/ws/executions/${id}`));
+      this.execWs.onmessage = (ev) => {
+        try {
+          const m = JSON.parse(ev.data);
+          const text = m.data?.text ?? '';
+          if (m.type === 'log_output' || text) {
+            this.execOutput += m.data?.stream === 'stderr' ? `[stderr] ${text}` : text;
+          }
+          if (m.type === 'execution_finished' || m.data?.success !== undefined) {
+            this.execOutput += `\n— finished (success=${m.data?.success})\n`;
+            this.execRunning = false;
+          }
+        } catch { /* ignore */ }
+      };
+      this.execWs.onclose = () => (this.execRunning = false);
+    } catch (e: any) {
+      this.execOutput = `error: ${e.message}`;
+      this.execRunning = false;
+    }
   }
 
   private async refresh() {
@@ -141,18 +186,32 @@ export class DdmServiceDetail extends LitElement {
       <div class="card">
         <h3>Containers</h3>
         <table>
-          <thead><tr><th>container</th><th>service</th><th>state</th><th>status</th></tr></thead>
+          <thead><tr><th>container</th><th>service</th><th>state</th><th>status</th><th></th></tr></thead>
           <tbody>
             ${(d.containers || []).map(
               (c: any) => html`<tr>
                 <td>${c.name}</td><td>${c.service}</td>
                 <td><span class="${c.state === 'running' ? 'ok-text' : 'error'}">${c.state}</span></td>
                 <td class="muted">${c.status}</td>
+                <td><button class="small" @click=${() => this.openExec(c)}>exec</button></td>
               </tr>`,
             )}
           </tbody>
         </table>
       </div>
+      ${this.execTarget
+        ? html`<div class="card">
+            <h3>exec — ${this.execLabel}</h3>
+            <div class="row">
+              <input style="flex:1" placeholder="command (sh -c)" .value=${this.execCmd}
+                @input=${(e: any) => (this.execCmd = e.target.value)}
+                @keydown=${(e: any) => e.key === 'Enter' && this.runExec()}>
+              <button class="small" ?disabled=${this.execRunning} @click=${this.runExec}>run</button>
+              <button class="small secondary" @click=${() => (this.execTarget = null)}>close</button>
+            </div>
+            <pre class="log-view" style="min-height:6em">${this.execOutput}</pre>
+          </div>`
+        : ''}
       <div class="card">
         <h3>Systemd unit</h3>
         ${this.unitReport

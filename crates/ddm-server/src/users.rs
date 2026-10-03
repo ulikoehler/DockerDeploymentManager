@@ -78,6 +78,9 @@ pub struct UserFeatures {
     /// Edit arbitrary files inside service dirs and manage git repos there.
     #[serde(default)]
     pub edit_files: bool,
+    /// Run arbitrary commands inside a service's containers (docker exec).
+    #[serde(default)]
+    pub exec_containers: bool,
 }
 
 fn bool_true() -> bool {
@@ -94,6 +97,7 @@ impl Default for UserFeatures {
             manage_backup: false,
             manage_monitoring: false,
             edit_files: false,
+            exec_containers: false,
         }
     }
 }

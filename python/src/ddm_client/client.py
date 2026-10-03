@@ -354,6 +354,25 @@ class DdmClient:
         return self._req("POST", f"/api/commands/{section}/{item}",
                          {"params": params or {}})
 
+    # -- container exec ---------------------------------------------------------
+
+    def exec_in_container(self, name: str, container: str,
+                          command: str | list[str]) -> dict:
+        """docker exec inside one of `name`'s containers.
+
+        `command` is an argv list (no shell) or a string run via `sh -c`.
+        Returns {"execution_id": ...} — follow with stream_execution().
+        Requires the exec_containers feature (or admin) and service access.
+        """
+        return self._req("POST", f"/api/services/{name}/exec",
+                         {"container": container, "command": command})
+
+    def exec_container(self, container: str,
+                       command: str | list[str]) -> dict:
+        """docker exec in any container (admin only)."""
+        return self._req("POST", f"/api/containers/{container}/exec",
+                         {"command": command})
+
     # -- misc -----------------------------------------------------------------
 
     def executions(self) -> list[dict]:

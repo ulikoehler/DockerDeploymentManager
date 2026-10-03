@@ -38,6 +38,7 @@ ddm notify-test <id> [--message ...]
 ddm users list|show|add|remove|passwd|access|roles|policy|features ...
 ddm commands                              # list sections/items
 ddm exec <section> <item> [--param k=v]   # run + stream output
+ddm cexec <svc> <container> <cmd...>      # docker exec, streamed
 ddm events                                # monitoring events
 ddm audit                                 # audit ring (admin)
 ```
@@ -81,6 +82,11 @@ c.set_access("ci", [{"type": "exact", "pattern": "core", "effect": "deny"}])
 c.backup_run("pg-app")
 c.backup_snapshots("pg-app")
 r = c.run_command(0, 1, {"all": "true"})
+print(r["execution_id"])
+
+# docker exec inside a service's container (exec_containers feature)
+r = c.exec_in_container("web", "web-app-1", "ls -la /app")
+r = c.exec_in_container("web", "web-app-1", ["sh", "-c", "id"])
 print(r["execution_id"])
 ```
 
