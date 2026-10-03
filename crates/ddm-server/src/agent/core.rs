@@ -298,7 +298,7 @@ impl AgentCore {
             .context("inspect container")?;
         match project.as_deref() {
             Some(p) if svc_ops::get_service(cfg, p).is_ok() => {
-                if crate::permissions::can_access_service(&u, p, cfg.security.default_access) {
+                if crate::permissions::can_access_service(u, p, cfg.security.default_access) {
                     Ok(())
                 } else {
                     bail!("service access denied: {p}")
@@ -422,9 +422,9 @@ impl AgentCore {
             | SyncVerb::BackupGet { service }
             | SyncVerb::BackupCheck { service }
             | SyncVerb::BackupLs { service, .. }
-            | SyncVerb::BackupSnapshots { service } => self
-                .justify_service(cfg, token, service)
-                .map(|x| Some(x.1)),
+            | SyncVerb::BackupSnapshots { service } => {
+                self.justify_service(cfg, token, service).map(|x| Some(x.1))
+            }
             // ---- systemd surface: operator, like the server ----
             // `ListUnits` backs the operator-only systemd API; `Journal`
             // additionally mirrors the server's group-membership gate so a
@@ -449,11 +449,7 @@ impl AgentCore {
                 let (_c, u) = self.scoped_user(token)?;
                 let svc = unit.strip_suffix(".service").unwrap_or(unit);
                 if u.has_role("operator")
-                    || crate::permissions::can_access_service(
-                        &u,
-                        svc,
-                        cfg.security.default_access,
-                    )
+                    || crate::permissions::can_access_service(&u, svc, cfg.security.default_access)
                 {
                     return Ok(Some(u));
                 }
@@ -573,11 +569,7 @@ impl AgentCore {
                     bail!("empty command");
                 }
                 let (claims, u) = self.scoped_user(token)?;
-                Self::require_feature(
-                    &u,
-                    feat(|f| f.exec_containers, &u),
-                    "exec_containers",
-                )?;
+                Self::require_feature(&u, feat(|f| f.exec_containers, &u), "exec_containers")?;
                 let project = self
                     .docker
                     .container_project(container)
@@ -844,11 +836,7 @@ impl AgentCore {
             .collect();
         // A service-scoped token can never be admin — `admin` bypasses
         // service-access rules and would void the scope entirely.
-        if scope
-            .as_ref()
-            .and_then(|s| s.services.as_ref())
-            .is_some()
-        {
+        if scope.as_ref().and_then(|s| s.services.as_ref()).is_some() {
             roles.retain(|r| r != "admin");
         }
         let token = self
@@ -1303,8 +1291,7 @@ impl AgentCore {
             }
             SyncVerb::MonitoringPut { service, cfg: m } => {
                 self.justify_token(token, "monitoring_put", &service)?;
-                crate::api::services::validate_monitoring_cfg(&m, &cfg)
-                    .map_err(|e| anyhow!(e))?;
+                crate::api::services::validate_monitoring_cfg(&m, &cfg).map_err(|e| anyhow!(e))?;
                 let mut svc = svc_ops::get_service(&cfg, &service)?;
                 svc.meta.monitoring = Some(m);
                 svc_ops::save_meta(&svc.dir, &svc.meta)?;
@@ -1567,9 +1554,13 @@ impl AgentCore {
         pending: PendingPut,
         reader: &mut (impl tokio::io::AsyncRead + Unpin),
     ) -> Result<crate::agent::proto::FileMeta> {
-        let staged =
-            crate::files::stage_write(&pending.svc.dir, &pending.path, reader, cfg.webdav.max_upload_bytes)
-                .await?;
+        let staged = crate::files::stage_write(
+            &pending.svc.dir,
+            &pending.path,
+            reader,
+            cfg.webdav.max_upload_bytes,
+        )
+        .await?;
         // A short body means the uploader disconnected mid-stream: never
         // commit a truncated file over a good one.
         if staged.written != pending.len {
@@ -1626,7 +1617,11 @@ impl AgentCore {
             f.seek(std::io::SeekFrom::Start(offset)).await?;
         }
         let available = meta.size.saturating_sub(offset);
-        let sent = if len == 0 { available } else { len.min(available) };
+        let sent = if len == 0 {
+            available
+        } else {
+            len.min(available)
+        };
         self.justify(
             &claims,
             "file_get",
@@ -1999,8 +1994,7 @@ impl AgentCore {
             ExecVerb::ContainerExec { container, command } => {
                 // Authorization ran in precheck_exec (feature + project
                 // label -> service access / admin for unmanaged).
-                let (mut stream, exec_id) =
-                    self.docker.exec_stream(container, command).await?;
+                let (mut stream, exec_id) = self.docker.exec_stream(container, command).await?;
                 use futures::StreamExt;
                 while let Some(line) = stream.next().await {
                     match line {

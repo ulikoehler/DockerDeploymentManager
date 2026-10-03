@@ -239,7 +239,9 @@ impl Agent {
                     remaining: len,
                 })
             }
-            Agent::Remote(s) => Ok(UploadSink::Remote(s.file_put(service, path, len, token).await?)),
+            Agent::Remote(s) => Ok(UploadSink::Remote(
+                s.file_put(service, path, len, token).await?,
+            )),
         }
     }
 

@@ -367,10 +367,17 @@ fn props_for(
         ),
         (
             "getlastmodified",
-            format!("<D:getlastmodified>{}</D:getlastmodified>", http_date(meta.mtime)),
+            format!(
+                "<D:getlastmodified>{}</D:getlastmodified>",
+                http_date(meta.mtime)
+            ),
             true,
         ),
-        ("getetag", format!("<D:getetag>{}</D:getetag>", etag(meta)), true),
+        (
+            "getetag",
+            format!("<D:getetag>{}</D:getetag>", etag(meta)),
+            true,
+        ),
         (
             "displayname",
             format!("<D:displayname>{}</D:displayname>", esc(name)),
@@ -378,7 +385,10 @@ fn props_for(
         ),
         (
             "getcontenttype",
-            format!("<D:getcontenttype>{}</D:getcontenttype>", content_type(name)),
+            format!(
+                "<D:getcontenttype>{}</D:getcontenttype>",
+                content_type(name)
+            ),
             !is_collection,
         ),
         (
@@ -442,7 +452,9 @@ fn active_lock_xml(l: &DavLock) -> String {
         l.scope,
         l.depth,
         l.owner,
-        l.expires.saturating_duration_since(Instant::now()).as_secs(),
+        l.expires
+            .saturating_duration_since(Instant::now())
+            .as_secs(),
         esc(&l.token)
     )
 }
@@ -632,8 +644,7 @@ async fn dispatch(state: AppState, dav: DavUser, target: Target, req: Request) -
     }
 }
 
-const ALLOWED: &str =
-    "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL, MOVE, COPY, LOCK, UNLOCK";
+const ALLOWED: &str = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, MKCOL, MOVE, COPY, LOCK, UNLOCK";
 
 // ---------------------------------------------------------------------------
 // PROPFIND
@@ -749,14 +760,7 @@ async fn propfind(
                 .locks
                 .covering(&lock_key(&name, &rel))
                 .map(|l| lock_for(&l, &dav.user));
-            let mut inner = response_xml(
-                Some(&name),
-                &rel,
-                &meta,
-                is_col,
-                &props,
-                lock.as_ref(),
-            );
+            let mut inner = response_xml(Some(&name), &rel, &meta, is_col, &props, lock.as_ref());
             if depth != "0" && is_col {
                 let entries = match state
                     .agent
@@ -868,7 +872,10 @@ async fn get(
             .unwrap();
     }
     let tag = etag(&meta);
-    if let Some(inm) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
+    if let Some(inm) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
         if inm.trim() == tag || inm.trim() == "*" {
             return dav_headers(Response::builder().status(StatusCode::NOT_MODIFIED))
                 .header(header::ETAG, tag)
@@ -911,7 +918,10 @@ async fn get(
             (start, meta.size - start)
         }
     };
-    let (meta, sent, stream) = match state.agent.file_get(&name, &rel, offset, len, &dav.token).await
+    let (meta, sent, stream) = match state
+        .agent
+        .file_get(&name, &rel, offset, len, &dav.token)
+        .await
     {
         Ok(v) => v,
         Err(e) => return agent_err(e),
@@ -973,7 +983,10 @@ async fn put(
         return r;
     }
     let existing = state.agent.file_stat(&name, &rel, &dav.token).await.ok();
-    if let Some(inm) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
+    if let Some(inm) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
         if inm.trim() == "*" && existing.is_some() {
             return status(StatusCode::PRECONDITION_FAILED);
         }
@@ -1131,9 +1144,12 @@ async fn delete(state: AppState, dav: DavUser, target: Target, headers: &HeaderM
         .await
     {
         Ok(_) => {
-            state
-                .audit
-                .record(&dav.user.name, "webdav_delete", &format!("{name}:{rel}"), "");
+            state.audit.record(
+                &dav.user.name,
+                "webdav_delete",
+                &format!("{name}:{rel}"),
+                "",
+            );
             status(StatusCode::NO_CONTENT)
         }
         Err(e) => agent_err(e),
@@ -1201,7 +1217,11 @@ async fn move_copy(
         .and_then(|v| v.to_str().ok())
         .map(|v| !v.eq_ignore_ascii_case("F"))
         .unwrap_or(true);
-    let dest_exists = state.agent.file_stat(&name, &drel, &dav.token).await.is_ok();
+    let dest_exists = state
+        .agent
+        .file_stat(&name, &drel, &dav.token)
+        .await
+        .is_ok();
     if dest_exists && !overwrite {
         return status(StatusCode::PRECONDITION_FAILED);
     }
@@ -1222,7 +1242,11 @@ async fn move_copy(
         Ok(_) => {
             state.audit.record(
                 &dav.user.name,
-                if is_move { "webdav_move" } else { "webdav_copy" },
+                if is_move {
+                    "webdav_move"
+                } else {
+                    "webdav_copy"
+                },
                 &format!("{name}:{rel}"),
                 &drel,
             );
@@ -1326,7 +1350,12 @@ async fn lock(
 
     // LOCK on an unmapped URL creates an empty resource, so the common
     // "lock the new file, then PUT it" flow of Explorer/Finder works.
-    if state.agent.file_stat(&name, &rel, &dav.token).await.is_err() {
+    if state
+        .agent
+        .file_stat(&name, &rel, &dav.token)
+        .await
+        .is_err()
+    {
         if rel.trim_end_matches('/').is_empty() {
             return status(StatusCode::METHOD_NOT_ALLOWED);
         }
@@ -1350,7 +1379,12 @@ async fn lock(
         holder: dav.user.name.clone(),
         // Shared locks are accepted but enforced exclusively (stricter than
         // the spec, never weaker).
-        scope: if text.contains("shared") { "shared" } else { "exclusive" }.to_string(),
+        scope: if text.contains("shared") {
+            "shared"
+        } else {
+            "exclusive"
+        }
+        .to_string(),
         expires: Instant::now() + timeout,
     };
     state.locks.put(&key, l.clone());
@@ -1391,8 +1425,11 @@ async fn unlock(state: AppState, dav: DavUser, target: Target, headers: &HeaderM
         return status(StatusCode::CONFLICT);
     }
     state.locks.remove(&key);
-    state
-        .audit
-        .record(&dav.user.name, "webdav_unlock", &format!("{name}:{rel}"), "");
+    state.audit.record(
+        &dav.user.name,
+        "webdav_unlock",
+        &format!("{name}:{rel}"),
+        "",
+    );
     status(StatusCode::NO_CONTENT)
 }

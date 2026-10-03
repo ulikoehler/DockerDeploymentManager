@@ -92,10 +92,7 @@ pub fn api_router() -> Router<AppState> {
             "/api/services/:name/backup/snapshots",
             get(services::backup_snapshots),
         )
-        .route(
-            "/api/services/:name/backup/ls",
-            get(services::backup_ls),
-        )
+        .route("/api/services/:name/backup/ls", get(services::backup_ls))
         .route(
             "/api/services/:name/backup/forget",
             post(services::backup_forget),

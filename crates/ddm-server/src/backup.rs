@@ -584,8 +584,10 @@ pub fn validate_dumps(dumps: &[StdinDump]) -> Result<()> {
 fn check_dump_piece(s: &str, what: &str) -> Result<()> {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| {
-        regex::Regex::new(r"^[A-Za-z0-9_./:@%+=,-]*(\$\{[A-Za-z_][A-Za-z0-9_]*\}[A-Za-z0-9_./:@%+=,-]*)*$")
-            .unwrap()
+        regex::Regex::new(
+            r"^[A-Za-z0-9_./:@%+=,-]*(\$\{[A-Za-z_][A-Za-z0-9_]*\}[A-Za-z0-9_./:@%+=,-]*)*$",
+        )
+        .unwrap()
     });
     if s.is_empty() || !re.is_match(s) {
         anyhow::bail!("invalid stdin_dump {what} value '{s}'");

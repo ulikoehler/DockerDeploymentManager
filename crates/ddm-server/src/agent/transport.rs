@@ -35,7 +35,9 @@ where
             if buf.len() > cap {
                 bail!("request too large");
             }
-            return Ok(Some(String::from_utf8(buf).context("request is not utf-8")?));
+            return Ok(Some(
+                String::from_utf8(buf).context("request is not utf-8")?,
+            ));
         }
         buf.extend_from_slice(chunk);
         let n = chunk.len();
@@ -47,7 +49,9 @@ where
     if buf.is_empty() {
         return Ok(None);
     }
-    Ok(Some(String::from_utf8(buf).context("request is not utf-8")?))
+    Ok(Some(
+        String::from_utf8(buf).context("request is not utf-8")?,
+    ))
 }
 
 /// Bound on the JSON request line (payload bytes are not counted against it).

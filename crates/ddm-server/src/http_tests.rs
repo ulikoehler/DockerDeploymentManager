@@ -1604,7 +1604,12 @@ async fn file_api_denies_privileged_service_files() {
     set_viewer_features(&h.app, &admin, serde_json::json!({"edit_files": true})).await;
     let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
 
-    for path in ["meta.yaml", "backup.sh", ".restic_password", "sub/meta.yaml"] {
+    for path in [
+        "meta.yaml",
+        "backup.sh",
+        ".restic_password",
+        "sub/meta.yaml",
+    ] {
         let (st, _, j) = call(
             &h.app,
             "PUT",
@@ -1675,7 +1680,11 @@ async fn file_write_to_compose_needs_edit_compose_and_policy() {
         })),
     )
     .await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "compose write without edit_compose");
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "compose write without edit_compose"
+    );
 
     set_viewer_features(
         &h.app,
@@ -1696,7 +1705,11 @@ async fn file_write_to_compose_needs_edit_compose_and_policy() {
         })),
     )
     .await;
-    assert_eq!(st, StatusCode::BAD_REQUEST, "privileged compose via file API");
+    assert_eq!(
+        st,
+        StatusCode::BAD_REQUEST,
+        "privileged compose via file API"
+    );
     // a clean compose is fine
     let (st, _, j) = call(
         &h.app,
@@ -1732,7 +1745,12 @@ async fn file_write_to_compose_needs_edit_compose_and_policy() {
 async fn monitoring_exec_actions_require_admin() {
     let h = harness().await;
     let (_, admin) = login(&h.app, "admin", PASSWORD).await;
-    set_viewer_features(&h.app, &admin, serde_json::json!({"manage_monitoring": true})).await;
+    set_viewer_features(
+        &h.app,
+        &admin,
+        serde_json::json!({"manage_monitoring": true}),
+    )
+    .await;
     let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
 
     let exec_cfg = serde_json::json!({
@@ -1751,7 +1769,11 @@ async fn monitoring_exec_actions_require_admin() {
         Some(exec_cfg.clone()),
     )
     .await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "non-admin configured exec_command");
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "non-admin configured exec_command"
+    );
 
     // admin may configure it
     let (st, _, j) = call(
@@ -1779,7 +1801,11 @@ async fn monitoring_exec_actions_require_admin() {
         })),
     )
     .await;
-    assert_eq!(st, StatusCode::BAD_REQUEST, "role-gated exec target accepted");
+    assert_eq!(
+        st,
+        StatusCode::BAD_REQUEST,
+        "role-gated exec target accepted"
+    );
 
     // and out-of-range indices are rejected
     let (st, _, _) = call(
@@ -1908,12 +1934,18 @@ fn ws_origin_gate_rejects_cross_origin() {
     // cross-origin browser handshake → rejected
     assert!(!ws_origin_ok(
         &allowed,
-        &hdr(&[("origin", "http://evil.example"), ("host", "localhost:8080")])
+        &hdr(&[
+            ("origin", "http://evil.example"),
+            ("host", "localhost:8080")
+        ])
     ));
     // same-origin → allowed
     assert!(ws_origin_ok(
         &allowed,
-        &hdr(&[("origin", "http://localhost:8080"), ("host", "localhost:8080")])
+        &hdr(&[
+            ("origin", "http://localhost:8080"),
+            ("host", "localhost:8080")
+        ])
     ));
     // explicitly allowlisted origin → allowed
     assert!(ws_origin_ok(
@@ -1938,7 +1970,10 @@ fn ws_origin_gate_rejects_cross_origin() {
     // a different port is a different origin
     assert!(!ws_origin_ok(
         &allowed,
-        &hdr(&[("origin", "http://localhost:9999"), ("host", "localhost:8080")])
+        &hdr(&[
+            ("origin", "http://localhost:9999"),
+            ("host", "localhost:8080")
+        ])
     ));
 }
 
@@ -1961,7 +1996,12 @@ async fn agent_enforces_authorization_on_remote_transport() {
         })),
     )
     .await;
-    let scoped = j.pointer("/data/token").unwrap().as_str().unwrap().to_string();
+    let scoped = j
+        .pointer("/data/token")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // scoped token: svc_a ok, svc_b denied — directly against the agent
     let ok = h
@@ -2326,7 +2366,12 @@ async fn scoped_token_denies_svc_b_everywhere() {
         })),
     )
     .await;
-    let scoped = j.pointer("/data/token").unwrap().as_str().unwrap().to_string();
+    let scoped = j
+        .pointer("/data/token")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
     let deny = |st: StatusCode, what: &str| {
         assert!(
             st == StatusCode::FORBIDDEN || st == StatusCode::NOT_FOUND,
@@ -2336,56 +2381,135 @@ async fn scoped_token_denies_svc_b_everywhere() {
     // reads
     let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b", Some(&scoped), None).await;
     deny(st, "GET svc_b detail");
-    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/compose", Some(&scoped), None).await;
+    let (st, _, _) = call(
+        &h.app,
+        "GET",
+        "/api/services/svc_b/compose",
+        Some(&scoped),
+        None,
+    )
+    .await;
     deny(st, "GET svc_b compose");
-    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/unit", Some(&scoped), None).await;
+    let (st, _, _) = call(
+        &h.app,
+        "GET",
+        "/api/services/svc_b/unit",
+        Some(&scoped),
+        None,
+    )
+    .await;
     deny(st, "GET svc_b unit");
-    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/unit/check", Some(&scoped), None).await;
+    let (st, _, _) = call(
+        &h.app,
+        "GET",
+        "/api/services/svc_b/unit/check",
+        Some(&scoped),
+        None,
+    )
+    .await;
     deny(st, "GET svc_b unit check");
-    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/logs", Some(&scoped), None).await;
+    let (st, _, _) = call(
+        &h.app,
+        "GET",
+        "/api/services/svc_b/logs",
+        Some(&scoped),
+        None,
+    )
+    .await;
     deny(st, "GET svc_b logs");
-    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/files", Some(&scoped), None).await;
+    let (st, _, _) = call(
+        &h.app,
+        "GET",
+        "/api/services/svc_b/files",
+        Some(&scoped),
+        None,
+    )
+    .await;
     deny(st, "GET svc_b files");
-    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/git/repos", Some(&scoped), None).await;
+    let (st, _, _) = call(
+        &h.app,
+        "GET",
+        "/api/services/svc_b/git/repos",
+        Some(&scoped),
+        None,
+    )
+    .await;
     deny(st, "GET svc_b git repos");
-    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/backup", Some(&scoped), None).await;
+    let (st, _, _) = call(
+        &h.app,
+        "GET",
+        "/api/services/svc_b/backup",
+        Some(&scoped),
+        None,
+    )
+    .await;
     deny(st, "GET svc_b backup");
-    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/monitoring", Some(&scoped), None).await;
+    let (st, _, _) = call(
+        &h.app,
+        "GET",
+        "/api/services/svc_b/monitoring",
+        Some(&scoped),
+        None,
+    )
+    .await;
     deny(st, "GET svc_b monitoring");
     // actions / exec
     let (st, _, _) = call(
-        &h.app, "POST", "/api/services/svc_b/actions", Some(&scoped),
+        &h.app,
+        "POST",
+        "/api/services/svc_b/actions",
+        Some(&scoped),
         Some(serde_json::json!({"action": "restart"})),
-    ).await;
+    )
+    .await;
     deny(st, "svc_b action");
-    let (st, _, _) = call(
-        &h.app, "DELETE", "/api/services/svc_b", Some(&scoped), None,
-    ).await;
+    let (st, _, _) = call(&h.app, "DELETE", "/api/services/svc_b", Some(&scoped), None).await;
     deny(st, "DELETE svc_b");
     // writes
     let (st, _, _) = call(
-        &h.app, "PUT", "/api/services/svc_b/compose", Some(&scoped),
+        &h.app,
+        "PUT",
+        "/api/services/svc_b/compose",
+        Some(&scoped),
         Some(serde_json::json!({"content": "services:\n  x:\n    image: alpine\n"})),
-    ).await;
+    )
+    .await;
     deny(st, "PUT svc_b compose");
     let (st, _, _) = call(
-        &h.app, "PUT", "/api/services/svc_b/unit", Some(&scoped),
+        &h.app,
+        "PUT",
+        "/api/services/svc_b/unit",
+        Some(&scoped),
         Some(serde_json::json!({"content": "[Service]\nExecStart=/bin/true\n"})),
-    ).await;
+    )
+    .await;
     deny(st, "PUT svc_b unit");
     let (st, _, _) = call(
-        &h.app, "PUT", "/api/services/svc_b/files", Some(&scoped),
+        &h.app,
+        "PUT",
+        "/api/services/svc_b/files",
+        Some(&scoped),
         Some(serde_json::json!({"path": "evil.txt", "content": "x"})),
-    ).await;
+    )
+    .await;
     deny(st, "PUT svc_b file");
     let (st, _, _) = call(
-        &h.app, "DELETE", "/api/services/svc_b/files?path=docker-compose.yml", Some(&scoped), None,
-    ).await;
+        &h.app,
+        "DELETE",
+        "/api/services/svc_b/files?path=docker-compose.yml",
+        Some(&scoped),
+        None,
+    )
+    .await;
     deny(st, "DELETE svc_b file");
     let (st, _, _) = call(
-        &h.app, "POST", "/api/services/svc_b/git/clone", Some(&scoped),
+        &h.app,
+        "POST",
+        "/api/services/svc_b/git/clone",
+        Some(&scoped),
         Some(serde_json::json!({"url": "https://example.com/r.git", "path": "repo"})),
-    ).await;
+    )
+    .await;
     deny(st, "svc_b git clone");
     let (st, _, _) = call(
         &h.app, "PUT", "/api/services/svc_b/backup", Some(&scoped),
@@ -2393,13 +2517,22 @@ async fn scoped_token_denies_svc_b_everywhere() {
     ).await;
     deny(st, "PUT svc_b backup cfg");
     let (st, _, _) = call(
-        &h.app, "POST", "/api/services/svc_b/backup/run", Some(&scoped), None,
-    ).await;
+        &h.app,
+        "POST",
+        "/api/services/svc_b/backup/run",
+        Some(&scoped),
+        None,
+    )
+    .await;
     deny(st, "svc_b backup run");
     let (st, _, _) = call(
-        &h.app, "PUT", "/api/services/svc_b/monitoring", Some(&scoped),
+        &h.app,
+        "PUT",
+        "/api/services/svc_b/monitoring",
+        Some(&scoped),
         Some(serde_json::json!({"enabled": false})),
-    ).await;
+    )
+    .await;
     deny(st, "PUT svc_b monitoring");
 }
 
@@ -2417,14 +2550,23 @@ async fn services_only_scope_must_not_stay_admin() {
         Some(serde_json::json!({"services": ["svc_a"]})),
     )
     .await;
-    let scoped = j.pointer("/data/token").unwrap().as_str().unwrap().to_string();
+    let scoped = j
+        .pointer("/data/token")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
     // service list must be narrowed...
     let (st, _, j) = call(&h.app, "GET", "/api/services", Some(&scoped), None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(service_names(&j), vec!["svc_a"], "services scope ignored");
     // ...and svc_b endpoints must be denied
     let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b", Some(&scoped), None).await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "scoped token reached svc_b: {st}");
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "scoped token reached svc_b: {st}"
+    );
     // admin-only surface must also be gone (scope narrows, never widens)
     let (st, _, _) = call(&h.app, "GET", "/api/users", Some(&scoped), None).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "scoped token still admin: {st}");
@@ -2435,11 +2577,10 @@ async fn services_only_scope_must_not_stay_admin() {
 // ---------------------------------------------------------------------------
 
 fn seed_exec_containers(h: &Harness) {
-    h.docker
-        .projects
-        .lock()
-        .unwrap()
-        .extend([("c1".to_string(), "svc_a".to_string()), ("c2".to_string(), "svc_b".to_string())]);
+    h.docker.projects.lock().unwrap().extend([
+        ("c1".to_string(), "svc_a".to_string()),
+        ("c2".to_string(), "svc_b".to_string()),
+    ]);
     let mut cs = h.docker.containers.lock().unwrap();
     cs.push(docker::ContainerInfo {
         id: "c1".into(),
@@ -2585,10 +2726,17 @@ async fn container_exec_agent_side_label_check() {
         "POST",
         "/api/auth/token",
         Some(&admin),
-        Some(serde_json::json!({"services": ["svc_a"], "actions": ["operator", "exec_containers"]})),
+        Some(
+            serde_json::json!({"services": ["svc_a"], "actions": ["operator", "exec_containers"]}),
+        ),
     )
     .await;
-    let scoped = j.pointer("/data/token").unwrap().as_str().unwrap().to_string();
+    let scoped = j
+        .pointer("/data/token")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
     let exec = h.state.exec.clone();
     let mk = |id: &str| crate::agent::proto::ExecVerb::ContainerExec {
         container: id.to_string(),
@@ -2638,9 +2786,18 @@ async fn container_exec_agent_side_label_check() {
     // The agent's own justification log records the authoritative argv and
     // the resolved project (the exec title alone comes from the server).
     let log = std::fs::read_to_string(h._dir.path().join("justification.log")).unwrap();
-    assert!(log.contains("container_exec"), "no container_exec entry: {log}");
-    assert!(log.contains("project: svc_a"), "project not recorded: {log}");
-    assert!(log.contains("unmanaged"), "unmanaged exec not recorded: {log}");
+    assert!(
+        log.contains("container_exec"),
+        "no container_exec entry: {log}"
+    );
+    assert!(
+        log.contains("project: svc_a"),
+        "project not recorded: {log}"
+    );
+    assert!(
+        log.contains("unmanaged"),
+        "unmanaged exec not recorded: {log}"
+    );
     assert!(log.contains("id"), "argv not recorded: {log}");
 }
 
@@ -2663,7 +2820,14 @@ async fn put_file(h: &Harness, token: &str, service: &str, path: &str, body: &[u
     assert_eq!(meta.size, body.len() as u64);
 }
 
-async fn get_file(h: &Harness, token: &str, service: &str, path: &str, off: u64, len: u64) -> (u64, Vec<u8>) {
+async fn get_file(
+    h: &Harness,
+    token: &str,
+    service: &str,
+    path: &str,
+    off: u64,
+    len: u64,
+) -> (u64, Vec<u8>) {
     let (meta, sent, mut s) = h
         .state
         .agent
@@ -2671,7 +2835,9 @@ async fn get_file(h: &Harness, token: &str, service: &str, path: &str, off: u64,
         .await
         .unwrap();
     let mut got = vec![];
-    tokio::io::AsyncReadExt::read_to_end(&mut s, &mut got).await.unwrap();
+    tokio::io::AsyncReadExt::read_to_end(&mut s, &mut got)
+        .await
+        .unwrap();
     assert_eq!(got.len() as u64, sent);
     (meta.size, got)
 }
@@ -2714,14 +2880,28 @@ async fn file_stream_roundtrip_local_and_remote() {
             "truncated upload accepted (remote={remote})"
         );
         assert!(
-            h.state.agent.file_stat("svc_a", "data/short.bin", &admin).await.is_err(),
+            h.state
+                .agent
+                .file_stat("svc_a", "data/short.bin", &admin)
+                .await
+                .is_err(),
             "truncated upload left a file behind (remote={remote})"
         );
 
         // denied / escaping targets are refused before any body is accepted
-        for bad in ["meta.yaml", "backup.sh", ".restic_password", ".git/config", "../escape"] {
+        for bad in [
+            "meta.yaml",
+            "backup.sh",
+            ".restic_password",
+            ".git/config",
+            "../escape",
+        ] {
             assert!(
-                h.state.agent.file_put("svc_a", bad, 3, &admin).await.is_err(),
+                h.state
+                    .agent
+                    .file_put("svc_a", bad, 3, &admin)
+                    .await
+                    .is_err(),
                 "{bad} was accepted (remote={remote})"
             );
         }
@@ -2729,14 +2909,22 @@ async fn file_stream_roundtrip_local_and_remote() {
         // the agent re-checks the feature, not just the server
         let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
         assert!(
-            h.state.agent.file_put("svc_a", "x.bin", 1, &viewer).await.is_err(),
+            h.state
+                .agent
+                .file_put("svc_a", "x.bin", 1, &viewer)
+                .await
+                .is_err(),
             "viewer without edit_files could upload (remote={remote})"
         );
 
         // oversized uploads are refused at authorize time
         let big = h.state.config.get().await.webdav.max_upload_bytes + 1;
         assert!(
-            h.state.agent.file_put("svc_a", "x.bin", big, &admin).await.is_err(),
+            h.state
+                .agent
+                .file_put("svc_a", "x.bin", big, &admin)
+                .await
+                .is_err(),
             "oversized upload accepted (remote={remote})"
         );
     }
@@ -2762,7 +2950,9 @@ async fn dav_raw(
     if let Some(t) = token {
         b = b.header("authorization", format!("Bearer {t}"));
     }
-    let has_cl = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-length"));
+    let has_cl = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-length"));
     for (k, v) in headers {
         b = b.header(*k, *v);
     }
@@ -2778,7 +2968,9 @@ async fn dav_raw(
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     let hdrs = resp.headers().clone();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
     (status, hdrs, bytes.to_vec())
 }
 
@@ -2794,11 +2986,7 @@ async fn dav(
     (st, hdrs, String::from_utf8_lossy(&bytes).to_string())
 }
 
-async fn grant_features(
-    h: &Harness,
-    name: &str,
-    f: impl FnOnce(&mut crate::users::UserFeatures),
-) {
+async fn grant_features(h: &Harness, name: &str, f: impl FnOnce(&mut crate::users::UserFeatures)) {
     let name = name.to_string();
     h.state
         .users
@@ -2863,7 +3051,12 @@ async fn webdav_gate_auth_and_listing() {
     let (st, hdrs, _) = dav(&h.app, "OPTIONS", "/dav", Some(&admin), &[], None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(hdrs.get("dav").unwrap(), "1, 2");
-    assert!(hdrs.get("allow").unwrap().to_str().unwrap().contains("PROPFIND"));
+    assert!(hdrs
+        .get("allow")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("PROPFIND"));
 
     // The protocol itself needs `mount_files`.
     let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
@@ -2914,9 +3107,20 @@ async fn webdav_gate_auth_and_listing() {
 
     // Unknown / malformed services do not leak existence.
     for uri in ["/dav/nosuch/", "/dav/UPPER/", "/dav/svc_a/../../etc"] {
-        let (st, _, _) = dav(&h.app, "PROPFIND", uri, Some(&admin), &[("depth", "0")], None).await;
+        let (st, _, _) = dav(
+            &h.app,
+            "PROPFIND",
+            uri,
+            Some(&admin),
+            &[("depth", "0")],
+            None,
+        )
+        .await;
         assert!(
-            matches!(st, StatusCode::NOT_FOUND | StatusCode::FORBIDDEN | StatusCode::BAD_REQUEST),
+            matches!(
+                st,
+                StatusCode::NOT_FOUND | StatusCode::FORBIDDEN | StatusCode::BAD_REQUEST
+            ),
             "{uri} → {st}"
         );
     }
@@ -2935,12 +3139,36 @@ async fn webdav_gate_auth_and_listing() {
         Some(serde_json::json!({"services": ["svc_a"], "actions": ["operator", "mount_files", "edit_files"]})),
     )
     .await;
-    let scoped = j.pointer("/data/token").unwrap().as_str().unwrap().to_string();
-    let (st, _, body) = dav(&h.app, "PROPFIND", "/dav/", Some(&scoped), &[("depth", "1")], None).await;
+    let scoped = j
+        .pointer("/data/token")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (st, _, body) = dav(
+        &h.app,
+        "PROPFIND",
+        "/dav/",
+        Some(&scoped),
+        &[("depth", "1")],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::MULTI_STATUS, "{body}");
     assert!(body.contains("/dav/svc_a/"), "{body}");
-    assert!(!body.contains("/dav/svc_b/"), "scoped token saw svc_b: {body}");
-    let (st, _, _) = dav(&h.app, "PROPFIND", "/dav/svc_b/", Some(&scoped), &[("depth", "0")], None).await;
+    assert!(
+        !body.contains("/dav/svc_b/"),
+        "scoped token saw svc_b: {body}"
+    );
+    let (st, _, _) = dav(
+        &h.app,
+        "PROPFIND",
+        "/dav/svc_b/",
+        Some(&scoped),
+        &[("depth", "0")],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
     let (st, _, _) = dav(
         &h.app,
@@ -2970,14 +3198,30 @@ async fn webdav_methods_and_ranges() {
     .await;
     assert_eq!(st, StatusCode::CREATED);
 
-    let (st, hdrs, body) = dav(&h.app, "GET", "/dav/svc_a/notes.txt", Some(&admin), &[], None).await;
+    let (st, hdrs, body) = dav(
+        &h.app,
+        "GET",
+        "/dav/svc_a/notes.txt",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body, "hello world");
     let tag = hdrs.get("etag").unwrap().to_str().unwrap().to_string();
     assert!(hdrs.get("last-modified").is_some());
     assert_eq!(hdrs.get("accept-ranges").unwrap(), "bytes");
 
-    let (st, hdrs, body) = dav(&h.app, "HEAD", "/dav/svc_a/notes.txt", Some(&admin), &[], None).await;
+    let (st, hdrs, body) = dav(
+        &h.app,
+        "HEAD",
+        "/dav/svc_a/notes.txt",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(hdrs.get("content-length").unwrap(), "11");
     assert!(body.is_empty());
@@ -3077,7 +3321,15 @@ async fn webdav_methods_and_ranges() {
     assert_eq!(st, StatusCode::CREATED);
     let (st, _, _) = dav(&h.app, "MKCOL", "/dav/svc_a/sub", Some(&admin), &[], None).await;
     assert_eq!(st, StatusCode::METHOD_NOT_ALLOWED);
-    let (st, _, _) = dav(&h.app, "MKCOL", "/dav/svc_a/missing/deep", Some(&admin), &[], None).await;
+    let (st, _, _) = dav(
+        &h.app,
+        "MKCOL",
+        "/dav/svc_a/missing/deep",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT, "MKCOL with a missing parent");
     let blob: Vec<u8> = (0u8..=255).collect();
     let (st, _, _) = dav(
@@ -3090,7 +3342,15 @@ async fn webdav_methods_and_ranges() {
     )
     .await;
     assert_eq!(st, StatusCode::CREATED);
-    let (_, _, got) = dav_raw(&h.app, "GET", "/dav/svc_a/sub/a.bin", Some(&admin), &[], None).await;
+    let (_, _, got) = dav_raw(
+        &h.app,
+        "GET",
+        "/dav/svc_a/sub/a.bin",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(got, blob, "binary round-trip mangled");
     let (st, _, body) = dav(
         &h.app,
@@ -3116,7 +3376,15 @@ async fn webdav_methods_and_ranges() {
     )
     .await;
     assert_eq!(st, StatusCode::CREATED);
-    let (st, _, _) = dav(&h.app, "GET", "/dav/svc_a/sub/a.bin", Some(&admin), &[], None).await;
+    let (st, _, _) = dav(
+        &h.app,
+        "GET",
+        "/dav/svc_a/sub/a.bin",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
     let (st, _, _) = dav(
         &h.app,
@@ -3128,7 +3396,15 @@ async fn webdav_methods_and_ranges() {
     )
     .await;
     assert_eq!(st, StatusCode::CREATED);
-    let (st, _, _) = dav(&h.app, "GET", "/dav/svc_a/sub/c.bin", Some(&admin), &[], None).await;
+    let (st, _, _) = dav(
+        &h.app,
+        "GET",
+        "/dav/svc_a/sub/c.bin",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     let (st, _, _) = dav(
         &h.app,
@@ -3179,7 +3455,15 @@ async fn webdav_methods_and_ranges() {
     // DELETE (recursive), then it is gone.
     let (st, _, _) = dav(&h.app, "DELETE", "/dav/svc_a/sub", Some(&admin), &[], None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
-    let (st, _, _) = dav(&h.app, "PROPFIND", "/dav/svc_a/sub/", Some(&admin), &[("depth", "0")], None).await;
+    let (st, _, _) = dav(
+        &h.app,
+        "PROPFIND",
+        "/dav/svc_a/sub/",
+        Some(&admin),
+        &[("depth", "0")],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 
     // Collections are not downloadable; the service root is not deletable.
@@ -3199,11 +3483,27 @@ async fn webdav_methods_and_ranges() {
     )
     .await;
     assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE);
-    let (st, _, _) = dav(&h.app, "PUT", "/dav/svc_a/nolen.bin", Some(&admin), &[("transfer-encoding", "chunked")], None).await;
+    let (st, _, _) = dav(
+        &h.app,
+        "PUT",
+        "/dav/svc_a/nolen.bin",
+        Some(&admin),
+        &[("transfer-encoding", "chunked")],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::LENGTH_REQUIRED);
 
     // PROPPATCH is not supported.
-    let (st, _, _) = dav(&h.app, "PROPPATCH", "/dav/svc_a/notes.txt", Some(&admin), &[], None).await;
+    let (st, _, _) = dav(
+        &h.app,
+        "PROPPATCH",
+        "/dav/svc_a/notes.txt",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
 }
 
@@ -3217,15 +3517,38 @@ async fn webdav_matches_json_file_api_policy() {
     // Read-only mount: mount_files without edit_files.
     grant_features(&h, "viewer", |f| f.mount_files = true).await;
     let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
-    let (st, _, _) = dav(&h.app, "GET", "/dav/svc_a/docker-compose.yml", Some(&viewer), &[], None).await;
+    let (st, _, _) = dav(
+        &h.app,
+        "GET",
+        "/dav/svc_a/docker-compose.yml",
+        Some(&viewer),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     for (method, uri, headers, body) in [
         ("PUT", "/dav/svc_a/x.txt", vec![], Some(b"x".to_vec())),
         ("MKCOL", "/dav/svc_a/newdir", vec![], None),
         ("DELETE", "/dav/svc_a/docker-compose.yml", vec![], None),
-        ("MOVE", "/dav/svc_a/docker-compose.yml", vec![("destination", "/dav/svc_a/other.yml")], None),
-        ("COPY", "/dav/svc_a/docker-compose.yml", vec![("destination", "/dav/svc_a/other.yml")], None),
-        ("LOCK", "/dav/svc_a/x.txt", vec![], Some(LOCK_BODY.as_bytes().to_vec())),
+        (
+            "MOVE",
+            "/dav/svc_a/docker-compose.yml",
+            vec![("destination", "/dav/svc_a/other.yml")],
+            None,
+        ),
+        (
+            "COPY",
+            "/dav/svc_a/docker-compose.yml",
+            vec![("destination", "/dav/svc_a/other.yml")],
+            None,
+        ),
+        (
+            "LOCK",
+            "/dav/svc_a/x.txt",
+            vec![],
+            Some(LOCK_BODY.as_bytes().to_vec()),
+        ),
     ] {
         let (st, _, _) = dav(&h.app, method, uri, Some(&viewer), &headers, body).await;
         assert_eq!(st, StatusCode::FORBIDDEN, "{method} {uri} → {st}");
@@ -3246,7 +3569,11 @@ async fn webdav_matches_json_file_api_policy() {
             ("DELETE", vec![], None),
             ("PROPFIND", vec![("depth", "0")], None),
             ("MOVE", vec![("destination", "/dav/svc_a/moved.yaml")], None),
-            ("COPY", vec![("destination", "/dav/svc_a/copied.yaml")], None),
+            (
+                "COPY",
+                vec![("destination", "/dav/svc_a/copied.yaml")],
+                None,
+            ),
         ] {
             let (st, _, _) = dav(&h.app, method, &uri, Some(&admin), &headers, body).await;
             assert!(
@@ -3264,7 +3591,10 @@ async fn webdav_matches_json_file_api_policy() {
             None,
         )
         .await;
-        assert!(st == StatusCode::FORBIDDEN || st == StatusCode::NOT_FOUND, "COPY onto {p} → {st}");
+        assert!(
+            st == StatusCode::FORBIDDEN || st == StatusCode::NOT_FOUND,
+            "COPY onto {p} → {st}"
+        );
     }
 
     // Traversal, encoded traversal, and the service root.
@@ -3275,7 +3605,9 @@ async fn webdav_matches_json_file_api_policy() {
     ] {
         let (st, _, _) = dav(&h.app, "PUT", uri, Some(&admin), &[], Some(b"x".to_vec())).await;
         assert!(
-            st == StatusCode::FORBIDDEN || st == StatusCode::NOT_FOUND || st == StatusCode::BAD_REQUEST,
+            st == StatusCode::FORBIDDEN
+                || st == StatusCode::NOT_FOUND
+                || st == StatusCode::BAD_REQUEST,
             "{uri} → {st}"
         );
     }
@@ -3294,7 +3626,11 @@ async fn webdav_matches_json_file_api_policy() {
         Some(b"services:\n  app:\n    image: alpine\n".to_vec()),
     )
     .await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "edit_files alone edited the compose file");
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "edit_files alone edited the compose file"
+    );
 
     let privileged = b"services:\n  app:\n    image: alpine\n    privileged: true\n".to_vec();
     let (st, _, _) = dav(
@@ -3306,7 +3642,11 @@ async fn webdav_matches_json_file_api_policy() {
         Some(privileged.clone()),
     )
     .await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "privileged compose accepted over WebDAV");
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "privileged compose accepted over WebDAV"
+    );
     // ...the JSON API refuses the very same body (no drift between paths).
     let (st, _, _) = call(
         &h.app,
@@ -3371,8 +3711,16 @@ async fn webdav_locks() {
     .await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert!(body.contains("activelock"), "{body}");
-    assert!(body.contains("mailto:ops@example.com"), "owner not echoed: {body}");
-    let raw = hdrs.get("lock-token").unwrap().to_str().unwrap().to_string();
+    assert!(
+        body.contains("mailto:ops@example.com"),
+        "owner not echoed: {body}"
+    );
+    let raw = hdrs
+        .get("lock-token")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let token = raw.trim_matches(|c| c == '<' || c == '>').to_string();
     assert!(token.starts_with("opaquelocktoken:"), "{token}");
 
@@ -3387,7 +3735,15 @@ async fn webdav_locks() {
     )
     .await;
     assert_eq!(st, StatusCode::LOCKED);
-    let (st, _, _) = dav(&h.app, "DELETE", "/dav/svc_a/locked.txt", Some(&admin), &[], None).await;
+    let (st, _, _) = dav(
+        &h.app,
+        "DELETE",
+        "/dav/svc_a/locked.txt",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::LOCKED);
     // With the token it proceeds.
     let if_header = format!("(<{token}>)");
@@ -3412,8 +3768,19 @@ async fn webdav_locks() {
         None,
     )
     .await;
-    assert!(body.contains("lockdiscovery") && body.contains(&token), "{body}");
-    let (st, _, _) = dav(&h.app, "UNLOCK", "/dav/svc_a/locked.txt", Some(&admin), &[], None).await;
+    assert!(
+        body.contains("lockdiscovery") && body.contains(&token),
+        "{body}"
+    );
+    let (st, _, _) = dav(
+        &h.app,
+        "UNLOCK",
+        "/dav/svc_a/locked.txt",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT);
     let (st, _, _) = dav(
         &h.app,
@@ -3463,7 +3830,11 @@ async fn webdav_locks() {
         Some(b"x".to_vec()),
     )
     .await;
-    assert_eq!(st, StatusCode::LOCKED, "collection lock did not cover a child");
+    assert_eq!(
+        st,
+        StatusCode::LOCKED,
+        "collection lock did not cover a child"
+    );
     let (st, _, _) = dav(
         &h.app,
         "UNLOCK",
@@ -3486,7 +3857,15 @@ async fn webdav_locks() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    let (st, _, _) = dav(&h.app, "GET", "/dav/svc_a/fresh.txt", Some(&admin), &[], None).await;
+    let (st, _, _) = dav(
+        &h.app,
+        "GET",
+        "/dav/svc_a/fresh.txt",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
 
     // Locking needs write rights — otherwise a reader could block writers.
@@ -3521,7 +3900,15 @@ async fn webdav_works_over_the_privileged_socket() {
     )
     .await;
     assert_eq!(st, StatusCode::CREATED);
-    let (st, hdrs, got) = dav_raw(&h.app, "GET", "/dav/svc_a/remote.bin", Some(&admin), &[], None).await;
+    let (st, hdrs, got) = dav_raw(
+        &h.app,
+        "GET",
+        "/dav/svc_a/remote.bin",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(got, blob);
     assert_eq!(hdrs.get("content-length").unwrap(), "4096");
@@ -3536,7 +3923,15 @@ async fn webdav_works_over_the_privileged_socket() {
     .await;
     assert_eq!(st, StatusCode::PARTIAL_CONTENT);
     assert_eq!(body.len(), 10);
-    let (st, _, _) = dav(&h.app, "DELETE", "/dav/svc_a/remote.bin", Some(&admin), &[], None).await;
+    let (st, _, _) = dav(
+        &h.app,
+        "DELETE",
+        "/dav/svc_a/remote.bin",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::NO_CONTENT);
 }
 
@@ -3565,14 +3960,38 @@ async fn symlink_alias_cannot_reach_denied_files() {
         Some(b"pwned: true\n".to_vec()),
     )
     .await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "WebDAV wrote through a symlink alias");
-    let (st, _, _) = dav(&h.app, "GET", "/dav/svc_a/alias.yaml", Some(&admin), &[], None).await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "WebDAV wrote through a symlink alias"
+    );
+    let (st, _, _) = dav(
+        &h.app,
+        "GET",
+        "/dav/svc_a/alias.yaml",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
     assert!(
         st == StatusCode::FORBIDDEN || st == StatusCode::NOT_FOUND,
         "WebDAV read through a symlink alias: {st}"
     );
-    let (st, _, _) = dav(&h.app, "DELETE", "/dav/svc_a/alias.yaml", Some(&admin), &[], None).await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "WebDAV deleted through a symlink alias");
+    let (st, _, _) = dav(
+        &h.app,
+        "DELETE",
+        "/dav/svc_a/alias.yaml",
+        Some(&admin),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "WebDAV deleted through a symlink alias"
+    );
     let (st, _, _) = dav(
         &h.app,
         "COPY",
@@ -3582,9 +4001,25 @@ async fn symlink_alias_cannot_reach_denied_files() {
         None,
     )
     .await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "WebDAV copied onto a symlink alias");
-    let (st, _, _) = dav(&h.app, "PROPFIND", "/dav/svc_a/gitdir/", Some(&admin), &[("depth", "1")], None).await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "WebDAV listed through a symlinked .git");
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "WebDAV copied onto a symlink alias"
+    );
+    let (st, _, _) = dav(
+        &h.app,
+        "PROPFIND",
+        "/dav/svc_a/gitdir/",
+        Some(&admin),
+        &[("depth", "1")],
+        None,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "WebDAV listed through a symlinked .git"
+    );
 
     // The JSON file API must refuse the very same paths. (It reports
     // agent-side denials as 400 by convention; WebDAV uses 403.)
@@ -3630,5 +4065,8 @@ async fn symlink_alias_cannot_reach_denied_files() {
 
     // ...and the protected file is untouched.
     let meta = std::fs::read_to_string(dir.join("meta.yaml")).unwrap();
-    assert!(meta.contains("enabled: false"), "meta.yaml was overwritten: {meta}");
+    assert!(
+        meta.contains("enabled: false"),
+        "meta.yaml was overwritten: {meta}"
+    );
 }

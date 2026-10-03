@@ -23,17 +23,11 @@ fn require_edit_files(user: &AuthUser) -> Result<(), Response> {
 /// compose file — which the file API must not let a user rewrite (or
 /// remove) without the compose gates.
 fn is_compose_path(svc: &crate::services::Service, path: &str, compose_file: &str) -> bool {
-    let (Ok(abs), Ok(root)) = (
-        files::resolve(&svc.dir, path),
-        svc.dir.canonicalize(),
-    ) else {
+    let (Ok(abs), Ok(root)) = (files::resolve(&svc.dir, path), svc.dir.canonicalize()) else {
         return false;
     };
     abs.parent() == Some(root.as_path())
-        && abs
-            .file_name()
-            .map(|f| f == compose_file)
-            .unwrap_or(false)
+        && abs.file_name().map(|f| f == compose_file).unwrap_or(false)
 }
 
 /// The compose file is governed by `edit_compose` + compose policy (the

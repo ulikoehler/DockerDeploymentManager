@@ -53,7 +53,9 @@ fn command_argv(v: &Value) -> Result<Vec<String>, Response> {
         Value::String(s) if !s.trim().is_empty() => {
             Ok(vec!["/bin/sh".into(), "-c".into(), s.clone()])
         }
-        _ => Err(bad_request("command must be a string or an array of strings")),
+        _ => Err(bad_request(
+            "command must be a string or an array of strings",
+        )),
     }
 }
 
@@ -89,10 +91,7 @@ pub async fn service_exec(
         .await
         .map_err(|e| bad_request(e.to_string()))?;
     let Some(c) = containers.iter().find(|c| {
-        c.id == wanted
-            || c.name == wanted
-            || c.service == wanted
-            || c.id.starts_with(wanted)
+        c.id == wanted || c.name == wanted || c.service == wanted || c.id.starts_with(wanted)
     }) else {
         return Err(bad_request("container is not part of this service"));
     };

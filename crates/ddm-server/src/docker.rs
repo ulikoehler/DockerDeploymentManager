@@ -191,9 +191,7 @@ impl DockerApi for BollardDocker {
         let started = self.docker.start_exec(&exec.id, None).await?;
         let out = match started {
             StartExecResults::Attached { output, .. } => output,
-            StartExecResults::Detached => {
-                return Ok((Box::pin(futures::stream::empty()), exec.id))
-            }
+            StartExecResults::Detached => return Ok((Box::pin(futures::stream::empty()), exec.id)),
         };
         let stream = out.filter_map(|item| async move {
             use bollard::container::LogOutput;

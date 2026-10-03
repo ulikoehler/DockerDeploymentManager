@@ -272,7 +272,7 @@ impl TicketStore {
 
 /// `?ticket=` on `/ws/*`: redeem a single-use ticket into its session
 /// token. Tickets only exist where `?token=` is already accepted.
-fn ticket_token<'a>(parts: &'a Parts, state: &crate::AppState) -> Option<String> {
+fn ticket_token(parts: &Parts, state: &crate::AppState) -> Option<String> {
     if !parts.uri.path().starts_with("/ws/") {
         return None;
     }

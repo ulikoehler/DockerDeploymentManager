@@ -137,17 +137,19 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
 
     if !cors_origins.is_empty() {
         use tower_http::cors::{AllowOrigin, CorsLayer};
-        let origins: Vec<axum::http::HeaderValue> = cors_origins
-            .iter()
-            .filter_map(|o| o.parse().ok())
-            .collect();
+        let origins: Vec<axum::http::HeaderValue> =
+            cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
         if origins.len() != cors_origins.len() {
             warn!("some cors_origins entries are invalid and were ignored");
         }
-        app = app.layer(CorsLayer::new().allow_origin(AllowOrigin::list(origins)).allow_headers([
-            axum::http::header::AUTHORIZATION,
-            axum::http::header::CONTENT_TYPE,
-        ]));
+        app = app.layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                ]),
+        );
     }
 
     // optional static web UI (SPA fallback → index.html)

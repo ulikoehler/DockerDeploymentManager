@@ -378,7 +378,9 @@ pub enum AgentRequest {
     },
     /// Subscribe to monitor events — streams `EventMessage` lines.
     /// Requires a valid justification token, verified before subscribing.
-    Watch { token: String },
+    Watch {
+        token: String,
+    },
     Exec {
         verb: ExecVerb,
         /// Server-assigned execution id; frames stream back.

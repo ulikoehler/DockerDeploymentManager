@@ -433,7 +433,9 @@ fn sanitize_dir(root: &Path, dir: &Path, depth: u32) {
     if depth > 32 {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<_> = rd.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
@@ -566,7 +568,10 @@ mod tests {
         assert!(repo.join("ok.txt").exists());
         assert!(repo.join("sub/keep.txt").exists());
         assert!(!repo.join("escape").exists(), "escaping symlink kept");
-        assert!(!repo.join("sub/leak").exists(), "nested escaping symlink kept");
+        assert!(
+            !repo.join("sub/leak").exists(),
+            "nested escaping symlink kept"
+        );
         assert!(repo.join("inside").exists(), "in-tree symlink removed");
         assert!(!root.path().join("meta.yaml").exists(), "meta.yaml kept");
     }
@@ -634,8 +639,14 @@ mod security_tests {
         std::os::unix::fs::symlink("../meta.yaml", root.join("sub/up.yaml")).unwrap();
 
         for rel in ["alias.yaml", "alias.sh", "gitdir/config", "sub/up.yaml"] {
-            assert!(resolve(root, rel).is_err(), "{rel:?} resolved through an alias");
-            assert!(read_node(root, rel).is_err(), "{rel:?} readable through an alias");
+            assert!(
+                resolve(root, rel).is_err(),
+                "{rel:?} resolved through an alias"
+            );
+            assert!(
+                read_node(root, rel).is_err(),
+                "{rel:?} readable through an alias"
+            );
             assert!(
                 write_file(root, rel, "pwned").is_err(),
                 "{rel:?} writable through an alias"
@@ -645,7 +656,10 @@ mod security_tests {
         assert!(fs::read_to_string(root.join("meta.yaml"))
             .unwrap()
             .contains("enabled: false"));
-        assert_eq!(fs::read_to_string(root.join("backup.sh")).unwrap(), "#!/bin/sh\n");
+        assert_eq!(
+            fs::read_to_string(root.join("backup.sh")).unwrap(),
+            "#!/bin/sh\n"
+        );
         // An ordinary in-dir symlink still works (only denied targets are cut).
         fs::write(root.join("plain.txt"), "ok").unwrap();
         std::os::unix::fs::symlink("plain.txt", root.join("alias.txt")).unwrap();

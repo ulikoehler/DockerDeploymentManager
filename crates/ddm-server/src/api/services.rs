@@ -1151,9 +1151,7 @@ pub(crate) fn validate_monitoring_cfg(
                 // never reach a command gated by a required_role, or
                 // monitoring config becomes a role bypass.
                 if sec.required_role.is_some() || it.required_role.is_some() {
-                    return Err(
-                        "exec_command action must not target a role-gated command".into(),
-                    );
+                    return Err("exec_command action must not target a role-gated command".into());
                 }
             }
         }
