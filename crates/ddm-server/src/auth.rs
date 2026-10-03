@@ -70,6 +70,9 @@ pub fn apply_token_scope(user: &mut User, scope: &TokenScope) {
         }
     }
     if let Some(services) = &scope.services {
+        // `admin` bypasses all service-access rules — a service-scoped token
+        // must not keep it, or the scope is a silent no-op.
+        user.roles.retain(|r| r != "admin");
         // Intersection semantics: the user's explicit denies still apply,
         // then exact allows for the scoped services, then deny the rest.
         let mut rules: Vec<crate::users::AccessRule> = user

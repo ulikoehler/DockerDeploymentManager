@@ -19,6 +19,34 @@ fn require_edit_files(user: &AuthUser) -> Result<(), Response> {
     }
 }
 
+/// True when `path` (relative to the service dir) resolves to the service's
+/// compose file — which the file API must not let a user rewrite (or
+/// remove) without the compose gates.
+fn is_compose_path(svc: &crate::services::Service, path: &str, compose_file: &str) -> bool {
+    let (Ok(abs), Ok(root)) = (
+        files::resolve(&svc.dir, path),
+        svc.dir.canonicalize(),
+    ) else {
+        return false;
+    };
+    abs.parent() == Some(root.as_path())
+        && abs
+            .file_name()
+            .map(|f| f == compose_file)
+            .unwrap_or(false)
+}
+
+/// The compose file is governed by `edit_compose` + compose policy (the
+/// agent re-checks both); a raw file write must not bypass that gate.
+#[allow(clippy::result_large_err)]
+fn require_compose_write(user: &AuthUser) -> Result<(), Response> {
+    if user.user.is_admin() || user.user.features.edit_compose {
+        Ok(())
+    } else {
+        Err(forbidden())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // file tree
 // ---------------------------------------------------------------------------
@@ -64,7 +92,12 @@ pub async fn write_file(
     Json(req): Json<WriteRequest>,
 ) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
     require_edit_files(&user)?;
-    let _svc = require_service_access(&state, &user, &name).await?;
+    let svc = require_service_access(&state, &user, &name).await?;
+    let cfg = state.config.get().await;
+    if is_compose_path(&svc, &req.path, &cfg.paths.compose_file) {
+        require_compose_write(&user)?;
+    }
+    drop(cfg);
     state
         .agent
         .call(
@@ -126,7 +159,12 @@ pub async fn rename(
     Json(req): Json<RenameRequest>,
 ) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
     require_edit_files(&user)?;
-    let _svc = require_service_access(&state, &user, &name).await?;
+    let svc = require_service_access(&state, &user, &name).await?;
+    let cfg = state.config.get().await;
+    if is_compose_path(&svc, &req.to, &cfg.paths.compose_file) {
+        require_compose_write(&user)?;
+    }
+    drop(cfg);
     state
         .agent
         .call(
@@ -155,7 +193,12 @@ pub async fn delete_file(
     Query(q): Query<PathQuery>,
 ) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
     require_edit_files(&user)?;
-    let _svc = require_service_access(&state, &user, &name).await?;
+    let svc = require_service_access(&state, &user, &name).await?;
+    let cfg = state.config.get().await;
+    if is_compose_path(&svc, &q.path, &cfg.paths.compose_file) {
+        require_compose_write(&user)?;
+    }
+    drop(cfg);
     state
         .agent
         .call(

@@ -573,7 +573,16 @@ impl Monitor {
                 let item = cfg
                     .sections
                     .get(*section_index)
-                    .and_then(|s| s.items.get(*item_index))
+                    .and_then(|s| {
+                        // Auto-actions carry no caller identity — a command
+                        // gated by required_role must never fire from here.
+                        if s.required_role.is_some() {
+                            return None;
+                        }
+                        s.items
+                            .get(*item_index)
+                            .filter(|i| i.required_role.is_none())
+                    })
                     .cloned();
                 match item {
                     Some(item) => {

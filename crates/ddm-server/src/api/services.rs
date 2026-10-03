@@ -798,6 +798,9 @@ pub async fn put_backup(
             return Err(bad_request(format!("invalid backup path '{p}'")));
         }
     }
+    // stdin_dumps land in a root-run script — fail fast server-side too
+    // (the agent re-validates against the real compose services).
+    crate::backup::validate_dumps(&bcfg.stdin_dumps).map_err(|e| bad_request(e.to_string()))?;
     state
         .agent
         .call(
@@ -1020,7 +1023,13 @@ pub async fn put_monitoring(
     {
         return Err(forbidden());
     }
-    validate_monitoring_cfg(&m).map_err(bad_request)?;
+    let cfg = state.config.get().await;
+    validate_monitoring_cfg(&m, &cfg).map_err(bad_request)?;
+    // exec_command actions fire host commands with no user context —
+    // configuring them is admin-only.
+    if monitoring_has_exec_actions(&m) && !user.user.is_admin() {
+        return Err(forbidden());
+    }
     let _svc = require_service_access(&state, &user, &name).await?;
     state
         .agent
@@ -1066,9 +1075,58 @@ pub async fn monitoring_test(
     Ok(ok(serde_json::json!({ "containers": health })))
 }
 
+/// Does this monitoring config contain `exec_command` auto-actions? Those
+/// run configured command items with *no* user context inside the agent —
+/// configuring them is admin-only, enforced by the API handler and the
+/// agent-side precheck.
+pub(crate) fn monitoring_has_exec_actions(m: &ServiceMonitoringConfig) -> bool {
+    m.health
+        .iter()
+        .flat_map(|h| h.actions.iter())
+        .chain(m.log_alerts.iter().flat_map(|a| a.actions.iter()))
+        .any(|a| matches!(a, crate::config::AutoAction::ExecCommand { .. }))
+}
+
 /// Shared monitoring-config validation — enforced both in the API handler
 /// and inside the agent (a hostile server can't bypass it).
-pub(crate) fn validate_monitoring_cfg(m: &ServiceMonitoringConfig) -> Result<(), String> {
+pub(crate) fn validate_monitoring_cfg(
+    m: &ServiceMonitoringConfig,
+    cfg: &crate::config::AppConfig,
+) -> Result<(), String> {
+    let check_actions = |actions: &[crate::config::AutoAction]| -> Result<(), String> {
+        for a in actions {
+            if let crate::config::AutoAction::ExecCommand {
+                section_index,
+                item_index,
+                ..
+            } = a
+            {
+                let sec = cfg
+                    .sections
+                    .get(*section_index)
+                    .ok_or_else(|| "exec_command action: bad section index".to_string())?;
+                let it = sec
+                    .items
+                    .get(*item_index)
+                    .ok_or_else(|| "exec_command action: bad item index".to_string())?;
+                // Auto-actions run unattended with no caller — they must
+                // never reach a command gated by a required_role, or
+                // monitoring config becomes a role bypass.
+                if sec.required_role.is_some() || it.required_role.is_some() {
+                    return Err(
+                        "exec_command action must not target a role-gated command".into(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    };
+    if let Some(h) = &m.health {
+        check_actions(&h.actions)?;
+    }
+    for a in &m.log_alerts {
+        check_actions(&a.actions)?;
+    }
     for a in &m.log_alerts {
         regex::Regex::new(&a.regex).map_err(|e| format!("invalid regex: {e}"))?;
         if let Some(x) = &a.exclude_regex {

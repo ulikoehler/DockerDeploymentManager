@@ -1555,6 +1555,492 @@ async fn agent_policy_floor_cannot_be_bypassed() {
     assert!(r.is_err(), "privileged compose accepted by agent");
 }
 
+// ---------------------------------------------------------------------------
+// Remediation regressions: privileged-file writes, compose gate, monitoring
+// exec-actions, dump injection, WS origin, agent-side authorization
+// ---------------------------------------------------------------------------
+
+/// Grant the `viewer` account a feature set (admin token required).
+async fn set_viewer_features(app: &Router<()>, admin: &str, features: Value) {
+    let (st, _, j) = call(
+        app,
+        "PUT",
+        "/api/users/viewer",
+        Some(admin),
+        Some(serde_json::json!({ "features": features })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "could not set viewer features: {j}");
+}
+
+/// `edit_files` must not reach the files that cross a privilege boundary:
+/// `meta.yaml` drives monitoring/backup config, `backup.sh` runs as root and
+/// embeds repo credentials, `.restic_*` holds the repo password.
+#[tokio::test]
+async fn file_api_denies_privileged_service_files() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    set_viewer_features(&h.app, &admin, serde_json::json!({"edit_files": true})).await;
+    let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
+
+    for path in ["meta.yaml", "backup.sh", ".restic_password", "sub/meta.yaml"] {
+        let (st, _, j) = call(
+            &h.app,
+            "PUT",
+            "/api/services/svc_a/files",
+            Some(&viewer),
+            Some(serde_json::json!({"path": path, "content": "pwned"})),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "file write to {path} was accepted: {j}"
+        );
+        let (st, _, _) = call(
+            &h.app,
+            "GET",
+            &format!("/api/services/svc_a/files?path={path}"),
+            Some(&viewer),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "read of {path} was accepted");
+        let (st, _, _) = call(
+            &h.app,
+            "DELETE",
+            &format!("/api/services/svc_a/files?path={path}"),
+            Some(&viewer),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "delete of {path} was accepted");
+    }
+    // control: an ordinary file is still editable
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/services/svc_a/files",
+        Some(&viewer),
+        Some(serde_json::json!({"path": "notes.txt", "content": "hello"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    // the privileged files were never created by the writes above
+    let dir = h._dir.path().join("svc/svc_a");
+    assert!(!dir.join("meta.yaml").exists());
+    assert!(!dir.join("backup.sh").exists());
+}
+
+/// The compose file is governed by `edit_compose` + compose policy — a raw
+/// file write must not bypass either.
+#[tokio::test]
+async fn file_write_to_compose_needs_edit_compose_and_policy() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    set_viewer_features(&h.app, &admin, serde_json::json!({"edit_files": true})).await;
+    let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
+
+    let compose = "/api/services/svc_a/files";
+    // edit_files but no edit_compose → forbidden
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        compose,
+        Some(&viewer),
+        Some(serde_json::json!({
+            "path": "docker-compose.yml",
+            "content": "services:\n  app:\n    image: alpine\n"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "compose write without edit_compose");
+
+    set_viewer_features(
+        &h.app,
+        &admin,
+        serde_json::json!({"edit_files": true, "edit_compose": true}),
+    )
+    .await;
+    let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
+    // with edit_compose the compose policy still applies
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        compose,
+        Some(&viewer),
+        Some(serde_json::json!({
+            "path": "docker-compose.yml",
+            "content": "services:\n  app:\n    image: alpine\n    privileged: true\n"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "privileged compose via file API");
+    // a clean compose is fine
+    let (st, _, j) = call(
+        &h.app,
+        "PUT",
+        compose,
+        Some(&viewer),
+        Some(serde_json::json!({
+            "path": "docker-compose.yml",
+            "content": "services:\n  app:\n    image: alpine\n    command: sleep 9\n"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{j}");
+    // renaming onto the compose file would sidestep the policy check
+    let (st, _, _) = call(
+        &h.app,
+        "POST",
+        "/api/services/svc_a/files/rename",
+        Some(&viewer),
+        Some(serde_json::json!({"from": "notes.txt", "to": "docker-compose.yml"})),
+    )
+    .await;
+    assert!(
+        st == StatusCode::BAD_REQUEST || st == StatusCode::FORBIDDEN,
+        "rename onto compose accepted: {st}"
+    );
+}
+
+/// `exec_command` monitoring actions run host commands with no user context:
+/// configuring them is admin-only, indices must be valid, and the target
+/// must not be role-gated.
+#[tokio::test]
+async fn monitoring_exec_actions_require_admin() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    set_viewer_features(&h.app, &admin, serde_json::json!({"manage_monitoring": true})).await;
+    let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
+
+    let exec_cfg = serde_json::json!({
+        "health": {
+            "kind": "tcp", "target": "127.0.0.1", "port": 1,
+            "failure_threshold": 1,
+            "actions": [{"type": "exec_command", "section_index": 0, "item_index": 0}]
+        },
+        "log_alerts": []
+    });
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/services/svc_a/monitoring",
+        Some(&viewer),
+        Some(exec_cfg.clone()),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "non-admin configured exec_command");
+
+    // admin may configure it
+    let (st, _, j) = call(
+        &h.app,
+        "PUT",
+        "/api/services/svc_a/monitoring",
+        Some(&admin),
+        Some(exec_cfg),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{j}");
+
+    // but never against a role-gated command (auto-actions carry no caller)
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/services/svc_a/monitoring",
+        Some(&admin),
+        Some(serde_json::json!({
+            "health": {
+                "kind": "tcp", "target": "127.0.0.1", "port": 1,
+                "actions": [{"type": "exec_command", "section_index": 1, "item_index": 0}]
+            },
+            "log_alerts": []
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "role-gated exec target accepted");
+
+    // and out-of-range indices are rejected
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/services/svc_a/monitoring",
+        Some(&admin),
+        Some(serde_json::json!({
+            "health": {
+                "kind": "tcp", "target": "127.0.0.1", "port": 1,
+                "actions": [{"type": "exec_command", "section_index": 99, "item_index": 0}]
+            },
+            "log_alerts": []
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "bad section index accepted");
+
+    // plain restart actions remain available to manage_monitoring users
+    let (st, _, j) = call(
+        &h.app,
+        "PUT",
+        "/api/services/svc_a/monitoring",
+        Some(&viewer),
+        Some(serde_json::json!({
+            "health": {
+                "kind": "tcp", "target": "127.0.0.1", "port": 1,
+                "actions": [{"type": "restart"}]
+            },
+            "log_alerts": []
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{j}");
+}
+
+/// `stdin_dumps` are rendered unquoted into a root-run script — the service
+/// name and argv must be metacharacter-free, and the service must exist.
+#[tokio::test]
+async fn backup_dumps_reject_shell_metacharacters() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    set_viewer_features(&h.app, &admin, serde_json::json!({"manage_backup": true})).await;
+    let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
+
+    let dump = |service: &str, cmd: Vec<&str>| {
+        serde_json::json!({
+            "enabled": true, "paths": [], "schedule_enabled": false,
+            "stdin_dumps": [{
+                "filename": "db.sql", "service": service,
+                "command": cmd, "env_file": null
+            }]
+        })
+    };
+    for (what, body) in [
+        (
+            "service with ;",
+            dump("db; touch /tmp/pwned", vec!["pg_dump"]),
+        ),
+        ("command substitution", dump("app", vec!["$(id)"])),
+        ("backticks", dump("app", vec!["pg_dump `id`"])),
+        ("pipe", dump("app", vec!["pg_dump | tee /tmp/x"])),
+        ("newline", dump("app", vec!["pg_dump\nrm -rf /"])),
+        ("env_file escape", {
+            let mut b = dump("app", vec!["pg_dump"]);
+            b["stdin_dumps"][0]["env_file"] = serde_json::json!("../../etc/shadow");
+            b
+        }),
+    ] {
+        let (st, _, j) = call(
+            &h.app,
+            "PUT",
+            "/api/services/svc_a/backup",
+            Some(&viewer),
+            Some(body),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{what} accepted: {j}");
+    }
+    // a legitimate dump (service exists in the harness compose) is accepted
+    let (st, _, j) = call(
+        &h.app,
+        "PUT",
+        "/api/services/svc_a/backup",
+        Some(&viewer),
+        Some(dump("app", vec!["pg_dump", "-U", "${PGUSER}"])),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{j}");
+    // a service that is not in the compose file is rejected by the agent
+    // (compose membership is only knowable agent-side, so this is an
+    // agent rejection rather than a 400 from the server)
+    let (st, _, j) = call(
+        &h.app,
+        "PUT",
+        "/api/services/svc_a/backup",
+        Some(&viewer),
+        Some(dump("nosuchservice", vec!["pg_dump"])),
+    )
+    .await;
+    assert!(!st.is_success(), "unknown dump service accepted: {j}");
+}
+
+/// Cross-origin browser WebSocket handshakes must be rejected; same-origin
+/// and non-browser clients still work.
+///
+/// The gate lives in the handlers (see `api::ws::ws_origin_ok`), which
+/// `WebSocketUpgrade` extraction only reaches on a real hyper connection
+/// carrying the `OnUpgrade` extension — that isn't reproducible through
+/// `oneshot`, so the predicate is exercised directly here.
+#[test]
+fn ws_origin_gate_rejects_cross_origin() {
+    use crate::api::ws::ws_origin_ok;
+    let hdr = |pairs: &[(&str, &str)]| {
+        let mut m = HeaderMap::new();
+        for (k, v) in pairs {
+            m.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        m
+    };
+    let allowed: Vec<String> = vec!["https://ui.example.com".into()];
+
+    // cross-origin browser handshake → rejected
+    assert!(!ws_origin_ok(
+        &allowed,
+        &hdr(&[("origin", "http://evil.example"), ("host", "localhost:8080")])
+    ));
+    // same-origin → allowed
+    assert!(ws_origin_ok(
+        &allowed,
+        &hdr(&[("origin", "http://localhost:8080"), ("host", "localhost:8080")])
+    ));
+    // explicitly allowlisted origin → allowed
+    assert!(ws_origin_ok(
+        &allowed,
+        &hdr(&[
+            ("origin", "https://ui.example.com"),
+            ("host", "localhost:8080")
+        ])
+    ));
+    // non-browser client (no Origin header) → unaffected
+    assert!(ws_origin_ok(&allowed, &hdr(&[("host", "localhost:8080")])));
+    // `null` origin (sandboxed iframe / file://) → rejected
+    assert!(!ws_origin_ok(
+        &allowed,
+        &hdr(&[("origin", "null"), ("host", "localhost:8080")])
+    ));
+    // an origin with no scheme is not same-origin
+    assert!(!ws_origin_ok(
+        &allowed,
+        &hdr(&[("origin", "localhost:8080"), ("host", "localhost:8080")])
+    ));
+    // a different port is a different origin
+    assert!(!ws_origin_ok(
+        &allowed,
+        &hdr(&[("origin", "http://localhost:9999"), ("host", "localhost:8080")])
+    ));
+}
+
+/// The agent must re-check authorization itself: a service-scoped token must
+/// not reach another service even if the server is compromised, and feature
+/// gates must hold at the agent boundary too.
+#[tokio::test]
+async fn agent_enforces_authorization_on_remote_transport() {
+    let h = harness_remote().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    let (_, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/auth/token",
+        Some(&admin),
+        Some(serde_json::json!({
+            "services": ["svc_a"],
+            "actions": ["operator", "edit_files", "edit_compose", "manage_backup",
+                        "manage_monitoring", "run_commands"]
+        })),
+    )
+    .await;
+    let scoped = j.pointer("/data/token").unwrap().as_str().unwrap().to_string();
+
+    // scoped token: svc_a ok, svc_b denied — directly against the agent
+    let ok = h
+        .state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::ComposeRead {
+                service: "svc_a".into(),
+            },
+            &scoped,
+        )
+        .await;
+    assert!(ok.is_ok(), "agent denied in-scope service: {ok:?}");
+    for verb in [
+        crate::agent::proto::SyncVerb::ComposeRead {
+            service: "svc_b".into(),
+        },
+        crate::agent::proto::SyncVerb::FileNode {
+            service: "svc_b".into(),
+            path: "".into(),
+        },
+        crate::agent::proto::SyncVerb::BackupGet {
+            service: "svc_b".into(),
+        },
+    ] {
+        let r = h.state.agent.call(verb.clone(), &scoped).await;
+        assert!(r.is_err(), "agent allowed out-of-scope verb {verb:?}");
+    }
+    // the agent's service list is filtered for the scoped token
+    let v = h
+        .state
+        .agent
+        .call(crate::agent::proto::SyncVerb::ServicesList, &scoped)
+        .await
+        .unwrap();
+    let names: Vec<String> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["name"].as_str().map(String::from))
+        .collect();
+    assert_eq!(names, vec!["svc_a"], "agent leaked svc_b to a scoped token");
+
+    // feature gates hold at the agent: a viewer without edit_files cannot
+    // write files even with a valid token
+    let (_, viewer) = login(&h.app, "viewer", PASSWORD).await;
+    let r = h
+        .state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::FileWrite {
+                service: "svc_a".into(),
+                path: "x.txt".into(),
+                content: "x".into(),
+            },
+            &viewer,
+        )
+        .await;
+    assert!(r.is_err(), "agent allowed FileWrite without edit_files");
+
+    // ExecVerb: the viewer may run ungated commands but not the admin-only
+    // section (server-side check mirrored in the agent)
+    let exec = h.state.exec.clone();
+    let r = h
+        .state
+        .agent
+        .exec(
+            crate::agent::proto::ExecVerb::SectionItem {
+                section: 1,
+                item: 0,
+                params: Default::default(),
+            },
+            "admin-only".to_string(),
+            None,
+            &viewer,
+            "viewer",
+            &exec,
+        )
+        .await;
+    assert!(r.is_err(), "agent ran an admin-only command for a viewer");
+
+    // ...and a service-scoped token cannot run a command against svc_b
+    let r = h
+        .state
+        .agent
+        .exec(
+            crate::agent::proto::ExecVerb::Compose {
+                service: "svc_b".into(),
+                op: crate::agent::proto::ComposeOp::Up,
+            },
+            "compose up".to_string(),
+            Some("svc_b".into()),
+            &scoped,
+            "admin",
+            &exec,
+        )
+        .await;
+    assert!(r.is_err(), "agent ran compose for an out-of-scope service");
+}
+
 #[tokio::test]
 async fn agent_never_returns_password_hashes() {
     let h = harness().await;
@@ -1796,4 +2282,128 @@ async fn notifier_update_merges_secrets_in_agent() {
         !s.contains("real:secret"),
         "config leaked notifier url: {s}"
     );
+}
+
+/// Scope `services: ["svc_a"]` must deny svc_b on EVERY endpoint class —
+/// reads, actions, compose/unit writes, files, git, backup, monitoring.
+#[tokio::test]
+async fn scoped_token_denies_svc_b_everywhere() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    let (_, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/auth/token",
+        Some(&admin),
+        Some(serde_json::json!({
+            "ttl_minutes": 30,
+            "services": ["svc_a"],
+            "actions": ["operator", "edit_compose", "edit_units", "edit_files",
+                        "manage_backup", "manage_monitoring", "create_services",
+                        "run_commands", "admin", "unrestricted"]
+        })),
+    )
+    .await;
+    let scoped = j.pointer("/data/token").unwrap().as_str().unwrap().to_string();
+    let deny = |st: StatusCode, what: &str| {
+        assert!(
+            st == StatusCode::FORBIDDEN || st == StatusCode::NOT_FOUND,
+            "scoped token reached {what}: {st}"
+        );
+    };
+    // reads
+    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b", Some(&scoped), None).await;
+    deny(st, "GET svc_b detail");
+    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/compose", Some(&scoped), None).await;
+    deny(st, "GET svc_b compose");
+    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/unit", Some(&scoped), None).await;
+    deny(st, "GET svc_b unit");
+    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/unit/check", Some(&scoped), None).await;
+    deny(st, "GET svc_b unit check");
+    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/logs", Some(&scoped), None).await;
+    deny(st, "GET svc_b logs");
+    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/files", Some(&scoped), None).await;
+    deny(st, "GET svc_b files");
+    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/git/repos", Some(&scoped), None).await;
+    deny(st, "GET svc_b git repos");
+    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/backup", Some(&scoped), None).await;
+    deny(st, "GET svc_b backup");
+    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b/monitoring", Some(&scoped), None).await;
+    deny(st, "GET svc_b monitoring");
+    // actions / exec
+    let (st, _, _) = call(
+        &h.app, "POST", "/api/services/svc_b/actions", Some(&scoped),
+        Some(serde_json::json!({"action": "restart"})),
+    ).await;
+    deny(st, "svc_b action");
+    let (st, _, _) = call(
+        &h.app, "DELETE", "/api/services/svc_b", Some(&scoped), None,
+    ).await;
+    deny(st, "DELETE svc_b");
+    // writes
+    let (st, _, _) = call(
+        &h.app, "PUT", "/api/services/svc_b/compose", Some(&scoped),
+        Some(serde_json::json!({"content": "services:\n  x:\n    image: alpine\n"})),
+    ).await;
+    deny(st, "PUT svc_b compose");
+    let (st, _, _) = call(
+        &h.app, "PUT", "/api/services/svc_b/unit", Some(&scoped),
+        Some(serde_json::json!({"content": "[Service]\nExecStart=/bin/true\n"})),
+    ).await;
+    deny(st, "PUT svc_b unit");
+    let (st, _, _) = call(
+        &h.app, "PUT", "/api/services/svc_b/files", Some(&scoped),
+        Some(serde_json::json!({"path": "evil.txt", "content": "x"})),
+    ).await;
+    deny(st, "PUT svc_b file");
+    let (st, _, _) = call(
+        &h.app, "DELETE", "/api/services/svc_b/files?path=docker-compose.yml", Some(&scoped), None,
+    ).await;
+    deny(st, "DELETE svc_b file");
+    let (st, _, _) = call(
+        &h.app, "POST", "/api/services/svc_b/git/clone", Some(&scoped),
+        Some(serde_json::json!({"url": "https://example.com/r.git", "path": "repo"})),
+    ).await;
+    deny(st, "svc_b git clone");
+    let (st, _, _) = call(
+        &h.app, "PUT", "/api/services/svc_b/backup", Some(&scoped),
+        Some(serde_json::json!({"enabled": true, "paths": [], "stdin_dumps": [], "schedule_enabled": false})),
+    ).await;
+    deny(st, "PUT svc_b backup cfg");
+    let (st, _, _) = call(
+        &h.app, "POST", "/api/services/svc_b/backup/run", Some(&scoped), None,
+    ).await;
+    deny(st, "svc_b backup run");
+    let (st, _, _) = call(
+        &h.app, "PUT", "/api/services/svc_b/monitoring", Some(&scoped),
+        Some(serde_json::json!({"enabled": false})),
+    ).await;
+    deny(st, "PUT svc_b monitoring");
+}
+
+/// The canonical usage: mint with ONLY a services scope (no actions).
+/// The admin role must not silently survive and void the service scope.
+#[tokio::test]
+async fn services_only_scope_must_not_stay_admin() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    let (_, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/auth/token",
+        Some(&admin),
+        Some(serde_json::json!({"services": ["svc_a"]})),
+    )
+    .await;
+    let scoped = j.pointer("/data/token").unwrap().as_str().unwrap().to_string();
+    // service list must be narrowed...
+    let (st, _, j) = call(&h.app, "GET", "/api/services", Some(&scoped), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(service_names(&j), vec!["svc_a"], "services scope ignored");
+    // ...and svc_b endpoints must be denied
+    let (st, _, _) = call(&h.app, "GET", "/api/services/svc_b", Some(&scoped), None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "scoped token reached svc_b: {st}");
+    // admin-only surface must also be gone (scope narrows, never widens)
+    let (st, _, _) = call(&h.app, "GET", "/api/users", Some(&scoped), None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "scoped token still admin: {st}");
 }

@@ -19,6 +19,27 @@ use tokio::sync::mpsc;
 // /ws/executions/{id} — stream an execution; also accepts run requests
 // ---------------------------------------------------------------------------
 
+/// Browsers always send `Origin` on a WebSocket handshake. A cross-origin
+/// upgrade is a browser on another site driving this API with a token it
+/// obtained — reject it unless the origin is explicitly allowlisted in
+/// `cors_origins` or is same-origin as the `Host` header. Non-browser
+/// clients (no `Origin`) are unaffected.
+pub(crate) fn ws_origin_ok(cors_origins: &[String], headers: &axum::http::HeaderMap) -> bool {
+    let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return true;
+    };
+    if cors_origins.iter().any(|o| o == origin) {
+        return true;
+    }
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok());
+    matches!((origin.split_once("://"), host), (Some((_, rest)), Some(h)) if rest == h)
+}
+
 #[derive(Deserialize)]
 pub struct ExecWsQuery {
     pub id: Option<String>,
@@ -39,9 +60,13 @@ enum ClientMsg {
 pub async fn execute_ws(
     user: AuthUser,
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    if !ws_origin_ok(&state.config.get().await.server.cors_origins, &headers) {
+        return crate::auth::forbidden();
+    }
     ws.on_upgrade(move |socket| stream_execution(socket, state, id, user.user, user.token.clone()))
 }
 
@@ -49,9 +74,13 @@ pub async fn execute_ws(
 pub async fn execute_ws_root(
     user: AuthUser,
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(q): Query<ExecWsQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    if !ws_origin_ok(&state.config.get().await.server.cors_origins, &headers) {
+        return crate::auth::forbidden();
+    }
     let id = q.id.unwrap_or_default();
     ws.on_upgrade(move |socket| stream_execution(socket, state, id, user.user, user.token.clone()))
 }
@@ -195,10 +224,14 @@ fn def_follow() -> bool {
 pub async fn service_logs_ws(
     user: AuthUser,
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Path(name): Path<String>,
     Query(q): Query<LogsWsQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    if !ws_origin_ok(&state.config.get().await.server.cors_origins, &headers) {
+        return crate::auth::forbidden();
+    }
     ws.on_upgrade(move |socket| async move {
         let cfg = state.config.get().await;
         if !can_access_service(&user.user, &name, cfg.security.default_access) {
@@ -318,8 +351,12 @@ async fn stream_service_logs(
 pub async fn events_ws(
     user: AuthUser,
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    if !ws_origin_ok(&state.config.get().await.server.cors_origins, &headers) {
+        return crate::auth::forbidden();
+    }
     let rx = match state.agent.subscribe_events().await {
         Ok(r) => r,
         Err(_) => return crate::auth::internal("agent unavailable"),

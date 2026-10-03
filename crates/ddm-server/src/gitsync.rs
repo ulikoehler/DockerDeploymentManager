@@ -103,6 +103,12 @@ impl Gitsync {
                 warn!("gitops target path '{}' missing in repo", t.path);
                 continue;
             }
+            // A synced compose file lands in the service dir unchecked —
+            // enforce the default policy as a floor so repo push access
+            // can't deploy privileged containers.
+            if matches!(t.into, GitOpsTargetKind::Services) {
+                policy_check_synced_compose(cfg, &src)?;
+            }
             let protected = protected_set(cfg, t);
             copy_tree(&src, &dst, g.prune, &protected)?;
             info!("gitops: synced {} → {}", src.display(), dst.display());
@@ -313,12 +319,59 @@ async fn ensure_mirror(cfg: &AppConfig) -> Result<PathBuf> {
     Ok(mirror)
 }
 
-/// Names that are always excluded from sync/push in both directions.
+/// Names that are always excluded from sync/push in both directions:
+/// restic secrets, plus per-instance privileged files (`meta.yaml` carries
+/// monitoring/backup config; `backup.sh` runs as root and embeds repo
+/// credentials).
 fn base_protected() -> std::collections::HashSet<String> {
-    [".git", ".restic_password", ".restic_inited"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    [
+        ".git",
+        ".restic_password",
+        ".restic_inited",
+        "meta.yaml",
+        "backup.sh",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// Fail closed: any compose file a `Services` target would place is checked
+/// against the default policy before copying — repo access must not bypass
+/// compose policy.
+fn policy_check_synced_compose(cfg: &AppConfig, src: &Path) -> Result<()> {
+    let Some(policy) = crate::api::services::resolve_policy(cfg, None) else {
+        return Ok(());
+    };
+    let mut files = vec![];
+    let direct = src.join(&cfg.paths.compose_file);
+    if direct.is_file() {
+        files.push(direct);
+    }
+    if let Ok(rd) = std::fs::read_dir(src) {
+        for e in rd.flatten() {
+            let p = e.path().join(&cfg.paths.compose_file);
+            if p.is_file() {
+                files.push(p);
+            }
+        }
+    }
+    for f in files {
+        let content = std::fs::read_to_string(&f)?;
+        let violations = crate::policy::validate_compose(&content, &policy);
+        if !violations.is_empty() {
+            let msg = violations
+                .iter()
+                .map(|v| format!("{}: {}", v.path, v.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::bail!(
+                "gitops sync blocked: {} violates compose policy ({msg})",
+                f.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Protected files for a target: the per-instance users file is never
@@ -355,7 +408,21 @@ fn copy_tree(
         }
         let s = e.path();
         let d = dst.join(&name);
-        if s.is_dir() {
+        // Never follow symlinks — a repo symlink would copy its target
+        // tree (exfil of host files), and a dst symlink would be written
+        // *through* (arbitrary root file write). Source links are skipped;
+        // dst links are unlinked and replaced by real content.
+        let ft = e.file_type()?;
+        if ft.is_symlink() {
+            continue;
+        }
+        if let Ok(md) = std::fs::symlink_metadata(&d) {
+            if md.file_type().is_symlink() {
+                std::fs::remove_file(&d)?;
+                changed = true;
+            }
+        }
+        if ft.is_dir() {
             if copy_tree(&s, &d, prune, protected)? {
                 changed = true;
             }
@@ -387,7 +454,9 @@ fn copy_tree(
             }
             if !src.join(&name).exists() {
                 let p = e.path();
-                if p.is_dir() {
+                // symlink_metadata semantics: a link is never a dir here —
+                // remove_dir_all on a symlinked dir could walk its target.
+                if e.file_type()?.is_dir() {
                     std::fs::remove_dir_all(&p)?;
                 } else {
                     std::fs::remove_file(&p)?;
@@ -430,7 +499,12 @@ fn flatten(dir: &Path, protected: &std::collections::HashSet<String>) -> BTreeMa
                 continue;
             }
             let p = e.path();
-            if p.is_dir() {
+            // never follow symlinks — see copy_tree
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
                 for (k, v) in flatten(&p, protected) {
                     out.insert(format!("{name}/{k}"), v);
                 }
@@ -524,6 +598,100 @@ mod tests {
         assert!(b.path().join(".restic_password").exists()); // never pruned
         assert!(!b.path().join("stale.txt").exists());
         assert!(!copy_tree(a.path(), b.path(), true, &prot).unwrap());
+    }
+
+    /// A repo symlink must never be copied (its target tree would land in
+    /// the service dir, e.g. exfiltrating /etc via the file API).
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_skips_source_symlinks() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "host-secret").unwrap();
+        std::fs::create_dir_all(a.path().join("svc")).unwrap();
+        std::fs::write(a.path().join("svc/ok.txt"), "ok").unwrap();
+        std::os::unix::fs::symlink(outside.path(), a.path().join("svc/escape")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            a.path().join("svc/secret.txt"),
+        )
+        .unwrap();
+
+        let prot = base_protected();
+        copy_tree(a.path(), b.path(), true, &prot).unwrap();
+        assert!(b.path().join("svc/ok.txt").exists());
+        assert!(!b.path().join("svc/escape").exists());
+        assert!(!b.path().join("svc/secret.txt").exists());
+    }
+
+    /// A symlink planted in the destination must be replaced, not written
+    /// through — otherwise a sync would write root-owned files anywhere.
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_does_not_write_through_dst_symlink() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("f.txt"), "new").unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "original").unwrap();
+        std::os::unix::fs::symlink(&victim, b.path().join("f.txt")).unwrap();
+
+        let prot = base_protected();
+        copy_tree(a.path(), b.path(), true, &prot).unwrap();
+        // the target file is untouched and the link is gone
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "original");
+        assert!(!std::fs::symlink_metadata(b.path().join("f.txt"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(b.path().join("f.txt")).unwrap(),
+            "new"
+        );
+    }
+
+    /// A destination symlinked *directory* must not be descended into.
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_does_not_descend_dst_symlinked_dir() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(a.path().join("sub")).unwrap();
+        std::fs::write(a.path().join("sub/x.txt"), "payload").unwrap();
+        std::os::unix::fs::symlink(outside.path(), b.path().join("sub")).unwrap();
+
+        let prot = base_protected();
+        copy_tree(a.path(), b.path(), true, &prot).unwrap();
+        assert!(!outside.path().join("x.txt").exists(), "wrote through link");
+        assert_eq!(
+            std::fs::read_to_string(b.path().join("sub/x.txt")).unwrap(),
+            "payload"
+        );
+    }
+
+    /// `meta.yaml`/`backup.sh` are per-instance privileged files: a sync must
+    /// neither overwrite nor prune them.
+    #[test]
+    fn copy_tree_preserves_privileged_files() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("meta.yaml"), "from-repo").unwrap();
+        std::fs::write(a.path().join("backup.sh"), "from-repo").unwrap();
+        std::fs::write(b.path().join("meta.yaml"), "local-meta").unwrap();
+        std::fs::write(b.path().join("backup.sh"), "local-script").unwrap();
+        let prot = base_protected();
+        copy_tree(a.path(), b.path(), true, &prot).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(b.path().join("meta.yaml")).unwrap(),
+            "local-meta"
+        );
+        assert_eq!(
+            std::fs::read_to_string(b.path().join("backup.sh")).unwrap(),
+            "local-script"
+        );
     }
 
     #[test]

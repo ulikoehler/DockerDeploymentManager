@@ -72,9 +72,20 @@ pub fn render_backup_script(
         shell_quote(&format!("{dir}/{PASSWORD_FILE}"))
     ));
     for (k, v) in &cfg.backup.extra_env {
+        if !k
+            .chars()
+            .enumerate()
+            .all(|(i, c)| c == '_' || c.is_ascii_alphanumeric() && (i > 0 || !c.is_ascii_digit()))
+        {
+            anyhow::bail!("invalid backup extra_env key '{k}'");
+        }
         s.push_str(&format!("export {k}={}\n", shell_quote(v)));
     }
     s.push_str(&format!("cd {}\n\n", shell_quote(&dir)));
+
+    // fail closed: never render an unvalidated dump command into a
+    // root-executed script, no matter which path stored the config.
+    validate_dumps(&bcfg.stdin_dumps)?;
     if cfg.systemd.compose_binary == "auto" {
         s.push_str(
             "if command -v docker-compose >/dev/null 2>&1; then COMPOSE_BIN='docker-compose'; else COMPOSE_BIN='docker compose'; fi\n\n",
@@ -485,18 +496,64 @@ pub fn expand_env_vars(cmd: &[String], env: &HashMap<String, String>) -> Vec<Str
         .collect()
 }
 
-/// Validate a StdinDump list against a compose file's service names.
-#[allow(dead_code)]
-pub fn validate_dumps(dumps: &[StdinDump], compose_services: &[String]) -> Result<()> {
+/// Structural validation of `stdin_dumps`. The dump service name and
+/// command argv are rendered *unquoted* into a root-run shell script
+/// (`render_backup_script`), so every interpolated value must be free of
+/// shell metacharacters. `${VAR}` references are intentional — they expand
+/// at runtime from the sourced env file — and are allowed in that exact
+/// form only.
+pub fn validate_dumps(dumps: &[StdinDump]) -> Result<()> {
     for d in dumps {
         if d.filename.is_empty() || d.filename.contains('/') || d.filename.contains("..") {
             anyhow::bail!("invalid stdin_dump filename '{}'", d.filename);
         }
-        if !compose_services.iter().any(|s| s == &d.service) {
-            anyhow::bail!("stdin_dump service '{}' not in compose services", d.service);
-        }
+        check_dump_piece(&d.service, "service")?;
         if d.command.is_empty() {
             anyhow::bail!("stdin_dump '{}' has empty command", d.filename);
+        }
+        for arg in &d.command {
+            check_dump_piece(arg, "command")?;
+        }
+        if let Some(envf) = &d.env_file {
+            if !crate::services::valid_rel_path(envf) {
+                anyhow::bail!("invalid stdin_dump env_file '{envf}'");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One argv piece rendered into the backup script: alnum + common flag/path
+/// punctuation, plus `${VAR}` placeholders (validated as a whole so `$()`,
+/// backticks and other expansions can't slip in).
+fn check_dump_piece(s: &str, what: &str) -> Result<()> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"^[A-Za-z0-9_./:@%+=,-]*(\$\{[A-Za-z_][A-Za-z0-9_]*\}[A-Za-z0-9_./:@%+=,-]*)*$")
+            .unwrap()
+    });
+    if s.is_empty() || !re.is_match(s) {
+        anyhow::bail!("invalid stdin_dump {what} value '{s}'");
+    }
+    Ok(())
+}
+
+/// Check dump service names against the compose file's service names.
+/// Called agent-side where the compose file is available.
+pub fn validate_dump_services(dumps: &[StdinDump], compose_yaml: &str) -> Result<()> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(compose_yaml)?;
+    let services: Vec<String> = doc
+        .get("services")
+        .and_then(|s| s.as_mapping())
+        .map(|m| {
+            m.keys()
+                .filter_map(|k| k.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    for d in dumps {
+        if !services.iter().any(|s| s == &d.service) {
+            anyhow::bail!("stdin_dump service '{}' not in compose services", d.service);
         }
     }
     Ok(())
@@ -590,14 +647,56 @@ mod tests {
             command: vec!["pg_dump".into()],
             env_file: None,
         }];
-        assert!(validate_dumps(&dumps, &["db".to_string()]).is_ok());
+        assert!(validate_dumps(&dumps).is_ok());
+        let compose = "services:\n  db:\n    image: postgres\n";
+        assert!(validate_dump_services(&dumps, compose).is_ok());
+        // service must exist in the compose file
+        assert!(validate_dump_services(&dumps, "services:\n  other:\n    image: x\n").is_err());
         let bad = vec![StdinDump {
             filename: "../x".into(),
             service: "db".into(),
             command: vec!["x".into()],
             env_file: None,
         }];
-        assert!(validate_dumps(&bad, &["db".to_string()]).is_err());
+        assert!(validate_dumps(&bad).is_err());
+        // shell metacharacters in the service name or argv are rejected
+        let inject = vec![StdinDump {
+            filename: "a.sql".into(),
+            service: "db; touch /tmp/pwned".into(),
+            command: vec!["pg_dump".into()],
+            env_file: None,
+        }];
+        assert!(validate_dumps(&inject).is_err());
+        let inject_cmd = vec![StdinDump {
+            filename: "a.sql".into(),
+            service: "db".into(),
+            command: vec!["$(id)".into()],
+            env_file: None,
+        }];
+        assert!(validate_dumps(&inject_cmd).is_err());
+        let backtick = vec![StdinDump {
+            filename: "a.sql".into(),
+            service: "db".into(),
+            command: vec!["pg_dump `id`".into()],
+            env_file: None,
+        }];
+        assert!(validate_dumps(&backtick).is_err());
+        // intended ${VAR} expansion still allowed
+        let envvar = vec![StdinDump {
+            filename: "a.sql".into(),
+            service: "db".into(),
+            command: vec!["pg_dump".into(), "-U".into(), "${PGUSER}".into()],
+            env_file: Some(".env".into()),
+        }];
+        assert!(validate_dumps(&envvar).is_ok());
+        // env_file must be a relative in-service path
+        let badenv = vec![StdinDump {
+            filename: "a.sql".into(),
+            service: "db".into(),
+            command: vec!["pg_dump".into()],
+            env_file: Some("../../etc/shadow".into()),
+        }];
+        assert!(validate_dumps(&badenv).is_err());
     }
 
     #[test]

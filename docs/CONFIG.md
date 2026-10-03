@@ -15,7 +15,7 @@ keeps running. Check `GET /api/config/status` for the last reload result.
 | `jwt_secret_env` | `DDM_JWT_SECRET` | env var holding the JWT secret. If unset a random secret is generated (all sessions die on restart) |
 | `token_ttl_minutes` | `720` | JWT lifetime |
 | `web_dir` | — | dir with `index.html`+`bundle.js`; omitted → API only |
-| `cors_origins` | `[]` | additional CORS origins |
+| `cors_origins` | `[]` | extra allowed origins: enables a CORS layer for the listed origins and is the allowlist for `/ws/*` browser handshakes (same-origin is always allowed; empty = no CORS headers) |
 
 ### `paths`
 

@@ -200,6 +200,15 @@ impl AgentCore {
     /// rely on stale claims — a demoted admin loses agent privileges
     /// immediately, not when the token expires.
     fn justify_token(&self, token: &str, verb: &str, detail: &str) -> Result<(Claims, User)> {
+        let (claims, user) = self.token_user(token)?;
+        self.justify(&claims, verb, detail);
+        Ok((claims, user))
+    }
+
+    /// Verify the justification token (signature + generation) and load the
+    /// *fresh* user record — without writing a justification entry. Used by
+    /// `precheck`/`scoped_user`, where the arm itself logs the op.
+    fn token_user(&self, token: &str) -> Result<(Claims, User)> {
         let claims = self
             .jwt
             .verify(token)
@@ -211,7 +220,6 @@ impl AgentCore {
             .find(|u| u.name == claims.sub)
             .cloned()
             .ok_or_else(|| anyhow!("unknown user"))?;
-        self.justify(&claims, verb, detail);
         Ok((claims, user))
     }
 
@@ -222,6 +230,256 @@ impl AgentCore {
             Ok(())
         } else {
             bail!("admin role required")
+        }
+    }
+
+    /// Verify the token (signature + generation), reload the fresh user,
+    /// apply the token's scope, and return both. This is the *authoritative*
+    /// user for agent-side authorization — narrower than the raw claims,
+    /// never wider.
+    fn scoped_user(&self, token: &str) -> Result<(Claims, User)> {
+        let (claims, mut user) = self.token_user(token)?;
+        if let Some(scope) = &claims.scope {
+            crate::auth::apply_token_scope(&mut user, scope);
+        }
+        Ok((claims, user))
+    }
+
+    /// `scoped_user` + service-access check — mirrors the server's
+    /// `require_service_access` so a compromised server cannot send the
+    /// agent a verb for a service the token's user may not touch.
+    fn justify_service(
+        &self,
+        cfg: &AppConfig,
+        token: &str,
+        service: &str,
+    ) -> Result<(Claims, User)> {
+        let (claims, user) = self.scoped_user(token)?;
+        if !crate::permissions::can_access_service(&user, service, cfg.security.default_access) {
+            bail!("service access denied: {service}");
+        }
+        Ok((claims, user))
+    }
+
+    fn require_feature(user: &User, ok: bool, what: &str) -> Result<()> {
+        if user.is_admin() || ok {
+            Ok(())
+        } else {
+            bail!("{what} required")
+        }
+    }
+
+    /// Agent-side mirror of the server's per-verb authorization for
+    /// [`SyncVerb`]s. Runs before the verb body; each arm's `justify_*`
+    /// still produces the justification-log entry.
+    fn precheck(&self, cfg: &AppConfig, verb: &SyncVerb, token: &str) -> Result<Option<User>> {
+        use crate::users::UserFeatures as F;
+        let feat = |f: fn(&F) -> bool, u: &User| f(&u.features);
+        match verb {
+            // ---- writes / mutations: feature + service access ----
+            SyncVerb::FileWrite { service, .. }
+            | SyncVerb::FileMkdir { service, .. }
+            | SyncVerb::FileRename { service, .. }
+            | SyncVerb::FileDelete { service, .. } => {
+                let (_c, u) = self.justify_service(cfg, token, service)?;
+                Self::require_feature(&u, feat(|f| f.edit_files, &u), "edit_files")?;
+                Ok(Some(u))
+            }
+            SyncVerb::MetaWrite { service, meta } => {
+                let (_c, u) = self.justify_service(cfg, token, service)?;
+                // meta.yaml can carry monitoring/backup config — require the
+                // matching feature, and admin when exec actions are present.
+                if let Some(m) = &meta.monitoring {
+                    crate::api::services::validate_monitoring_cfg(m, cfg)
+                        .map_err(|e| anyhow!(e))?;
+                    Self::require_feature(
+                        &u,
+                        feat(|f| f.manage_monitoring, &u) || feat(|f| f.edit_compose, &u),
+                        "manage_monitoring",
+                    )?;
+                    if crate::api::services::monitoring_has_exec_actions(m) {
+                        Self::require_admin(&u)?;
+                    }
+                }
+                if meta.backup.is_some() {
+                    Self::require_feature(&u, feat(|f| f.manage_backup, &u), "manage_backup")?;
+                }
+                Ok(Some(u))
+            }
+            SyncVerb::ComposeWrite { service, .. } => {
+                let (_c, u) = self.justify_service(cfg, token, service)?;
+                Self::require_feature(&u, feat(|f| f.edit_compose, &u), "edit_compose")?;
+                Ok(Some(u))
+            }
+            SyncVerb::MonitoringPut { service, cfg: m } => {
+                let (_c, u) = self.justify_service(cfg, token, service)?;
+                Self::require_feature(
+                    &u,
+                    feat(|f| f.manage_monitoring, &u) || feat(|f| f.edit_compose, &u),
+                    "manage_monitoring",
+                )?;
+                if crate::api::services::monitoring_has_exec_actions(m) {
+                    Self::require_admin(&u)?;
+                }
+                Ok(Some(u))
+            }
+            SyncVerb::BackupPut { service, cfg: b } => {
+                let (_c, u) = self.justify_service(cfg, token, service)?;
+                Self::require_feature(&u, feat(|f| f.manage_backup, &u), "manage_backup")?;
+                crate::backup::validate_dumps(&b.stdin_dumps)?;
+                Ok(Some(u))
+            }
+            SyncVerb::BackupProvision { service } => {
+                let (_c, u) = self.justify_service(cfg, token, service)?;
+                Self::require_feature(&u, feat(|f| f.manage_backup, &u), "manage_backup")?;
+                Ok(Some(u))
+            }
+            SyncVerb::ComposeSync { service, .. } => {
+                let (_c, u) = self.justify_service(cfg, token, service)?;
+                Self::require_feature(&u, u.has_role("operator"), "operator role")?;
+                Ok(Some(u))
+            }
+            // ---- reads on a service: access check only ----
+            SyncVerb::ServiceGet { name } => {
+                self.justify_service(cfg, token, name).map(|x| Some(x.1))
+            }
+            SyncVerb::FileNode { service, .. }
+            | SyncVerb::GitRepos { service }
+            | SyncVerb::GitStatus { service, .. }
+            | SyncVerb::GitLog { service, .. }
+            | SyncVerb::GitBranches { service, .. }
+            | SyncVerb::ProjectContainers { service }
+            | SyncVerb::UnitFileRead { service }
+            | SyncVerb::UnitCheck { service }
+            | SyncVerb::UnitRender { service }
+            | SyncVerb::ComposeRead { service }
+            | SyncVerb::MonitoringGet { service }
+            | SyncVerb::BackupGet { service }
+            | SyncVerb::BackupCheck { service }
+            | SyncVerb::BackupSnapshots { service } => self
+                .justify_service(cfg, token, service)
+                .map(|x| Some(x.1)),
+            // ---- systemd surface: operator, like the server ----
+            // `ListUnits`/`Journal` back the operator-only systemd API.
+            SyncVerb::ListUnits { .. } | SyncVerb::Journal { .. } => {
+                let (_c, u) = self.scoped_user(token)?;
+                Self::require_feature(&u, u.has_role("operator"), "operator role")?;
+                Ok(Some(u))
+            }
+            // `UnitState`/`UnitPathExists` also back the unit summary shown
+            // in service list/detail — reachable with plain service access —
+            // so allow either operator, or access to the matching service.
+            SyncVerb::UnitState { unit } | SyncVerb::UnitPathExists { unit } => {
+                let (_c, u) = self.scoped_user(token)?;
+                let svc = unit.strip_suffix(".service").unwrap_or(unit);
+                if u.has_role("operator")
+                    || crate::permissions::can_access_service(
+                        &u,
+                        svc,
+                        cfg.security.default_access,
+                    )
+                {
+                    return Ok(Some(u));
+                }
+                bail!("operator role required")
+            }
+            // ---- gitops mutations are admin-only server-side ----
+            SyncVerb::GitSyncRun | SyncVerb::GitSyncPush => {
+                let (_c, u) = self.scoped_user(token)?;
+                Self::require_admin(&u)?;
+                Ok(Some(u))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Same mirror for [`ExecVerb`]s.
+    fn precheck_exec(&self, cfg: &AppConfig, verb: &ExecVerb, token: &str) -> Result<User> {
+        use crate::users::UserFeatures as F;
+        let feat = |f: fn(&F) -> bool, u: &User| f(&u.features);
+        match verb {
+            ExecVerb::Compose { service, .. } => {
+                let (_c, u) = self.justify_service(cfg, token, service)?;
+                Self::require_feature(&u, u.has_role("operator"), "operator role")?;
+                Ok(u)
+            }
+            ExecVerb::SectionItem { section, item, .. } => {
+                let (_c, u) = self.scoped_user(token)?;
+                // mirror api::commands_api::authorized_item on the fresh user
+                if !u.is_admin() && !u.features.run_commands {
+                    bail!("run_commands required");
+                }
+                let section_cfg = cfg
+                    .sections
+                    .get(*section)
+                    .ok_or_else(|| anyhow!("invalid section index"))?;
+                if let Some(r) = &section_cfg.required_role {
+                    if !u.has_role(r) {
+                        bail!("forbidden");
+                    }
+                }
+                let it = section_cfg
+                    .items
+                    .get(*item)
+                    .ok_or_else(|| anyhow!("invalid item index"))?;
+                if let Some(r) = &it.required_role {
+                    if !u.has_role(r) {
+                        bail!("forbidden");
+                    }
+                }
+                Ok(u)
+            }
+            ExecVerb::SystemdCommand { .. } | ExecVerb::SystemdRestart { .. } => {
+                let (_c, u) = self.scoped_user(token)?;
+                Self::require_feature(&u, u.has_role("operator"), "operator role")?;
+                Ok(u)
+            }
+            ExecVerb::UnitRegen { service, .. } => {
+                let (_c, u) = self.justify_service(cfg, token, service)?;
+                Self::require_feature(&u, feat(|f| f.edit_compose, &u), "edit_compose")?;
+                Ok(u)
+            }
+            ExecVerb::UnitWrite { service, .. } => {
+                let (_c, u) = self.justify_service(cfg, token, service)?;
+                let needed = cfg.security.unit_edit_requires.clone();
+                let feature_ok = u.features.edit_units && needed != "admin";
+                if !u.has_role(&needed) && !feature_ok {
+                    bail!("{needed} required");
+                }
+                Ok(u)
+            }
+            ExecVerb::GitClone { service, .. } | ExecVerb::GitOp { service, .. } => {
+                let (_c, u) = self.justify_service(cfg, token, service)?;
+                Self::require_feature(&u, feat(|f| f.edit_files, &u), "edit_files")?;
+                Ok(u)
+            }
+            ExecVerb::BackupRun { service } | ExecVerb::BackupForget { service } => {
+                let (_c, u) = self.justify_service(cfg, token, service)?;
+                Self::require_feature(&u, feat(|f| f.manage_backup, &u), "manage_backup")?;
+                Ok(u)
+            }
+            ExecVerb::BackupRestore { service, .. } => {
+                let (_c, u) = self.justify_service(cfg, token, service)?;
+                let unrestricted = u.compose_policy.as_deref() == Some("unrestricted");
+                Self::require_feature(&u, unrestricted, "admin or unrestricted policy")?;
+                Ok(u)
+            }
+            ExecVerb::ServiceCreate { .. } => {
+                let (_c, u) = self.scoped_user(token)?;
+                Self::require_feature(&u, feat(|f| f.create_services, &u), "create_services")?;
+                Ok(u)
+            }
+            ExecVerb::ServiceDelete { name, .. } => {
+                let (_c, u) = self.justify_service(cfg, token, name)?;
+                Self::require_admin(&u)?;
+                Ok(u)
+            }
+            // passive log streams: server checked service access when it
+            // resolved the container id; token validity suffices here.
+            ExecVerb::ContainerLogs { .. } => {
+                let (_c, u) = self.scoped_user(token)?;
+                Ok(u)
+            }
         }
     }
 
@@ -339,6 +597,11 @@ impl AgentCore {
             Some(u) => users::verify_password(&self.peppered(password), &u.password_hash),
             None => users::verify_password(&self.peppered(password), &users::dummy_hash()),
         };
+        // Throttle *failed* attempts only: at most 5 guesses per window
+        // regardless of outcome, so guessing gains nothing — while a
+        // correct password still works and clears the lockout. A hard
+        // lockout would let any unauthenticated caller lock every account
+        // out with 5 wrong guesses per minute (a trivial DoS).
         if !ok {
             if locked {
                 bail!("too many failed attempts, try again later");
@@ -398,12 +661,21 @@ impl AgentCore {
                 actions: intersect(&parent_claims.scope, |s| &s.actions, &actions),
             }),
         };
-        let roles: Vec<String> = parent_claims
+        let mut roles: Vec<String> = parent_claims
             .roles
             .iter()
             .filter(|r| fresh.roles.contains(r))
             .cloned()
             .collect();
+        // A service-scoped token can never be admin — `admin` bypasses
+        // service-access rules and would void the scope entirely.
+        if scope
+            .as_ref()
+            .and_then(|s| s.services.as_ref())
+            .is_some()
+        {
+            roles.retain(|r| r != "admin");
+        }
         let token = self
             .jwt
             .issue_claims(&parent_claims.sub, roles, ttl, scope)?;
@@ -540,10 +812,25 @@ impl AgentCore {
 
     pub async fn call(&self, verb: SyncVerb, token: &str) -> Result<serde_json::Value> {
         let cfg = self.cfg.get().await;
+        // Defense in depth: re-check authorization against the fresh,
+        // scope-applied user — the server's gates alone are not the boundary.
+        let pre = self.precheck(&cfg, &verb, token)?;
         match verb {
             SyncVerb::ServicesList => {
-                self.justify_token(token, "services_list", "")?;
-                let svcs = svc_ops::discover_services(&cfg);
+                let (claims, mut user) = self.justify_token(token, "services_list", "")?;
+                if let Some(scope) = &claims.scope {
+                    crate::auth::apply_token_scope(&mut user, scope);
+                }
+                let svcs: Vec<_> = svc_ops::discover_services(&cfg)
+                    .into_iter()
+                    .filter(|s| {
+                        crate::permissions::can_access_service(
+                            &user,
+                            &s.name,
+                            cfg.security.default_access,
+                        )
+                    })
+                    .collect();
                 Ok(serde_json::to_value(svcs)?)
             }
             SyncVerb::ServiceGet { name } => {
@@ -567,6 +854,31 @@ impl AgentCore {
                     bail!("file too large");
                 }
                 let svc = svc_ops::get_service(&cfg, &service)?;
+                // The compose file carries a policy boundary — a raw file
+                // write must enforce the same gates as `ComposeWrite`.
+                let abs = crate::files::resolve(&svc.dir, &path)?;
+                let compose_abs = svc.dir.canonicalize()?.join(&cfg.paths.compose_file);
+                if abs == compose_abs {
+                    let u = pre
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("authorization state missing"))?;
+                    Self::require_feature(u, u.features.edit_compose, "edit_compose")?;
+                    if let Some(p) =
+                        crate::api::services::resolve_policy(&cfg, u.compose_policy.as_deref())
+                    {
+                        let violations = crate::policy::validate_compose(&content, &p);
+                        if !violations.is_empty() {
+                            let msg = violations
+                                .iter()
+                                .map(|v| format!("{}: {}", v.path, v.message))
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            bail!("compose policy violations: {msg}");
+                        }
+                    }
+                    crate::compose::parse_check(&content)?;
+                    self.enforce_policy_floor(&cfg, &content)?;
+                }
                 crate::files::write_file(&svc.dir, &path, &content)?;
                 Ok(serde_json::json!(true))
             }
@@ -579,6 +891,13 @@ impl AgentCore {
             SyncVerb::FileRename { service, from, to } => {
                 self.justify_token(token, "file_rename", &format!("{service}:{from}"))?;
                 let svc = svc_ops::get_service(&cfg, &service)?;
+                // Renaming *onto* the compose file would bypass the
+                // policy-checked `FileWrite` gate.
+                let to_abs = crate::files::resolve(&svc.dir, &to)?;
+                let compose_abs = svc.dir.canonicalize()?.join(&cfg.paths.compose_file);
+                if to_abs == compose_abs {
+                    bail!("rename onto compose file denied — use the compose endpoint");
+                }
                 crate::files::rename(&svc.dir, &from, &to)?;
                 Ok(serde_json::json!(true))
             }
@@ -749,6 +1068,23 @@ impl AgentCore {
                 if content.len() > MAX_FILE_WRITE {
                     bail!("compose file too large");
                 }
+                // caller's own policy (put_compose applies this server-side)
+                // in addition to the configured floor.
+                if let Some(u) = &pre {
+                    if let Some(p) =
+                        crate::api::services::resolve_policy(&cfg, u.compose_policy.as_deref())
+                    {
+                        let violations = crate::policy::validate_compose(&content, &p);
+                        if !violations.is_empty() {
+                            let msg = violations
+                                .iter()
+                                .map(|v| format!("{}: {}", v.path, v.message))
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            bail!("compose policy violations: {msg}");
+                        }
+                    }
+                }
                 self.enforce_policy_floor(&cfg, &content)?;
                 let svc = svc_ops::get_service(&cfg, &service)?;
                 crate::compose::write_compose(&svc.compose_path, &content)?;
@@ -761,7 +1097,8 @@ impl AgentCore {
             }
             SyncVerb::MonitoringPut { service, cfg: m } => {
                 self.justify_token(token, "monitoring_put", &service)?;
-                crate::api::services::validate_monitoring_cfg(&m).map_err(|e| anyhow!(e))?;
+                crate::api::services::validate_monitoring_cfg(&m, &cfg)
+                    .map_err(|e| anyhow!(e))?;
                 let mut svc = svc_ops::get_service(&cfg, &service)?;
                 svc.meta.monitoring = Some(m);
                 svc_ops::save_meta(&svc.dir, &svc.meta)?;
@@ -774,6 +1111,16 @@ impl AgentCore {
             }
             SyncVerb::BackupPut { service, cfg: b } => {
                 self.justify_token(token, "backup_put", &service)?;
+                // stdin_dumps render unquoted into a root-run script —
+                // structural validation + compose-service membership both
+                // enforced here, fail closed.
+                crate::backup::validate_dumps(&b.stdin_dumps)?;
+                if !b.stdin_dumps.is_empty() {
+                    let svc0 = svc_ops::get_service(&cfg, &service)?;
+                    if let Ok(compose) = crate::compose::read_compose(&svc0.compose_path) {
+                        crate::backup::validate_dump_services(&b.stdin_dumps, &compose)?;
+                    }
+                }
                 let mut svc = svc_ops::get_service(&cfg, &service)?;
                 svc.meta.backup = Some(b);
                 svc_ops::save_meta(&svc.dir, &svc.meta)?;
@@ -808,18 +1155,48 @@ impl AgentCore {
                 )?)
             }
             SyncVerb::MonitorStatusAll => {
-                self.justify_token(token, "monitor_status", "")?;
+                let (claims, mut user) = self.justify_token(token, "monitor_status", "")?;
+                if let Some(scope) = &claims.scope {
+                    crate::auth::apply_token_scope(&mut user, scope);
+                }
                 let m = self.monitor.lock().unwrap().clone();
                 match m {
-                    Some(m) => Ok(serde_json::to_value(m.status().await)?),
+                    Some(m) => {
+                        let mut status = m.status().await;
+                        if !user.is_admin() {
+                            status.retain(|name, _| {
+                                crate::permissions::can_access_service(
+                                    &user,
+                                    name,
+                                    cfg.security.default_access,
+                                )
+                            });
+                        }
+                        Ok(serde_json::to_value(status)?)
+                    }
                     None => Ok(serde_json::json!({})),
                 }
             }
             SyncVerb::MonitorEvents => {
-                self.justify_token(token, "monitor_events", "")?;
+                let (claims, mut user) = self.justify_token(token, "monitor_events", "")?;
+                if let Some(scope) = &claims.scope {
+                    crate::auth::apply_token_scope(&mut user, scope);
+                }
                 let m = self.monitor.lock().unwrap().clone();
                 match m {
-                    Some(m) => Ok(serde_json::to_value(m.events().await)?),
+                    Some(m) => {
+                        let mut events = m.events().await;
+                        if !user.is_admin() {
+                            events.retain(|e| {
+                                crate::permissions::can_access_service(
+                                    &user,
+                                    &e.service,
+                                    cfg.security.default_access,
+                                )
+                            });
+                        }
+                        Ok(serde_json::to_value(events)?)
+                    }
                     None => Ok(serde_json::json!([])),
                 }
             }
@@ -909,6 +1286,9 @@ impl AgentCore {
     ) -> Result<mpsc::Receiver<ServerMessage>> {
         let (claims, _user) = self.justify_token(token, &title, "")?;
         let cfg = self.cfg.get().await;
+        // Defense in depth: re-check the verb's authorization against the
+        // fresh, scope-applied user before any command is assembled.
+        let _authorized = self.precheck_exec(&cfg, &verb, token)?;
         let (tx, rx) = mpsc::channel::<ServerMessage>(256);
         let core = Arc::clone(self);
         let user = claims.sub.clone();
@@ -1065,7 +1445,20 @@ impl AgentCore {
                     &script,
                     &svc.dir.to_string_lossy(),
                 );
-                Ok(exec::run_steps(item, HashMap::new(), tx.clone(), eid.to_string()).await)
+                let ok = exec::run_steps(item, HashMap::new(), tx.clone(), eid.to_string()).await;
+                if ok {
+                    // A clone is attacker-controlled content: strip escaping
+                    // symlinks and denied privileged filenames.
+                    if let Ok(target) = crate::files::resolve(&svc.dir, path) {
+                        crate::files::sanitize_clone(&svc.dir, &target);
+                    }
+                    // A clone into the service root may deliver a compose
+                    // file — enforce the policy floor on it.
+                    if let Ok(compose) = std::fs::read_to_string(&svc.compose_path) {
+                        self.enforce_policy_floor(cfg, &compose)?;
+                    }
+                }
+                Ok(ok)
             }
             ExecVerb::GitOp {
                 service,

@@ -139,6 +139,12 @@ actions:
 Guard rails:
 
 - `monitoring.allow_auto_actions: false` disables them globally.
+- `exec_command` runs a configured command item with **no caller
+  identity**, so configuring one is **admin-only**; the indices must point
+  at a real item, and the item (or its section) must not be
+  `required_role`-gated — such targets are refused when the config is
+  saved and again when the action fires. `restart`/`stop` stay available
+  to users with `manage_monitoring`.
 - Per-(service, action) cooldown + max attempts per window.
 - When attempts are exhausted the action is **suppressed** and an
   `auto_action`/`alert_fired` event is emitted ("exhausted").

@@ -112,6 +112,10 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
     let exec = Arc::new(exec::ExecutionManager::new(history));
     let audit = Arc::new(audit::AuditLog::new(2048));
 
+    // CORS: closed by default; only the configured origins get a
+    // permissive layer (bearer-token API — no cookies are ever allowed).
+    let cors_origins = shared.get().await.server.cors_origins.clone();
+
     let state = AppState {
         config: shared,
         users,
@@ -123,6 +127,21 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
     let mut app = api::api_router()
         .merge(mcp::router(state.clone()))
         .with_state(state.clone());
+
+    if !cors_origins.is_empty() {
+        use tower_http::cors::{AllowOrigin, CorsLayer};
+        let origins: Vec<axum::http::HeaderValue> = cors_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        if origins.len() != cors_origins.len() {
+            warn!("some cors_origins entries are invalid and were ignored");
+        }
+        app = app.layer(CorsLayer::new().allow_origin(AllowOrigin::list(origins)).allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+        ]));
+    }
 
     // optional static web UI (SPA fallback → index.html)
     if let Some(dir) = web_dir {
