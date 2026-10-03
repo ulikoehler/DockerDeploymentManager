@@ -1,6 +1,5 @@
 use crate::auth::{bad_request, forbidden, not_found, ok, AuthUser};
-use crate::config::ServiceMatcher;
-use crate::permissions::{can_access_service, matcher_matches};
+use crate::permissions::can_access_service;
 use crate::AppState;
 use axum::{
     extract::{Path, Query, State},
@@ -433,13 +432,18 @@ pub async fn notifier_delete(
 pub async fn gitops_status(
     user: AuthUser,
     State(state): State<AppState>,
-) -> Json<crate::auth::SuccessResponse<serde_json::Value>> {
+) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
+    // Status leaks repo URL/targets/errors — same sensitivity as sync,
+    // admin-only like gitops_sync/gitops_push.
+    if !user.user.is_admin() {
+        return Err(forbidden());
+    }
     let v = state
         .agent
         .call(crate::agent::proto::SyncVerb::GitSyncStatus, &user.token)
         .await
         .unwrap_or_else(|_| serde_json::json!({"error":"agent unavailable"}));
-    ok(v)
+    Ok(ok(v))
 }
 
 pub async fn gitops_sync(
@@ -512,22 +516,6 @@ pub async fn gitops_webhook(
         .await
         .map_err(|_| forbidden())?;
     Ok(ok(true))
-}
-
-// ---------------------------------------------------------------------------
-// matcher self-test helper used by the users UI (dry-run access check)
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-pub struct AccessTestQuery {
-    pub service: String,
-    #[serde(flatten)]
-    pub matcher: ServiceMatcher,
-}
-
-#[allow(dead_code)]
-pub async fn access_test(Query(q): Query<AccessTestQuery>) -> Json<bool> {
-    Json(matcher_matches(&q.matcher, &q.service))
 }
 
 #[cfg(test)]

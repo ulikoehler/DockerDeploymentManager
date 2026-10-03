@@ -65,6 +65,8 @@ pub fn apply_token_scope(user: &mut User, scope: &TokenScope) {
         f.manage_backup &= has("manage_backup");
         f.manage_monitoring &= has("manage_monitoring");
         f.edit_files &= has("edit_files");
+        f.exec_containers &= has("exec_containers");
+        f.mount_files &= has("mount_files");
         if !has("unrestricted") && user.compose_policy.as_deref() == Some("unrestricted") {
             user.compose_policy = None; // fall back to the default policy
         }
@@ -235,11 +237,61 @@ pub fn internal(msg: impl Into<String>) -> Response {
     error_response(StatusCode::INTERNAL_SERVER_ERROR, msg)
 }
 
-/// Verify the bearer token in `parts` (header or `?token=` query), load the
-/// user and apply any token scope. Shared by the `AuthUser` extractor and
-/// the MCP auth middleware.
+/// One-time WebSocket tickets: `POST /api/auth/ws-ticket` mints a random
+/// single-use ticket bound to the caller's session token. Browser WS
+/// clients use `?ticket=` instead of `?token=` so the JWT itself never
+/// appears in a URL (access logs, browser history, Referer headers).
+#[derive(Default)]
+pub struct TicketStore {
+    inner: std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
+}
+
+impl TicketStore {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mint a single-use ticket for `token`, valid for `TTL`.
+    pub fn issue(&self, token: &str) -> String {
+        let mut map = self.inner.lock().unwrap();
+        let now = std::time::Instant::now();
+        map.retain(|_, (_, exp)| *exp > now);
+        let ticket = uuid::Uuid::new_v4().to_string();
+        map.insert(ticket.clone(), (token.to_string(), now + Self::TTL));
+        ticket
+    }
+
+    /// Consume a ticket — single-use even before expiry.
+    pub fn redeem(&self, ticket: &str) -> Option<String> {
+        let (token, exp) = self.inner.lock().unwrap().remove(ticket)?;
+        (exp > std::time::Instant::now()).then_some(token)
+    }
+}
+
+/// `?ticket=` on `/ws/*`: redeem a single-use ticket into its session
+/// token. Tickets only exist where `?token=` is already accepted.
+fn ticket_token<'a>(parts: &'a Parts, state: &crate::AppState) -> Option<String> {
+    if !parts.uri.path().starts_with("/ws/") {
+        return None;
+    }
+    let ticket = parts.uri.query().and_then(|q| {
+        q.split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            (k == "ticket").then_some(v.to_string())
+        })
+    })?;
+    state.ws_tickets.redeem(&ticket)
+}
+
+/// Verify the bearer token in `parts` (header, `?token=`/`?ticket=` on
+/// WebSocket routes), load the user and apply any token scope. Shared by
+/// the `AuthUser` extractor and the MCP auth middleware.
 pub async fn authenticate(parts: &Parts, state: &crate::AppState) -> Result<AuthUser, Response> {
     let token = bearer_token(parts)
+        .map(str::to_owned)
+        .or_else(|| ticket_token(parts, state))
         .ok_or_else(|| error_response(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
     let verified: serde_json::Value = state
         .agent
@@ -489,6 +541,15 @@ mod security_tests {
         );
         assert_eq!(user.roles, vec!["operator"]);
         assert!(user.access.is_empty());
+    }
+
+    #[test]
+    fn tickets_are_single_use() {
+        let store = TicketStore::new();
+        let t = store.issue("session-token");
+        assert_eq!(store.redeem(&t).as_deref(), Some("session-token"));
+        assert!(store.redeem(&t).is_none(), "ticket replayed");
+        assert!(store.redeem("nonexistent").is_none());
     }
 
     #[test]

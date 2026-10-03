@@ -160,6 +160,7 @@ async fn harness_opts(webdav: bool) -> Harness {
         exec,
         audit,
         locks: Arc::new(crate::webdav::LockStore::new()),
+        ws_tickets: Arc::new(crate::auth::TicketStore::new()),
     };
     let app = api::api_router()
         .merge(mcp::router(state.clone()))
@@ -201,6 +202,7 @@ async fn harness_remote() -> Harness {
         exec: h.state.exec.clone(),
         audit: h.state.audit.clone(),
         locks: Arc::new(crate::webdav::LockStore::new()),
+        ws_tickets: Arc::new(crate::auth::TicketStore::new()),
     };
     let app = api::api_router()
         .merge(mcp::router(state.clone()))
@@ -2164,6 +2166,7 @@ async fn authenticate_never_returns_hash() {
         .crypto(crate::agent::proto::CryptoOp::Authenticate {
             name: "admin".into(),
             password: PASSWORD.into(),
+            ip: None,
         })
         .await
         .unwrap();
@@ -2582,7 +2585,7 @@ async fn container_exec_agent_side_label_check() {
         "POST",
         "/api/auth/token",
         Some(&admin),
-        Some(serde_json::json!({"services": ["svc_a"], "actions": ["operator"]})),
+        Some(serde_json::json!({"services": ["svc_a"], "actions": ["operator", "exec_containers"]})),
     )
     .await;
     let scoped = j.pointer("/data/token").unwrap().as_str().unwrap().to_string();
@@ -2929,7 +2932,7 @@ async fn webdav_gate_auth_and_listing() {
         "POST",
         "/api/auth/token",
         Some(&admin),
-        Some(serde_json::json!({"services": ["svc_a"], "actions": ["operator"]})),
+        Some(serde_json::json!({"services": ["svc_a"], "actions": ["operator", "mount_files", "edit_files"]})),
     )
     .await;
     let scoped = j.pointer("/data/token").unwrap().as_str().unwrap().to_string();

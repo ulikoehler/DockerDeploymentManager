@@ -19,6 +19,7 @@ pub struct LoginResponse {
 
 pub async fn login(
     State(state): State<AppState>,
+    addr: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<crate::auth::SuccessResponse<LoginResponse>>, Response> {
     // Authentication (argon2 verify + throttle + signing) happens entirely
@@ -28,6 +29,7 @@ pub async fn login(
         .crypto(crate::agent::proto::CryptoOp::Authenticate {
             name: req.name.clone(),
             password: req.password,
+            ip: addr.map(|a| a.0.ip().to_string()),
         })
         .await
     {
@@ -56,6 +58,17 @@ pub async fn login(
         roles: res.user.roles,
         expires_at: res.expires_at,
     }))
+}
+
+/// Mint a single-use WebSocket ticket for the caller's session — use
+/// `?ticket=` on `/ws/*` instead of `?token=` so the JWT never appears
+/// in a URL.
+pub async fn ws_ticket(
+    user: AuthUser,
+    State(state): State<AppState>,
+) -> Json<crate::auth::SuccessResponse<serde_json::Value>> {
+    let ticket = state.ws_tickets.issue(&user.token);
+    ok(serde_json::json!({"ticket": ticket, "expires_in": 60}))
 }
 
 #[derive(Deserialize)]

@@ -49,6 +49,16 @@ fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Mirror of the server's group-membership check: a non-admin operator may
+/// only touch systemd units covered by a configured group's regex.
+fn unit_in_group(cfg: &AppConfig, unit: &str) -> bool {
+    cfg.systemd.groups.iter().any(|g| {
+        regex::Regex::new(&g.unit_regex)
+            .map(|r| r.is_match(unit))
+            .unwrap_or(false)
+    })
+}
+
 pub struct AgentCore {
     pub cfg: Arc<SharedConfig>,
     pub config_dir: PathBuf,
@@ -65,6 +75,10 @@ pub struct AgentCore {
     pub events: tokio::sync::broadcast::Sender<EventMessage>,
     /// The monitor lives inside the agent — it touches docker/systemd.
     pub monitor: Mutex<Option<Arc<crate::monitor::Monitor>>>,
+    /// Webhook replay cache: recent (signature-or-token, body-hash) pairs.
+    webhook_seen: Mutex<HashMap<String, std::time::Instant>>,
+    /// Last accepted webhook sync, for rate limiting.
+    last_webhook_sync: Mutex<Option<std::time::Instant>>,
 }
 
 impl AgentCore {
@@ -101,6 +115,8 @@ impl AgentCore {
             audit: Mutex::new(file),
             events: tokio::sync::broadcast::channel(256).0,
             monitor: Mutex::new(None),
+            webhook_seen: Mutex::new(HashMap::new()),
+            last_webhook_sync: Mutex::new(None),
         })
     }
 
@@ -220,7 +236,7 @@ impl AgentCore {
     /// Verify the justification token (signature + generation) and load the
     /// *fresh* user record — without writing a justification entry. Used by
     /// `precheck`/`scoped_user`, where the arm itself logs the op.
-    fn token_user(&self, token: &str) -> Result<(Claims, User)> {
+    pub(crate) fn token_user(&self, token: &str) -> Result<(Claims, User)> {
         let claims = self
             .jwt
             .verify(token)
@@ -255,6 +271,41 @@ impl AgentCore {
             crate::auth::apply_token_scope(&mut user, scope);
         }
         Ok((claims, user))
+    }
+
+    /// For trust-root operations that must never run under a narrowed
+    /// token: verify the token is *unscoped* and load the fresh user.
+    /// A scoped (MCP/service/action) token cannot mutate users, list them,
+    /// rotate keys, or change notifier config — scope only ever narrows.
+    fn unscoped_admin(&self, token: &str) -> Result<(Claims, User)> {
+        let (claims, user) = self.token_user(token)?;
+        if claims.scope.is_some() {
+            bail!("scoped tokens cannot perform this operation");
+        }
+        Self::require_admin(&user)?;
+        Ok((claims, user))
+    }
+
+    /// Container-id → service authorization: resolve the owning compose
+    /// project agent-side (same rule as `ContainerExec`) so arbitrary
+    /// container ids cannot be read/touched by unrelated service users.
+    /// Unmanaged containers are admin-only.
+    async fn authorize_container(&self, cfg: &AppConfig, u: &User, container: &str) -> Result<()> {
+        let project = self
+            .docker
+            .container_project(container)
+            .await
+            .context("inspect container")?;
+        match project.as_deref() {
+            Some(p) if svc_ops::get_service(cfg, p).is_ok() => {
+                if crate::permissions::can_access_service(&u, p, cfg.security.default_access) {
+                    Ok(())
+                } else {
+                    bail!("service access denied: {p}")
+                }
+            }
+            _ => Self::require_admin(u),
+        }
     }
 
     /// `scoped_user` + service-access check — mirrors the server's
@@ -370,14 +421,25 @@ impl AgentCore {
             | SyncVerb::MonitoringGet { service }
             | SyncVerb::BackupGet { service }
             | SyncVerb::BackupCheck { service }
+            | SyncVerb::BackupLs { service, .. }
             | SyncVerb::BackupSnapshots { service } => self
                 .justify_service(cfg, token, service)
                 .map(|x| Some(x.1)),
             // ---- systemd surface: operator, like the server ----
-            // `ListUnits`/`Journal` back the operator-only systemd API.
-            SyncVerb::ListUnits { .. } | SyncVerb::Journal { .. } => {
+            // `ListUnits` backs the operator-only systemd API; `Journal`
+            // additionally mirrors the server's group-membership gate so a
+            // non-admin operator cannot read arbitrary unit logs.
+            SyncVerb::ListUnits { .. } => {
                 let (_c, u) = self.scoped_user(token)?;
                 Self::require_feature(&u, u.has_role("operator"), "operator role")?;
+                Ok(Some(u))
+            }
+            SyncVerb::Journal { unit, .. } => {
+                let (_c, u) = self.scoped_user(token)?;
+                Self::require_feature(&u, u.has_role("operator"), "operator role")?;
+                if !u.is_admin() && !unit_in_group(cfg, unit) {
+                    bail!("unit outside configured systemd groups");
+                }
                 Ok(Some(u))
             }
             // `UnitState`/`UnitPathExists` also back the unit summary shown
@@ -397,8 +459,8 @@ impl AgentCore {
                 }
                 bail!("operator role required")
             }
-            // ---- gitops mutations are admin-only server-side ----
-            SyncVerb::GitSyncRun | SyncVerb::GitSyncPush => {
+            // ---- gitops surface is admin-only server-side ----
+            SyncVerb::GitSyncRun | SyncVerb::GitSyncPush | SyncVerb::GitSyncStatus => {
                 let (_c, u) = self.scoped_user(token)?;
                 Self::require_admin(&u)?;
                 Ok(Some(u))
@@ -443,9 +505,16 @@ impl AgentCore {
                 }
                 Ok(u)
             }
-            ExecVerb::SystemdCommand { .. } | ExecVerb::SystemdRestart { .. } => {
+            ExecVerb::SystemdCommand { target, .. } | ExecVerb::SystemdRestart { target } => {
                 let (_c, u) = self.scoped_user(token)?;
                 Self::require_feature(&u, u.has_role("operator"), "operator role")?;
+                // Mirror the server: non-admin operators may only touch
+                // units covered by a configured group.
+                if let SystemdTarget::Unit(unit) = target {
+                    if !u.is_admin() && !unit_in_group(cfg, unit) {
+                        bail!("unit outside configured systemd groups");
+                    }
+                }
                 Ok(u)
             }
             ExecVerb::UnitRegen { service, .. } => {
@@ -488,10 +557,11 @@ impl AgentCore {
                 Self::require_admin(&u)?;
                 Ok(u)
             }
-            // passive log streams: server checked service access when it
-            // resolved the container id; token validity suffices here.
-            ExecVerb::ContainerLogs { .. } => {
+            // Passive log streams still get the container→service check:
+            // a compromised server could feed any container id here.
+            ExecVerb::ContainerLogs { id, .. } => {
                 let (_c, u) = self.scoped_user(token)?;
+                self.authorize_container(cfg, &u, id).await?;
                 Ok(u)
             }
             // Free-form docker exec: `exec_containers` feature (or admin),
@@ -551,8 +621,8 @@ impl AgentCore {
 
     pub async fn crypto(&self, op: CryptoOp) -> Result<serde_json::Value> {
         match op {
-            CryptoOp::Authenticate { name, password } => {
-                self.do_authenticate(&name, &password).await
+            CryptoOp::Authenticate { name, password, ip } => {
+                self.do_authenticate(&name, &password, ip.as_deref()).await
             }
             CryptoOp::Verify { token } => {
                 let claims = self
@@ -579,8 +649,8 @@ impl AgentCore {
                 actions,
             } => self.do_mint(&token, ttl_minutes, services, actions).await,
             CryptoOp::Rotate { token } => {
-                let (_claims, user) = self.justify_token(&token, "rotate", "")?;
-                Self::require_admin(&user)?;
+                let (_claims, _user) = self.unscoped_admin(&token)?;
+                self.justify(&_claims, "rotate", "");
                 self.jwt.rotate();
                 Ok(serde_json::json!(true))
             }
@@ -616,6 +686,34 @@ impl AgentCore {
                 if !ok {
                     bail!("invalid webhook signature");
                 }
+                // Replay protection: GitHub deliveries carry no timestamp,
+                // so dedupe identical (signature, body) pairs for a window,
+                // and rate-limit syncs so a captured/stolen delivery can't
+                // keep the host in a git-fetch loop.
+                {
+                    use sha2::Digest;
+                    let digest = hex::encode(sha2::Sha256::digest(&body));
+                    let who = sig256
+                        .clone()
+                        .or_else(|| gitlab_token.clone())
+                        .unwrap_or_default();
+                    let key = format!("{who}:{digest}");
+                    let mut seen = self.webhook_seen.lock().unwrap();
+                    seen.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(600));
+                    if seen.insert(key, std::time::Instant::now()).is_some() {
+                        bail!("duplicate webhook delivery");
+                    }
+                }
+                {
+                    let mut last = self.last_webhook_sync.lock().unwrap();
+                    if last
+                        .map(|t| t.elapsed() < std::time::Duration::from_secs(10))
+                        .unwrap_or(false)
+                    {
+                        bail!("webhook rate limited");
+                    }
+                    *last = Some(std::time::Instant::now());
+                }
                 self.justify_internal("webhook", "gitsync", "");
                 let gitsync = self.gitsync.clone();
                 let cfga = cfg.clone();
@@ -637,8 +735,8 @@ impl AgentCore {
                     .await
             }
             CryptoOp::UsersList { token } => {
-                let (_claims, user) = self.justify_token(&token, "users_list", "")?;
-                Self::require_admin(&user)?;
+                let (_claims, _user) = self.unscoped_admin(&token)?;
+                self.justify(&_claims, "users_list", "");
                 let mut file = self.users_file()?;
                 for u in &mut file.users {
                     u.password_hash.clear();
@@ -649,9 +747,21 @@ impl AgentCore {
         }
     }
 
-    async fn do_authenticate(&self, name: &str, password: &str) -> Result<serde_json::Value> {
-        // Throttle first — the agent owns it, a hostile server can't skip it.
-        let locked = self.throttle.is_locked(name);
+    async fn do_authenticate(
+        &self,
+        name: &str,
+        password: &str,
+        ip: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        // Throttle first — the agent owns it, a hostile server can't skip
+        // it. Per-username and per-IP buckets: the IP bound stops an
+        // attacker rotating across usernames at full speed from one host.
+        let ip_key = ip.map(|i| format!("ip:{i}"));
+        let locked = self.throttle.is_locked(name)
+            || ip_key
+                .as_deref()
+                .map(|k| self.throttle.is_locked(k))
+                .unwrap_or(false);
         let file = self.users_file()?;
         let user = file.users.iter().find(|u| u.name == name);
         // Always one peppered argon2 verify to avoid a timing oracle.
@@ -669,6 +779,9 @@ impl AgentCore {
                 bail!("too many failed attempts, try again later");
             }
             self.throttle.record_failure(name);
+            if let Some(k) = &ip_key {
+                self.throttle.record_failure(k);
+            }
             bail!("invalid credentials");
         }
         self.throttle.record_success(name);
@@ -789,8 +902,8 @@ impl AgentCore {
     }
 
     async fn do_user_mutate(&self, token: &str, op: UserMut) -> Result<serde_json::Value> {
-        let (claims, caller) = self.justify_token(token, "user_mutate", "")?;
-        Self::require_admin(&caller)?;
+        let (claims, _caller) = self.unscoped_admin(token)?;
+        self.justify(&claims, "user_mutate", "");
         let mut file = self.users_file()?;
         match op {
             UserMut::Create {
@@ -1005,6 +1118,10 @@ impl AgentCore {
             }
             SyncVerb::ContainerHealth { id } => {
                 self.justify_token(token, "container_health", &id)?;
+                // Container ids are arbitrary input here — re-resolve the
+                // owning service and check access (unmanaged = admin-only).
+                let (_c, u) = self.scoped_user(token)?;
+                self.authorize_container(&cfg, &u, &id).await?;
                 Ok(serde_json::to_value(
                     self.docker.container_health(&id).await?,
                 )?)
@@ -1050,8 +1167,8 @@ impl AgentCore {
                 )?)
             }
             SyncVerb::NotifierMut { op } => {
-                let (_claims, caller) = self.justify_token(token, "notifier_mut", "")?;
-                Self::require_admin(&caller)?;
+                let (_claims, _caller) = self.unscoped_admin(token)?;
+                self.justify(&_claims, "notifier_mut", "");
                 self.cfg
                     .mutate(move |c| {
                         match op {
@@ -1111,6 +1228,32 @@ impl AgentCore {
                     crate::backup::snapshots(&cfg, &self.host, &svc, &self.restic_bin(&cfg).await?)
                         .await?,
                 )?)
+            }
+            SyncVerb::BackupLs {
+                service,
+                snapshot,
+                path,
+            } => {
+                self.justify_token(
+                    token,
+                    "backup_ls",
+                    &format!("{service}:{snapshot}:{}", path.as_deref().unwrap_or("/")),
+                )?;
+                let svc = svc_ops::get_service(&cfg, &service)?;
+                let bin = self.restic_bin(&cfg).await?;
+                let script =
+                    crate::backup::ls_script(&cfg, &svc, &bin, &snapshot, path.as_deref())?;
+                let out = self.host.run("bash", &["-c".into(), script]).await?;
+                if !out.success() {
+                    bail!("restic ls failed: {}", out.stderr.trim());
+                }
+                // --json emits ndjson node objects, one per line.
+                let entries: Vec<serde_json::Value> = out
+                    .stdout
+                    .lines()
+                    .filter_map(|l| serde_json::from_str(l).ok())
+                    .collect();
+                Ok(serde_json::to_value(entries)?)
             }
             SyncVerb::MetaWrite { service, meta } => {
                 self.justify_token(token, "meta_write", &service)?;
@@ -1264,10 +1407,10 @@ impl AgentCore {
                 }
             }
             SyncVerb::NotifyTest { id, message } => {
-                let (_claims, caller) = self.justify_token(token, "notify_test", &id)?;
+                let (_claims, _caller) = self.unscoped_admin(token)?;
+                self.justify(&_claims, "notify_test", &id);
                 // Fires real outbound webhooks to configured targets —
-                // admin-only, re-checked here against the fresh record.
-                Self::require_admin(&caller)?;
+                // admin-only, unscoped tokens only (checked above).
                 let n = cfg
                     .monitoring
                     .notifiers
@@ -1293,6 +1436,8 @@ impl AgentCore {
             }
             SyncVerb::ContainerLogsCollect { id, tail, since } => {
                 self.justify_token(token, "container_logs", &id)?;
+                let (_c, u) = self.scoped_user(token)?;
+                self.authorize_container(&cfg, &u, &id).await?;
                 use futures::StreamExt;
                 let mut stream = self.docker.logs(&id, tail, since, false).await?;
                 let mut out = vec![];
@@ -1711,6 +1856,7 @@ impl AgentCore {
                 service,
                 snapshot,
                 target_dir,
+                include,
             } => {
                 if !snapshot
                     .chars()
@@ -1718,12 +1864,21 @@ impl AgentCore {
                 {
                     bail!("invalid snapshot id");
                 }
-                if !svc_ops::valid_rel_path(target_dir) {
+                let target_ok = svc_ops::valid_rel_path(target_dir)
+                    || (Path::new(target_dir).is_absolute() && !target_dir.contains(".."));
+                if !target_ok {
                     bail!("invalid target dir");
                 }
                 let svc = svc_ops::get_service(cfg, service)?;
                 let bin = self.restic_bin(cfg).await?;
-                let script = crate::backup::restore_script(cfg, &svc, &bin, snapshot, target_dir)?;
+                let script = crate::backup::restore_script(
+                    cfg,
+                    &svc,
+                    &bin,
+                    snapshot,
+                    target_dir,
+                    include.as_deref().unwrap_or(&[]),
+                )?;
                 let item = shell_item(&format!("backup restore ({service})"), &script, ".");
                 Ok(exec::run_steps(item, HashMap::new(), tx.clone(), eid.to_string()).await)
             }

@@ -268,16 +268,23 @@ impl Agent {
     }
 
     /// Subscribe to monitor events. For a remote agent this opens a Watch
-    /// connection and re-broadcasts locally.
+    /// connection (authenticated) and re-broadcasts locally.
     pub async fn subscribe_events(
         &self,
+        token: &str,
     ) -> Result<tokio::sync::broadcast::Receiver<crate::protocol::EventMessage>> {
         match self {
-            Agent::Local(core) => Ok(core.events.subscribe()),
+            Agent::Local(core) => {
+                core.token_user(token)?;
+                Ok(core.events.subscribe())
+            }
             Agent::Remote(s) => {
                 let sock = UnixStream::connect(&s.path).await?;
                 let (r, mut w) = sock.into_split();
-                w.write_all(b"{\"kind\":\"watch\"}\n").await?;
+                let req = serde_json::json!({"kind":"watch","token":token});
+                let mut buf = serde_json::to_vec(&req)?;
+                buf.push(b'\n');
+                w.write_all(&buf).await?;
                 drop(w);
                 let (tx, rx) = tokio::sync::broadcast::channel(256);
                 tokio::spawn(async move {

@@ -279,10 +279,25 @@ security:
 - When `agent_socket` is unset the server logs a warning and embeds the
   agent in-process — same code path, no separation. Intended for tests
   and development only.
+- Scoped tokens are rejected outright for trust-root operations (user
+  mutation/listing, JWT rotation, notifier changes) — a narrowed token
+  can never perform them, even at the agent socket. Container ids
+  (health, logs, exec) are re-resolved to their owning compose project
+  inside the agent, and systemd verbs re-check configured group
+  membership, so a compromised server cannot smuggle out-of-scope
+  targets. The agent's `Watch` event stream requires a valid token.
+- GitOps webhook deliveries are deduplicated (signature + body hash,
+  10-minute window) and rate-limited (one accepted sync per 10 s) —
+  captured deliveries cannot be replayed or used to busy-loop the host.
+- WebDAV lock tokens are bearer credentials: `lockdiscovery` reports a
+  lock to every reader but reveals the token only to its holder (or an
+  admin).
 
 ## Operational guidance
 
 Treat ddm like `root SSH`: TLS via reverse proxy or VPN,
 `security.default_access: deny`, sparing use of `unrestricted`, set
 `DDM_JWT_SECRET` explicitly on the **agent** process, run the agent
-socket `0660 root:ddm`.
+socket `0660 root:ddm`, and prefer `POST /api/auth/ws-ticket` +
+`?ticket=` (single-use, 60 s) over `?token=` for WebSocket clients so
+session JWTs stay out of URLs.

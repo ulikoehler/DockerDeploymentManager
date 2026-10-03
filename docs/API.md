@@ -4,7 +4,9 @@ All endpoints return `{"success": true, "data": …}` or
 `{"success": false, "error": "…"}` with an HTTP error status.
 
 Auth: `POST /api/auth/login` → `{token}`; send as `Authorization: Bearer
-<token>`. WebSocket endpoints accept `?token=…` (browsers can't set headers).
+<token>`. WebSocket endpoints accept `?token=…` (browsers can't set
+headers) — prefer `?ticket=` with a single-use ticket from
+`POST /api/auth/ws-ticket` so the JWT never appears in a URL.
 
 ## Auth
 
@@ -14,6 +16,7 @@ Auth: `POST /api/auth/login` → `{token}`; send as `Authorization: Bearer
 | GET  | `/api/auth/me` | own profile (roles, features, access, compose_policy) |
 | POST | `/api/auth/token` | `{ttl_minutes?, services?[], actions?[]}` → `{token, expires_at}` — time-limited token (e.g. for MCP); `services`/`actions` intersect with the caller's permissions (only narrows) |
 | POST | `/api/auth/logout-all` | admin; rotates JWT secret → all sessions die |
+| POST | `/api/auth/ws-ticket` | → `{ticket, expires_in}` — single-use, 60 s; redeem via `?ticket=` on `/ws/*` |
 
 ## Services
 
@@ -58,8 +61,9 @@ Unit issue codes: `missing`, `not_enabled`, `inactive`, `workdir_mismatch`,
 | POST | `/api/services/{name}/backup/provision` | idempotent: password file, backup.sh, timer units, `restic init` |
 | POST | `/api/services/{name}/backup/run` | run `backup.sh` now → `{execution_id}` |
 | GET  | `/api/services/{name}/backup/snapshots` | `restic snapshots --json` |
+| GET  | `/api/services/{name}/backup/ls?snapshot=<id>[&path=<dir>]` | `restic ls --json` — file listing inside a snapshot |
 | POST | `/api/services/{name}/backup/forget` | `forget --prune` with configured retention |
-| POST | `/api/services/{name}/backup/restore` | `{snapshot, target_dir}` — admin or `unrestricted` only |
+| POST | `/api/services/{name}/backup/restore` | `{snapshot, target_dir, include?[]}` — admin or `unrestricted` only; `include` = `restic --include` patterns for selective restore |
 
 ## Monitoring
 

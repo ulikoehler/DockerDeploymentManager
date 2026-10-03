@@ -122,8 +122,24 @@ pub struct DavLock {
     pub token: String,
     pub depth: String,
     pub owner: String,
+    /// Authenticated user holding the lock — only they (or an admin) may
+    /// see the token in lockdiscovery; it's a bearer credential.
+    pub holder: String,
     pub scope: String,
     pub expires: Instant,
+}
+
+/// Lock as shown to `user` in PROPFIND: the lock itself is reported but
+/// its token is redacted unless the user holds it — another user's lock
+/// token presented in `If:`/`Lock-Token:` would bypass the 423 gate.
+fn lock_for(l: &DavLock, user: &User) -> DavLock {
+    if l.holder == user.name || user.is_admin() {
+        l.clone()
+    } else {
+        let mut c = l.clone();
+        c.token.clear();
+        c
+    }
 }
 
 /// In-memory lock table keyed by normalized `/dav/<service>/<path>`.
@@ -704,7 +720,10 @@ async fn propfind(
                     let Ok(meta) = state.agent.file_stat(&name, "", &dav.token).await else {
                         continue;
                     };
-                    let lock = state.locks.covering(&lock_key(&name, ""));
+                    let lock = state
+                        .locks
+                        .covering(&lock_key(&name, ""))
+                        .map(|l| lock_for(&l, &dav.user));
                     inner.push_str(&response_xml(
                         Some(&name),
                         "",
@@ -726,13 +745,17 @@ async fn propfind(
                 Err(e) => return agent_err(e),
             };
             let is_col = meta.kind == "dir";
+            let lock = state
+                .locks
+                .covering(&lock_key(&name, &rel))
+                .map(|l| lock_for(&l, &dav.user));
             let mut inner = response_xml(
                 Some(&name),
                 &rel,
                 &meta,
                 is_col,
                 &props,
-                state.locks.covering(&lock_key(&name, &rel)).as_ref(),
+                lock.as_ref(),
             );
             if depth != "0" && is_col {
                 let entries = match state
@@ -761,7 +784,10 @@ async fn propfind(
                         size: e.size,
                         mtime: e.mtime,
                     };
-                    let child_lock = state.locks.covering(&lock_key(&name, &child_rel));
+                    let child_lock = state
+                        .locks
+                        .covering(&lock_key(&name, &child_rel))
+                        .map(|l| lock_for(&l, &dav.user));
                     inner.push_str(&response_xml(
                         Some(&name),
                         &child_rel,
@@ -1321,6 +1347,7 @@ async fn lock(
         token: format!("opaquelocktoken:{}", uuid::Uuid::new_v4()),
         depth: if depth == "0" { "0" } else { "infinity" }.to_string(),
         owner: extract_owner(&text),
+        holder: dav.user.name.clone(),
         // Shared locks are accepted but enforced exclusively (stricter than
         // the spec, never weaker).
         scope: if text.contains("shared") { "shared" } else { "exclusive" }.to_string(),

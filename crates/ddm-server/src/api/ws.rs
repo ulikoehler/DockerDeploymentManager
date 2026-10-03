@@ -357,7 +357,7 @@ pub async fn events_ws(
     if !ws_origin_ok(&state.config.get().await.server.cors_origins, &headers) {
         return crate::auth::forbidden();
     }
-    let rx = match state.agent.subscribe_events().await {
+    let rx = match state.agent.subscribe_events(&user.token).await {
         Ok(r) => r,
         Err(_) => return crate::auth::internal("agent unavailable"),
     };

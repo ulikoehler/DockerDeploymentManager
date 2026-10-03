@@ -87,6 +87,9 @@ pub enum ExecVerb {
         service: String,
         snapshot: String,
         target_dir: String,
+        /// Optional `restic --include` patterns — empty/absent = full restore.
+        #[serde(default)]
+        include: Option<Vec<String>>,
     },
     /// Create service dir, write compose file, write meta, optional unit+start.
     ServiceCreate {
@@ -209,6 +212,14 @@ pub enum SyncVerb {
     BackupSnapshots {
         service: String,
     },
+    /// `restic ls <snapshot>` — file listing inside a snapshot.
+    BackupLs {
+        service: String,
+        snapshot: String,
+        /// Optional subdir inside the snapshot to list.
+        #[serde(default)]
+        path: Option<String>,
+    },
     MetaWrite {
         service: String,
         meta: ServiceMeta,
@@ -281,6 +292,9 @@ pub enum CryptoOp {
     Authenticate {
         name: String,
         password: String,
+        /// Client IP for per-source throttling (added to the per-name limit).
+        #[serde(default)]
+        ip: Option<String>,
     },
     /// Mint a (possibly scoped) child token. Parent verified here.
     Mint {
@@ -363,7 +377,8 @@ pub enum AgentRequest {
         token: String,
     },
     /// Subscribe to monitor events — streams `EventMessage` lines.
-    Watch,
+    /// Requires a valid justification token, verified before subscribing.
+    Watch { token: String },
     Exec {
         verb: ExecVerb,
         /// Server-assigned execution id; frames stream back.

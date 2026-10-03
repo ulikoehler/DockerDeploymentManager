@@ -111,7 +111,22 @@ async fn handle_conn(
     };
     let req: AgentRequest = serde_json::from_str(&line).context("bad request")?;
     match req {
-        AgentRequest::Watch => {
+        AgentRequest::Watch { token } => {
+            // Monitor events can carry service names/state — require a
+            // valid justification token before streaming.
+            if let Err(e) = core.token_user(&token) {
+                write_resp(
+                    &mut w,
+                    &AgentResponse::Err {
+                        error: AgentError {
+                            code: "watch".into(),
+                            message: format!("{e:#}"),
+                        },
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
             let mut rx = core.events.subscribe();
             loop {
                 let ev = match rx.recv().await {

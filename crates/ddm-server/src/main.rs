@@ -44,6 +44,8 @@ pub struct AppState {
     pub audit: Arc<audit::AuditLog>,
     /// WebDAV advisory locks (in-memory, per server instance).
     pub locks: Arc<webdav::LockStore>,
+    /// Single-use WebSocket tickets (in-memory).
+    pub ws_tickets: Arc<auth::TicketStore>,
 }
 
 #[tokio::main]
@@ -126,6 +128,7 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
         exec,
         audit,
         locks: Arc::new(webdav::LockStore::new()),
+        ws_tickets: Arc::new(auth::TicketStore::new()),
     };
 
     let mut app = api::api_router()
@@ -163,7 +166,11 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     info!("ddm listening on {listen}");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

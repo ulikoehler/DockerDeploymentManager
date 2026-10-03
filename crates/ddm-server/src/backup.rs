@@ -448,32 +448,87 @@ pub fn forget_script(cfg: &AppConfig, svc: &Service, restic_bin: &str) -> String
     )
 }
 
-/// Build the host script for `restic restore`.
+/// Snapshot id validity — shared by every restic invocation that takes
+/// one on the command line. `latest` is restic's special selector.
+pub fn valid_snapshot(snapshot: &str) -> Result<()> {
+    if snapshot == "latest" {
+        return Ok(());
+    }
+    if snapshot.is_empty()
+        || snapshot
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    {
+        anyhow::bail!("invalid snapshot id");
+    }
+    Ok(())
+}
+
+/// A path inside the snapshot (`ls` dir arg, `--include` pattern): no
+/// traversal, no flag-like leading dash, nothing the shell could expand
+/// into a second token.
+fn valid_snap_path(p: &str, what: &str) -> Result<()> {
+    if p.is_empty()
+        || p.contains("..")
+        || p.starts_with('-')
+        || p.contains('\\')
+        || p.contains('\0')
+    {
+        anyhow::bail!("invalid snapshot {what} '{p}'");
+    }
+    Ok(())
+}
+
+/// `restic ls <snapshot> [path]` — list files inside a snapshot, JSON out.
+pub fn ls_script(
+    cfg: &AppConfig,
+    svc: &Service,
+    restic_bin: &str,
+    snapshot: &str,
+    path: Option<&str>,
+) -> Result<String> {
+    valid_snapshot(snapshot)?;
+    let mut s = format!(
+        "{} && {} ls --json {}",
+        restic_env_script_prefix(cfg, svc),
+        shell_quote(restic_bin),
+        shell_quote(snapshot),
+    );
+    if let Some(p) = path.filter(|p| !p.is_empty()) {
+        valid_snap_path(p, "path")?;
+        s.push_str(&format!(" {}", shell_quote(p)));
+    }
+    Ok(s)
+}
+
+/// Build the host script for `restic restore`. `includes` selects paths
+/// inside the snapshot (restic `--include` patterns); empty = full restore.
 pub fn restore_script(
     cfg: &AppConfig,
     svc: &Service,
     restic_bin: &str,
     snapshot: &str,
     target_dir: &str,
+    includes: &[String],
 ) -> Result<String> {
-    if snapshot
-        .chars()
-        .any(|c| !(c.is_ascii_alphanumeric() || c == '-'))
-        && snapshot != "latest"
-    {
-        anyhow::bail!("invalid snapshot id");
+    valid_snapshot(snapshot)?;
+    let rel_ok = valid_rel_path(target_dir);
+    let abs_ok = PathBuf::from(target_dir).is_absolute() && !target_dir.contains("..");
+    if !rel_ok && !abs_ok {
+        anyhow::bail!("target_dir must be a relative or absolute path without '..'");
     }
-    let target = PathBuf::from(target_dir);
-    if !target.is_absolute() || target_dir.contains("..") {
-        anyhow::bail!("target_dir must be an absolute path without '..'");
-    }
-    Ok(format!(
+    let mut s = format!(
         "{} && {} restore {} --target {}",
         restic_env_script_prefix(cfg, svc),
         shell_quote(restic_bin),
         shell_quote(snapshot),
         shell_quote(target_dir)
-    ))
+    );
+    for i in includes {
+        valid_snap_path(i, "include")?;
+        s.push_str(&format!(" --include {}", shell_quote(i)));
+    }
+    Ok(s)
 }
 
 /// Script to run the backup now.
@@ -704,9 +759,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let s = svc(tmp.path());
         let c = cfg();
-        assert!(restore_script(&c, &s, "restic", "latest", "/tmp/restore-1").is_ok());
-        assert!(restore_script(&c, &s, "restic", "abc;rm", "/tmp/x").is_err());
-        assert!(restore_script(&c, &s, "restic", "latest", "rel/path").is_err());
-        assert!(restore_script(&c, &s, "restic", "latest", "/tmp/../x").is_err());
+        assert!(restore_script(&c, &s, "restic", "latest", "/tmp/restore-1", &[]).is_ok());
+        assert!(restore_script(&c, &s, "restic", "abc;rm", "/tmp/x", &[]).is_err());
+        assert!(restore_script(&c, &s, "restic", "latest", "rel/path", &[]).is_ok());
+        assert!(restore_script(&c, &s, "restic", "latest", "/tmp/../x", &[]).is_err());
+        // selective restore: include patterns are validated and quoted
+        let inc = vec!["data".to_string(), "docker-compose.yml".to_string()];
+        let out = restore_script(&c, &s, "restic", "latest", "/tmp/r", &inc).unwrap();
+        assert!(out.contains("--include 'data'") && out.contains("--include 'docker-compose.yml'"));
+        let bad = vec!["../escape".to_string()];
+        assert!(restore_script(&c, &s, "restic", "latest", "/tmp/r", &bad).is_err());
+        let bad = vec!["-rf".to_string()];
+        assert!(restore_script(&c, &s, "restic", "latest", "/tmp/r", &bad).is_err());
+        // restic ls: snapshot listing
+        assert!(ls_script(&c, &s, "restic", "latest", None).is_ok());
+        assert!(ls_script(&c, &s, "restic", "latest", Some("data/x")).is_ok());
+        assert!(ls_script(&c, &s, "restic", "latest", Some("../x")).is_err());
+        assert!(ls_script(&c, &s, "restic", "abc;rm", None).is_err());
     }
 }

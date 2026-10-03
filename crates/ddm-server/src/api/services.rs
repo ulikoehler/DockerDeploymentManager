@@ -938,9 +938,46 @@ pub async fn backup_forget(
 }
 
 #[derive(Deserialize)]
+pub struct BackupLsQuery {
+    pub snapshot: String,
+    /// Optional subdir inside the snapshot to list.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// `restic ls` — file listing inside a snapshot (browse a backup).
+pub async fn backup_ls(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<BackupLsQuery>,
+) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
+    let _svc = require_service_access(&state, &user, &name).await?;
+    let entries: serde_json::Value = state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::BackupLs {
+                service: name.clone(),
+                snapshot: q.snapshot.clone(),
+                path: q.path.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(ok(entries))
+}
+
+#[derive(Deserialize)]
 pub struct RestoreRequest {
     pub snapshot: String,
+    /// Target dir for the restore — relative to the service dir, or an
+    /// absolute host path. Files land under `<target>/<snapshot-path>`.
     pub target_dir: String,
+    /// Optional `restic --include` patterns for a selective restore;
+    /// absent or empty restores the whole snapshot.
+    #[serde(default)]
+    pub include: Option<Vec<String>>,
 }
 
 pub async fn backup_restore(
@@ -962,6 +999,7 @@ pub async fn backup_restore(
                 service: name.clone(),
                 snapshot: req.snapshot.clone(),
                 target_dir: req.target_dir.clone(),
+                include: req.include.clone(),
             },
             format!("backup restore ({name})"),
             Some(name.clone()),

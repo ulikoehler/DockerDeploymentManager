@@ -302,6 +302,18 @@ pub struct RestoreArgs {
     pub name: String,
     pub snapshot: String,
     pub target_dir: String,
+    /// Optional `restic --include` patterns for a selective restore.
+    #[serde(default)]
+    pub include: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BackupLsArgs {
+    pub name: String,
+    pub snapshot: String,
+    /// Optional subdir inside the snapshot to list.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -888,6 +900,19 @@ impl DdmMcp {
         finish(api::services::backup_forget(user, self.st(), Path(p.name)).await).await
     }
 
+    #[tool(description = "List files inside a backup snapshot (restic ls)")]
+    async fn service_backup_ls(
+        &self,
+        McpUser(user): McpUser,
+        Parameters(p): Parameters<BackupLsArgs>,
+    ) -> Result<McpJson<Value>, ErrorData> {
+        let q = api::services::BackupLsQuery {
+            snapshot: p.snapshot,
+            path: p.path,
+        };
+        finish(api::services::backup_ls(user, self.st(), Path(p.name), Query(q)).await).await
+    }
+
     #[tool(description = "Restore a backup snapshot to a target dir (returns execution_id)")]
     async fn service_backup_restore(
         &self,
@@ -897,6 +922,7 @@ impl DdmMcp {
         let req = api::services::RestoreRequest {
             snapshot: p.snapshot,
             target_dir: p.target_dir,
+            include: p.include,
         };
         finish(api::services::backup_restore(user, self.st(), Path(p.name), Json(req)).await).await
     }
@@ -1115,7 +1141,7 @@ impl DdmMcp {
 
     #[tool(description = "GitOps sync status")]
     async fn gitops_status(&self, McpUser(user): McpUser) -> Result<McpJson<Value>, ErrorData> {
-        to_data(api::misc::gitops_status(user, self.st()).await)
+        finish(api::misc::gitops_status(user, self.st()).await).await
     }
 
     #[tool(description = "Pull the config repo and apply (admin)")]

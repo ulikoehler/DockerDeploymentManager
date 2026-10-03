@@ -26,6 +26,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/api/auth/me", get(auth::me))
         .route("/api/auth/token", post(auth::issue_token))
         .route("/api/auth/logout-all", post(auth::logout_all))
+        .route("/api/auth/ws-ticket", post(auth::ws_ticket))
         // users (admin)
         .route("/api/users", get(users::list).post(users::create))
         .route(
@@ -90,6 +91,10 @@ pub fn api_router() -> Router<AppState> {
         .route(
             "/api/services/:name/backup/snapshots",
             get(services::backup_snapshots),
+        )
+        .route(
+            "/api/services/:name/backup/ls",
+            get(services::backup_ls),
         )
         .route(
             "/api/services/:name/backup/forget",
