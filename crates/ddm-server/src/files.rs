@@ -103,6 +103,15 @@ pub fn resolve(root: &Path, rel: &str) -> Result<PathBuf> {
     if !canon.starts_with(&root_canon) {
         anyhow::bail!("path escapes the service directory");
     }
+    // The denied-name policy has to hold for the *resolved* path, not just
+    // the input: a symlink alias inside the service dir (`data -> meta.yaml`,
+    // which a cloned repo can deliver) would otherwise canonicalize straight
+    // onto a privileged file and be read/written through it.
+    if let Ok(rel_canon) = canon.strip_prefix(&root_canon) {
+        if denied(&rel_canon.to_string_lossy()) {
+            anyhow::bail!("access to '{rel}' is not allowed");
+        }
+    }
     Ok(canon)
 }
 
@@ -442,6 +451,43 @@ mod security_tests {
         ] {
             assert!(resolve(root, rel).is_err(), "{rel:?} allowed");
         }
+    }
+
+    /// A symlink alias inside the service dir must not become a way around
+    /// the denied-name policy: `data -> meta.yaml` canonicalizes onto the
+    /// privileged file, and a cloned repo can deliver exactly that.
+    #[test]
+    fn resolve_denied_names_via_symlink_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("meta.yaml"), "backup: {enabled: false}\n").unwrap();
+        fs::write(root.join("backup.sh"), "#!/bin/sh\n").unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git/config"), "[core]\n").unwrap();
+        std::os::unix::fs::symlink("meta.yaml", root.join("alias.yaml")).unwrap();
+        std::os::unix::fs::symlink("backup.sh", root.join("alias.sh")).unwrap();
+        std::os::unix::fs::symlink(".git", root.join("gitdir")).unwrap();
+        fs::create_dir_all(root.join("sub")).unwrap();
+        std::os::unix::fs::symlink("../meta.yaml", root.join("sub/up.yaml")).unwrap();
+
+        for rel in ["alias.yaml", "alias.sh", "gitdir/config", "sub/up.yaml"] {
+            assert!(resolve(root, rel).is_err(), "{rel:?} resolved through an alias");
+            assert!(read_node(root, rel).is_err(), "{rel:?} readable through an alias");
+            assert!(
+                write_file(root, rel, "pwned").is_err(),
+                "{rel:?} writable through an alias"
+            );
+        }
+        // ...and the protected files are untouched.
+        assert!(fs::read_to_string(root.join("meta.yaml"))
+            .unwrap()
+            .contains("enabled: false"));
+        assert_eq!(fs::read_to_string(root.join("backup.sh")).unwrap(), "#!/bin/sh\n");
+        // An ordinary in-dir symlink still works (only denied targets are cut).
+        fs::write(root.join("plain.txt"), "ok").unwrap();
+        std::os::unix::fs::symlink("plain.txt", root.join("alias.txt")).unwrap();
+        assert!(resolve(root, "alias.txt").is_ok());
+        assert!(read_node(root, "alias.txt").is_ok());
     }
 
     #[test]
