@@ -2,6 +2,7 @@ use crate::config::{ComposePolicy, ListRuleMode};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Serialize;
 use serde_yaml::Value;
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PolicyViolation {
@@ -39,7 +40,26 @@ fn is_hostish(v: &Value) -> bool {
 
 /// Validate a compose YAML document against `policy`.
 /// Returns violations (empty = ok). Unparseable YAML = one violation.
-pub fn validate_compose(compose_yaml: &str, policy: &ComposePolicy) -> Vec<PolicyViolation> {
+/// Test-only convenience wrapper around [`validate_compose_in`] with no
+/// base dir (relative bind sources fail allowlist globs).
+#[cfg(test)]
+fn validate_compose(compose_yaml: &str, policy: &ComposePolicy) -> Vec<PolicyViolation> {
+    validate_compose_in(compose_yaml, policy, None)
+}
+
+/// Validate a compose YAML document against `policy`.
+/// Returns violations (empty = ok). Unparseable YAML = one violation.
+///
+/// `base_dir` is the directory containing the compose file; relative
+/// bind-mount sources (e.g. `./data:/srv/data`) are resolved against it —
+/// like `docker compose` does at runtime — before matching
+/// `allowed_bind_sources`. Pass `None` when the location is unknown
+/// (relative sources then fail the allowlist globs).
+pub fn validate_compose_in(
+    compose_yaml: &str,
+    policy: &ComposePolicy,
+    base_dir: Option<&Path>,
+) -> Vec<PolicyViolation> {
     let doc: Value = match serde_yaml::from_str(compose_yaml) {
         Ok(v) => v,
         Err(e) => {
@@ -96,7 +116,7 @@ pub fn validate_compose(compose_yaml: &str, policy: &ComposePolicy) -> Vec<Polic
             continue;
         };
 
-        check_service(&name, &base, smap, policy, &mut out);
+        check_service(&name, &base, smap, policy, base_dir, &mut out);
     }
     out
 }
@@ -106,6 +126,7 @@ fn check_service(
     base: &str,
     smap: &serde_yaml::Mapping,
     policy: &ComposePolicy,
+    base_dir: Option<&Path>,
     out: &mut Vec<PolicyViolation>,
 ) {
     let get = |k: &str| smap.get(Value::String(k.to_string()));
@@ -279,7 +300,7 @@ fn check_service(
     if let Some(vols) = get("volumes").and_then(|v| v.as_sequence()) {
         for (i, v) in vols.iter().enumerate() {
             let path = format!("{base}.volumes[{i}]");
-            check_volume(&path, name, v, policy, out);
+            check_volume(&path, name, v, policy, base_dir, out);
         }
     }
 
@@ -343,11 +364,40 @@ fn parse_short_volume(spec: &str) -> (bool, Option<String>, Option<String>) {
     }
 }
 
+/// Lexically normalize a path (resolve `.`/`..` without touching the fs).
+fn normalize_path(p: &Path) -> String {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out.to_string_lossy().into_owned()
+}
+
+/// The string a bind source is matched against: absolute sources are used
+/// verbatim; relative sources are resolved against the compose file's
+/// directory (like `docker compose` does at runtime).
+fn bind_match_source(src: &str, base_dir: Option<&Path>) -> String {
+    if src.starts_with('/') {
+        return src.to_string();
+    }
+    match base_dir {
+        Some(base) => normalize_path(&base.join(src)),
+        None => src.to_string(),
+    }
+}
+
 fn check_volume(
     path: &str,
     _service: &str,
     v: &Value,
     policy: &ComposePolicy,
+    base_dir: Option<&Path>,
     out: &mut Vec<PolicyViolation>,
 ) {
     let (is_bind, source, target) = match v {
@@ -408,9 +458,11 @@ fn check_volume(
         ));
     }
 
-    // allowed sources (empty list = deny all binds)
+    // allowed sources (empty list = deny all binds); relative sources are
+    // judged by their resolved host path
+    let match_src = bind_match_source(&src, base_dir);
     if let Some(gs) = build_globset(&policy.allowed_bind_sources) {
-        if !gs.is_match(&src) {
+        if !gs.is_match(&match_src) {
             out.push(PolicyViolation::new(
                 path,
                 "allowed_bind_sources",
@@ -511,6 +563,34 @@ services:
       - "8080:80"
 "#;
         assert!(violations(y).is_empty(), "{:?}", violations(y));
+    }
+
+    #[test]
+    fn relative_bind_source_resolves_against_base_dir() {
+        // './data' inside /services/web resolves to /services/web/data,
+        // which matches allowed_bind_sources.
+        let y = r#"
+services:
+  web:
+    image: nginx:alpine
+    volumes:
+      - ./data:/usr/share/nginx/html
+"#;
+        let base = Path::new("/services/web");
+        assert!(
+            validate_compose_in(y, &policy(), Some(base)).is_empty(),
+            "{:?}",
+            validate_compose_in(y, &policy(), Some(base))
+        );
+        // Without a base dir the same source cannot be verified → denied.
+        assert!(violations(y)
+            .iter()
+            .any(|v| v.rule == "allowed_bind_sources"));
+        // A relative source escaping the service dir is still caught by '..'.
+        let bad = y.replace("./data", "../outside");
+        assert!(validate_compose_in(&bad, &policy(), Some(base))
+            .iter()
+            .any(|v| v.rule == "no_path_escape"));
     }
 
     #[test]

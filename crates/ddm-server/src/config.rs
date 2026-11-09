@@ -324,6 +324,12 @@ pub struct SecurityConfig {
     /// Name of the policy applied to users without an explicit one.
     #[serde(default = "default_policy_name")]
     pub default_policy: String,
+    /// Name of the policy used as the agent-side compose floor. Every
+    /// compose write must satisfy this policy no matter which user (or
+    /// token) submitted it. Defaults to `default_policy`; set to
+    /// `unrestricted` to disable the floor entirely.
+    #[serde(default)]
+    pub policy_floor: Option<String>,
     #[serde(default)]
     pub policies: HashMap<String, ComposePolicy>,
     /// Role required to write raw unit files. Default admin.
@@ -371,6 +377,7 @@ impl Default for SecurityConfig {
         Self {
             default_access: DefaultAccess::default(),
             default_policy: default_policy_name(),
+            policy_floor: None,
             policies,
             unit_edit_requires: default_unit_edit_role(),
             agent_socket: None,

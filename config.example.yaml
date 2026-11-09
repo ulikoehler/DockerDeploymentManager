@@ -32,6 +32,11 @@ users_file: users.yaml          # relative to this file's directory
 security:
   default_access: deny          # users with no matching rule see nothing
   default_policy: strict
+  # policy_floor: strict        # agent-side floor on ALL compose writes;
+                                # defaults to default_policy. Set to a more
+                                # permissive named policy (e.g. infra) or
+                                # "unrestricted" to allow host-networked /
+                                # privileged services like Traefik.
   unit_edit_requires: admin
   policies:
     strict:
@@ -65,6 +70,35 @@ security:
       allowed_bind_sources: ["/opt/**", "/srv/**"]
       allowed_port_range: [80, 65535]
       max_services_per_compose: 50
+    # Example floor policy for infra services (Traefik, Home Assistant, ...).
+    # Use as `policy_floor: infra` — still denies the worst targets, but
+    # permits host networking, the docker socket and privileged containers.
+    infra:
+      deny_privileged: false
+      deny_host_namespaces: false
+      deny_docker_socket: false
+      deny_devices: true
+      deny_root_user: false
+      deny_isolation_overrides: true
+      cap_add: { mode: denylist, list: [SYS_ADMIN, SYS_MODULE] }
+      sysctls: { mode: denylist, list: [] }
+      allowed_bind_sources:
+        - "/opt/**"
+        - "/srv/**"
+        - "/etc/**"
+        - "/var/**"
+        - "/run/**"
+        - "/home/**"
+        - "/tmp/**"
+      deny_bind_targets:
+        - "/"
+        - "/proc/**"
+        - "/sys/**"
+        - "/dev/**"
+        - "/boot/**"
+      allowed_port_range: [80, 65535]
+      allowed_registries: []
+      max_services_per_compose: 50
 
 service_templates:
   - id: hello-world
@@ -73,6 +107,7 @@ service_templates:
     compose_template: /etc/ddm/templates/hello-compose.yml
     create_unit: true
     vars:
+      - { name: image, label: Docker image, required: true, default: "nginx:alpine" }
       - { name: port, label: HTTP port, required: true, default: "8081" }
 
 systemd:

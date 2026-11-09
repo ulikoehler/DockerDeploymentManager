@@ -59,6 +59,7 @@ webdav:
 |---|---|---|
 | `default_access` | `deny` | fallback when no access rule matches a user |
 | `default_policy` | `strict` | policy for users without `compose_policy` |
+| `policy_floor` | `default_policy` | policy every compose write must satisfy, enforced agent-side regardless of the submitting user; `unrestricted` disables the floor |
 | `unit_edit_requires` | `admin` | role needed to write raw unit files |
 | `policies` | see below | named `ComposePolicy` map |
 
@@ -83,8 +84,21 @@ max_services_per_compose: 20
 Always rejected regardless of policy: `..` in bind sources, mounting
 `.restic_password`, `extends`/`include` outside the service dir.
 
+Relative bind sources (`./data:/path`) are resolved against the directory
+containing the compose file before `allowed_bind_sources` matching, exactly
+like `docker compose` resolves them at runtime.
+
+The agent additionally enforces `policy_floor` on every compose
+write/create — including git clones that deliver a compose file — so a
+hostile or buggy server cannot push compose content past it. It defaults
+to `default_policy`; point it at a dedicated, more permissive policy (e.g.
+`infra`) when you need to manage host-networked or privileged services
+like Traefik or Home Assistant while keeping `default_policy` strict for
+regular users. Set it to `unrestricted` to disable the floor entirely.
+
 Users opt out of validation with `compose_policy: unrestricted` (explicit,
-per-user; logged to the audit log on every save).
+per-user; logged to the audit log on every save). Note this only skips the
+*caller's* policy check — the `policy_floor` still applies.
 
 ### `service_templates`
 

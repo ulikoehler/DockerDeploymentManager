@@ -107,7 +107,8 @@ impl axum::extract::FromRequestParts<AppState> for DavUser {
         let mut user: User = serde_json::from_value(verified["user"].clone())
             .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "unknown user"))?;
         if let Some(scope) = &claims.scope {
-            crate::auth::apply_token_scope(&mut user, scope);
+            let default_access = state.config.get().await.security.default_access;
+            crate::auth::apply_token_scope(&mut user, scope, default_access);
         }
         Ok(DavUser { user, token })
     }

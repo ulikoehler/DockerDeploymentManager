@@ -292,9 +292,11 @@ pub async fn create(
     };
     crate::compose::parse_check(&compose_text).map_err(|e| bad_request(e.to_string()))?;
 
-    // policy validation against caller's policy
+    // policy validation against caller's policy; relative bind sources
+    // resolve against the prospective service dir
+    let create_base = FsPath::new(&cfg.paths.services_root).join(&req.name);
     if let Some(pol) = caller_policy(&state, &user).await {
-        let v = policy::validate_compose(&compose_text, &pol);
+        let v = policy::validate_compose_in(&compose_text, &pol, Some(&create_base));
         if !v.is_empty() {
             state.audit.record(
                 &user.user.name,
@@ -355,7 +357,7 @@ pub async fn delete(
         return Err(forbidden());
     }
     require_service_access(&state, &user, &name).await?;
-    state
+    let ok_exec = state
         .agent
         .exec_collect(
             crate::agent::proto::ExecVerb::ServiceDelete {
@@ -371,6 +373,9 @@ pub async fn delete(
         )
         .await
         .map_err(|e| internal(e.to_string()))?;
+    if !ok_exec {
+        return Err(internal("service delete failed"));
+    }
     state
         .audit
         .record(&user.user.name, "service_delete", &name, "");
@@ -393,7 +398,6 @@ pub async fn get_compose(
     Path(name): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<ComposeResponse>>, Response> {
     let svc = require_service_access(&state, &user, &name).await?;
-    let _ = svc;
     let content: String = state
         .agent
         .call_as(
@@ -404,9 +408,10 @@ pub async fn get_compose(
         )
         .await
         .map_err(|e| internal(e.to_string()))?;
+    let base = svc.compose_path.parent().map(|p| p.to_path_buf());
     let violations = caller_policy(&state, &user)
         .await
-        .map(|p| policy::validate_compose(&content, &p))
+        .map(|p| policy::validate_compose_in(&content, &p, base.as_deref()))
         .unwrap_or_default();
     Ok(ok(ComposeResponse {
         content,
@@ -430,10 +435,11 @@ pub async fn put_compose(
     if !user.user.is_admin() && !user.user.features.edit_compose {
         return Err(forbidden());
     }
-    let _svc = require_service_access(&state, &user, &name).await?;
+    let svc = require_service_access(&state, &user, &name).await?;
     crate::compose::parse_check(&req.content).map_err(|e| bad_request(e.to_string()))?;
+    let base = svc.compose_path.parent().map(|p| p.to_path_buf());
     if let Some(pol) = caller_policy(&state, &user).await {
-        let v = policy::validate_compose(&req.content, &pol);
+        let v = policy::validate_compose_in(&req.content, &pol, base.as_deref());
         if !v.is_empty() {
             state.audit.record(
                 &user.user.name,

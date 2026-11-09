@@ -122,6 +122,7 @@ mod tests {
             access: rules,
             features: UserFeatures::default(),
             compose_policy: None,
+            token_version: 0,
         }
     }
 
@@ -215,6 +216,7 @@ mod security_tests {
             access: rules,
             features: UserFeatures::default(),
             compose_policy: None,
+            token_version: 0,
         }
     }
 

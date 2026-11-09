@@ -146,7 +146,11 @@ the login that produced it.
    `run_commands`, `exec_containers` (docker exec), `mount_files` (WebDAV),
    `manage_backup`, `manage_monitoring`, `edit_files`.
 4. **Compose policy** — per user; fail-closed (unknown names fall back to
-   `default_policy`, then built-in strict). Strict denies `privileged`,
+   `default_policy`, then built-in strict). On top of the caller's policy,
+   the agent enforces `security.policy_floor` (default: `default_policy`)
+   on *every* compose write, so even `compose_policy: unrestricted` users
+   cannot exceed it; set `policy_floor: unrestricted` to opt out. Strict
+   denies `privileged`,
    host namespaces, docker-socket mounts, devices, `cap_add`, `sysctls`,
    bind mounts, isolation overrides, low ports, path escapes,
    `.restic_password` mounts, out-of-dir `extends`/`include`.

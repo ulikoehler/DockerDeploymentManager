@@ -358,7 +358,7 @@ fn policy_check_synced_compose(cfg: &AppConfig, src: &Path) -> Result<()> {
     }
     for f in files {
         let content = std::fs::read_to_string(&f)?;
-        let violations = crate::policy::validate_compose(&content, &policy);
+        let violations = crate::policy::validate_compose_in(&content, &policy, f.parent());
         if !violations.is_empty() {
             let msg = violations
                 .iter()

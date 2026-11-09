@@ -49,6 +49,50 @@ fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// When the agent runs inside a container (`host_exec = nsenter`), prefix
+/// commands that must execute on the host (systemctl, unit management) with
+/// `nsenter` into the host namespaces. Definitions containing non-literal
+/// args (variables/conditionals) cannot be translated and are left as-is.
+fn host_wrap(cfg: &AppConfig, defs: Vec<CommandDefinition>) -> Vec<CommandDefinition> {
+    if !matches!(cfg.paths.host_exec, crate::config::HostExecKind::Nsenter) {
+        return defs;
+    }
+    defs.into_iter()
+        .map(|d| {
+            if !d.args.iter().all(|a| matches!(a, CommandArg::Value { .. })) {
+                return d;
+            }
+            let mut argv = vec![
+                "--target".to_string(),
+                cfg.paths.nsenter_target.to_string(),
+                "--mount".to_string(),
+                "--uts".to_string(),
+                "--ipc".to_string(),
+                "--net".to_string(),
+                "--".to_string(),
+                d.program,
+            ];
+            for a in d.args {
+                if let CommandArg::Value { value } = a {
+                    argv.push(value);
+                }
+            }
+            CommandDefinition {
+                program: "nsenter".to_string(),
+                args: argv.iter().map(|s| arg(s)).collect(),
+            }
+        })
+        .collect()
+}
+
+/// Wrap a `shell_item` script so it runs on the host under nsenter.
+fn host_shell_item_for(cfg: &AppConfig, item: CommandItem) -> CommandItem {
+    let mut item = item;
+    item.command_sequence = host_wrap(cfg, std::mem::take(&mut item.command_sequence));
+    item.on_host = true;
+    item
+}
+
 /// Mirror of the server's group-membership check: a non-admin operator may
 /// only touch systemd units covered by a configured group's regex.
 fn unit_in_group(cfg: &AppConfig, unit: &str) -> bool {
@@ -248,6 +292,9 @@ impl AgentCore {
             .find(|u| u.name == claims.sub)
             .cloned()
             .ok_or_else(|| anyhow!("unknown user"))?;
+        if claims.sv != user.token_version {
+            bail!("token revoked (password changed)");
+        }
         Ok((claims, user))
     }
 
@@ -265,10 +312,14 @@ impl AgentCore {
     /// apply the token's scope, and return both. This is the *authoritative*
     /// user for agent-side authorization — narrower than the raw claims,
     /// never wider.
-    fn scoped_user(&self, token: &str) -> Result<(Claims, User)> {
+    fn scoped_user(
+        &self,
+        token: &str,
+        default_access: crate::config::DefaultAccess,
+    ) -> Result<(Claims, User)> {
         let (claims, mut user) = self.token_user(token)?;
         if let Some(scope) = &claims.scope {
-            crate::auth::apply_token_scope(&mut user, scope);
+            crate::auth::apply_token_scope(&mut user, scope, default_access);
         }
         Ok((claims, user))
     }
@@ -317,7 +368,7 @@ impl AgentCore {
         token: &str,
         service: &str,
     ) -> Result<(Claims, User)> {
-        let (claims, user) = self.scoped_user(token)?;
+        let (claims, user) = self.scoped_user(token, cfg.security.default_access)?;
         if !crate::permissions::can_access_service(&user, service, cfg.security.default_access) {
             bail!("service access denied: {service}");
         }
@@ -430,12 +481,12 @@ impl AgentCore {
             // additionally mirrors the server's group-membership gate so a
             // non-admin operator cannot read arbitrary unit logs.
             SyncVerb::ListUnits { .. } => {
-                let (_c, u) = self.scoped_user(token)?;
+                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
                 Self::require_feature(&u, u.has_role("operator"), "operator role")?;
                 Ok(Some(u))
             }
             SyncVerb::Journal { unit, .. } => {
-                let (_c, u) = self.scoped_user(token)?;
+                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
                 Self::require_feature(&u, u.has_role("operator"), "operator role")?;
                 if !u.is_admin() && !unit_in_group(cfg, unit) {
                     bail!("unit outside configured systemd groups");
@@ -446,7 +497,7 @@ impl AgentCore {
             // in service list/detail — reachable with plain service access —
             // so allow either operator, or access to the matching service.
             SyncVerb::UnitState { unit } | SyncVerb::UnitPathExists { unit } => {
-                let (_c, u) = self.scoped_user(token)?;
+                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
                 let svc = unit.strip_suffix(".service").unwrap_or(unit);
                 if u.has_role("operator")
                     || crate::permissions::can_access_service(&u, svc, cfg.security.default_access)
@@ -457,7 +508,7 @@ impl AgentCore {
             }
             // ---- gitops surface is admin-only server-side ----
             SyncVerb::GitSyncRun | SyncVerb::GitSyncPush | SyncVerb::GitSyncStatus => {
-                let (_c, u) = self.scoped_user(token)?;
+                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
                 Self::require_admin(&u)?;
                 Ok(Some(u))
             }
@@ -476,7 +527,7 @@ impl AgentCore {
                 Ok(u)
             }
             ExecVerb::SectionItem { section, item, .. } => {
-                let (_c, u) = self.scoped_user(token)?;
+                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
                 // mirror api::commands_api::authorized_item on the fresh user
                 if !u.is_admin() && !u.features.run_commands {
                     bail!("run_commands required");
@@ -502,7 +553,7 @@ impl AgentCore {
                 Ok(u)
             }
             ExecVerb::SystemdCommand { target, .. } | ExecVerb::SystemdRestart { target } => {
-                let (_c, u) = self.scoped_user(token)?;
+                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
                 Self::require_feature(&u, u.has_role("operator"), "operator role")?;
                 // Mirror the server: non-admin operators may only touch
                 // units covered by a configured group.
@@ -544,7 +595,7 @@ impl AgentCore {
                 Ok(u)
             }
             ExecVerb::ServiceCreate { .. } => {
-                let (_c, u) = self.scoped_user(token)?;
+                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
                 Self::require_feature(&u, feat(|f| f.create_services, &u), "create_services")?;
                 Ok(u)
             }
@@ -556,7 +607,7 @@ impl AgentCore {
             // Passive log streams still get the container→service check:
             // a compromised server could feed any container id here.
             ExecVerb::ContainerLogs { id, .. } => {
-                let (_c, u) = self.scoped_user(token)?;
+                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
                 self.authorize_container(cfg, &u, id).await?;
                 Ok(u)
             }
@@ -568,7 +619,7 @@ impl AgentCore {
                 if command.is_empty() {
                     bail!("empty command");
                 }
-                let (claims, u) = self.scoped_user(token)?;
+                let (claims, u) = self.scoped_user(token, cfg.security.default_access)?;
                 Self::require_feature(&u, feat(|f| f.exec_containers, &u), "exec_containers")?;
                 let project = self
                     .docker
@@ -630,6 +681,9 @@ impl AgentCore {
                     .find(|u| u.name == claims.sub)
                     .cloned()
                     .ok_or_else(|| anyhow!("unknown user"))?;
+                if claims.sv != user.token_version {
+                    bail!("token revoked (password changed)");
+                }
                 let mut user = user;
                 user.password_hash.clear();
                 Ok(serde_json::json!({"claims": claims, "user": user}))
@@ -839,9 +893,9 @@ impl AgentCore {
         if scope.as_ref().and_then(|s| s.services.as_ref()).is_some() {
             roles.retain(|r| r != "admin");
         }
-        let token = self
-            .jwt
-            .issue_claims(&parent_claims.sub, roles, ttl, scope)?;
+        let token =
+            self.jwt
+                .issue_claims(&parent_claims.sub, roles, ttl, scope, fresh.token_version)?;
         let claims = self.jwt.verify(&token).unwrap();
         self.justify(&claims, "mint", &parent_claims.sub);
         Ok(serde_json::json!({ "token": token, "expires_at": claims.exp }))
@@ -885,6 +939,9 @@ impl AgentCore {
             .find(|u| u.name == name)
             .ok_or_else(|| anyhow!("unknown user"))?;
         u.password_hash = users::hash_password(&self.peppered(password))?;
+        // Revoke every token issued before this change — including the
+        // caller's own, which must re-authenticate with the new password.
+        u.token_version = u.token_version.wrapping_add(1);
         self.write_users(&file)?;
         Ok(serde_json::json!(true))
     }
@@ -915,6 +972,7 @@ impl AgentCore {
                     access,
                     features: features.unwrap_or_default(),
                     compose_policy,
+                    token_version: 0,
                 });
                 let mut u = file.users.iter().find(|u| u.name == name).unwrap().clone();
                 self.write_users(&file)?;
@@ -982,7 +1040,7 @@ impl AgentCore {
             SyncVerb::ServicesList => {
                 let (claims, mut user) = self.justify_token(token, "services_list", "")?;
                 if let Some(scope) = &claims.scope {
-                    crate::auth::apply_token_scope(&mut user, scope);
+                    crate::auth::apply_token_scope(&mut user, scope, cfg.security.default_access);
                 }
                 let svcs: Vec<_> = svc_ops::discover_services(&cfg)
                     .into_iter()
@@ -1029,7 +1087,7 @@ impl AgentCore {
                     let u = pre
                         .as_ref()
                         .ok_or_else(|| anyhow!("authorization state missing"))?;
-                    self.guard_compose_write(&cfg, &content, u)?;
+                    self.guard_compose_write(&cfg, &svc.dir, &content, u)?;
                 }
                 crate::files::write_file(&svc.dir, &path, &content)?;
                 Ok(serde_json::json!(true))
@@ -1108,7 +1166,7 @@ impl AgentCore {
                 self.justify_token(token, "container_health", &id)?;
                 // Container ids are arbitrary input here — re-resolve the
                 // owning service and check access (unmanaged = admin-only).
-                let (_c, u) = self.scoped_user(token)?;
+                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
                 self.authorize_container(&cfg, &u, &id).await?;
                 Ok(serde_json::to_value(
                     self.docker.container_health(&id).await?,
@@ -1262,13 +1320,16 @@ impl AgentCore {
                 if content.len() > MAX_FILE_WRITE {
                     bail!("compose file too large");
                 }
+                let svc = svc_ops::get_service(&cfg, &service)?;
+                let base = svc.compose_path.parent().map(|p| p.to_path_buf());
                 // caller's own policy (put_compose applies this server-side)
                 // in addition to the configured floor.
                 if let Some(u) = &pre {
                     if let Some(p) =
                         crate::api::services::resolve_policy(&cfg, u.compose_policy.as_deref())
                     {
-                        let violations = crate::policy::validate_compose(&content, &p);
+                        let violations =
+                            crate::policy::validate_compose_in(&content, &p, base.as_deref());
                         if !violations.is_empty() {
                             let msg = violations
                                 .iter()
@@ -1279,8 +1340,7 @@ impl AgentCore {
                         }
                     }
                 }
-                self.enforce_policy_floor(&cfg, &content)?;
-                let svc = svc_ops::get_service(&cfg, &service)?;
+                self.enforce_policy_floor(&cfg, &content, base.as_deref())?;
                 crate::compose::write_compose(&svc.compose_path, &content)?;
                 Ok(serde_json::json!(true))
             }
@@ -1350,7 +1410,7 @@ impl AgentCore {
             SyncVerb::MonitorStatusAll => {
                 let (claims, mut user) = self.justify_token(token, "monitor_status", "")?;
                 if let Some(scope) = &claims.scope {
-                    crate::auth::apply_token_scope(&mut user, scope);
+                    crate::auth::apply_token_scope(&mut user, scope, cfg.security.default_access);
                 }
                 let m = self.monitor.lock().unwrap().clone();
                 match m {
@@ -1373,7 +1433,7 @@ impl AgentCore {
             SyncVerb::MonitorEvents => {
                 let (claims, mut user) = self.justify_token(token, "monitor_events", "")?;
                 if let Some(scope) = &claims.scope {
-                    crate::auth::apply_token_scope(&mut user, scope);
+                    crate::auth::apply_token_scope(&mut user, scope, cfg.security.default_access);
                 }
                 let m = self.monitor.lock().unwrap().clone();
                 match m {
@@ -1423,7 +1483,7 @@ impl AgentCore {
             }
             SyncVerb::ContainerLogsCollect { id, tail, since } => {
                 self.justify_token(token, "container_logs", &id)?;
-                let (_c, u) = self.scoped_user(token)?;
+                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
                 self.authorize_container(&cfg, &u, &id).await?;
                 use futures::StreamExt;
                 let mut stream = self.docker.logs(&id, tail, since, false).await?;
@@ -1485,11 +1545,18 @@ impl AgentCore {
 
     /// Enforce `edit_compose` + the caller's compose policy + the configured
     /// floor on a new compose file body. Shared by every write path so they
-    /// cannot drift apart.
-    fn guard_compose_write(&self, cfg: &AppConfig, content: &str, user: &User) -> Result<()> {
+    /// cannot drift apart. `base_dir` is the directory containing the
+    /// compose file (for resolving relative bind sources).
+    fn guard_compose_write(
+        &self,
+        cfg: &AppConfig,
+        base_dir: &std::path::Path,
+        content: &str,
+        user: &User,
+    ) -> Result<()> {
         Self::require_feature(user, user.features.edit_compose, "edit_compose")?;
         if let Some(p) = crate::api::services::resolve_policy(cfg, user.compose_policy.as_deref()) {
-            let violations = crate::policy::validate_compose(content, &p);
+            let violations = crate::policy::validate_compose_in(content, &p, Some(base_dir));
             if !violations.is_empty() {
                 let msg = violations
                     .iter()
@@ -1500,7 +1567,7 @@ impl AgentCore {
             }
         }
         crate::compose::parse_check(content)?;
-        self.enforce_policy_floor(cfg, content)
+        self.enforce_policy_floor(cfg, content, Some(base_dir))
     }
 
     /// Authorize a streaming upload and resolve its target. No payload is
@@ -1513,7 +1580,7 @@ impl AgentCore {
         token: &str,
     ) -> Result<PendingPut> {
         let cfg = self.cfg.get().await;
-        let (claims, user) = self.scoped_user(token)?;
+        let (claims, user) = self.scoped_user(token, cfg.security.default_access)?;
         if !crate::permissions::can_access_service(&user, service, cfg.security.default_access) {
             bail!("service access denied: {service}");
         }
@@ -1583,7 +1650,8 @@ impl AgentCore {
                     return Err(e.into());
                 }
             };
-            if let Err(e) = self.guard_compose_write(cfg, &content, &pending.user) {
+            if let Err(e) = self.guard_compose_write(cfg, &pending.svc.dir, &content, &pending.user)
+            {
                 staged.abort();
                 return Err(e);
             }
@@ -1755,7 +1823,10 @@ impl AgentCore {
                 if *start {
                     script += &format!(" && systemctl restart {}", sq(&uname));
                 }
-                let item = shell_item(&format!("regen unit ({service})"), &script, ".");
+                let item = host_shell_item_for(
+                    cfg,
+                    shell_item(&format!("regen unit ({service})"), &script, "."),
+                );
                 Ok(exec::run_steps(item, HashMap::new(), tx.clone(), eid.to_string()).await)
             }
             ExecVerb::UnitWrite {
@@ -1775,7 +1846,10 @@ impl AgentCore {
                 if *restart {
                     script += &format!(" && systemctl restart {}", sq(&uname));
                 }
-                let item = shell_item(&format!("write unit ({service})"), &script, ".");
+                let item = host_shell_item_for(
+                    cfg,
+                    shell_item(&format!("write unit ({service})"), &script, "."),
+                );
                 Ok(exec::run_steps(item, HashMap::new(), tx.clone(), eid.to_string()).await)
             }
             ExecVerb::GitClone {
@@ -1812,7 +1886,8 @@ impl AgentCore {
                     // A clone into the service root may deliver a compose
                     // file — enforce the policy floor on it.
                     if let Ok(compose) = std::fs::read_to_string(&svc.compose_path) {
-                        self.enforce_policy_floor(cfg, &compose)?;
+                        let base = svc.compose_path.parent().map(|p| p.to_path_buf());
+                        self.enforce_policy_floor(cfg, &compose, base.as_deref())?;
                     }
                 }
                 Ok(ok)
@@ -1836,7 +1911,10 @@ impl AgentCore {
             ExecVerb::BackupRun { service } => {
                 let svc = svc_ops::get_service(cfg, service)?;
                 let script = crate::backup::run_script(&svc);
-                let item = shell_item(&format!("backup run ({service})"), &script, ".");
+                let item = host_shell_item_for(
+                    cfg,
+                    shell_item(&format!("backup run ({service})"), &script, "."),
+                );
                 Ok(exec::run_steps(item, HashMap::new(), tx.clone(), eid.to_string()).await)
             }
 
@@ -1844,7 +1922,10 @@ impl AgentCore {
                 let svc = svc_ops::get_service(cfg, service)?;
                 let bin = self.restic_bin(cfg).await?;
                 let script = crate::backup::forget_script(cfg, &svc, &bin);
-                let item = shell_item(&format!("backup forget ({service})"), &script, ".");
+                let item = host_shell_item_for(
+                    cfg,
+                    shell_item(&format!("backup forget ({service})"), &script, "."),
+                );
                 Ok(exec::run_steps(item, HashMap::new(), tx.clone(), eid.to_string()).await)
             }
             ExecVerb::BackupRestore {
@@ -1874,7 +1955,10 @@ impl AgentCore {
                     target_dir,
                     include.as_deref().unwrap_or(&[]),
                 )?;
-                let item = shell_item(&format!("backup restore ({service})"), &script, ".");
+                let item = host_shell_item_for(
+                    cfg,
+                    shell_item(&format!("backup restore ({service})"), &script, "."),
+                );
                 Ok(exec::run_steps(item, HashMap::new(), tx.clone(), eid.to_string()).await)
             }
             ExecVerb::ServiceCreate {
@@ -1888,7 +1972,9 @@ impl AgentCore {
                 start,
             } => {
                 crate::compose::parse_check(compose)?;
-                self.enforce_policy_floor(cfg, compose)?;
+                // prospective service dir — relative binds resolve there
+                let base = Path::new(&cfg.paths.services_root).join(name);
+                self.enforce_policy_floor(cfg, compose, Some(&base))?;
                 let dir = svc_ops::create_service_dir(cfg, name)?;
                 crate::compose::write_compose(&dir.join(&cfg.paths.compose_file), compose)?;
                 svc_ops::save_meta(
@@ -1919,7 +2005,10 @@ impl AgentCore {
                     if *start {
                         script += &format!(" && systemctl start {}", sq(&uname));
                     }
-                    let item = shell_item(&format!("unit setup ({name})"), &script, ".");
+                    let item = host_shell_item_for(
+                        cfg,
+                        shell_item(&format!("unit setup ({name})"), &script, "."),
+                    );
                     exec::run_steps(item, HashMap::new(), tx.clone(), eid.to_string()).await;
                 }
                 Ok(true)
@@ -1933,8 +2022,9 @@ impl AgentCore {
                 let mut script = String::new();
                 if *down {
                     let (prog, argv) = compose_argv(&cfg.docker.compose_command, &[]);
+                    // best-effort: an invalid compose file must not block deletion
                     script += &format!(
-                        "cd {} && {} {} down; ",
+                        "cd {} && {} {} down || true; ",
                         sq(&svc.dir.to_string_lossy()),
                         prog,
                         argv.join(" ")
@@ -1952,7 +2042,8 @@ impl AgentCore {
                 if !keep_dir {
                     script += &format!("rm -rf -- {}", sq(&svc.dir.to_string_lossy()));
                 }
-                let item = shell_item(&format!("delete ({name})"), &script, ".");
+                let item =
+                    host_shell_item_for(cfg, shell_item(&format!("delete ({name})"), &script, "."));
                 Ok(exec::run_steps(item, HashMap::new(), tx.clone(), eid.to_string()).await)
             }
             ExecVerb::ContainerLogs {
@@ -2072,9 +2163,10 @@ impl AgentCore {
                     "disable"
                 };
                 let uname = format!("{}.service", svc.name);
+                let seq = host_wrap(cfg, vec![cmd("systemctl", &[op_name, &uname])]);
                 (
                     Box::leak(format!("systemctl {op_name}").into_boxed_str()) as &'static str,
-                    vec![cmd("systemctl", &[op_name, &uname])],
+                    seq,
                 )
             }
         };
@@ -2124,7 +2216,7 @@ impl AgentCore {
                     button_label: "Run".into(),
                     command_sequence: seq,
                     required_role: None,
-                    on_host: false,
+                    on_host: true,
                 })
             }
             SystemdTarget::Unit(unit) => {
@@ -2147,7 +2239,7 @@ impl AgentCore {
                     button_label: "Run".into(),
                     command_sequence: seq,
                     required_role: None,
-                    on_host: false,
+                    on_host: true,
                 })
             }
         }
@@ -2199,7 +2291,7 @@ impl AgentCore {
                 }]
             }
         };
-        Ok(steps)
+        Ok(host_wrap(cfg, steps))
     }
 
     async fn systemd_restart_item(
@@ -2217,9 +2309,9 @@ impl AgentCore {
                     icon: String::new(),
                     parameters: vec![],
                     button_label: "Run".into(),
-                    command_sequence: vec![cmd("systemctl", &["restart", unit])],
+                    command_sequence: host_wrap(cfg, vec![cmd("systemctl", &["restart", unit])]),
                     required_role: None,
-                    on_host: false,
+                    on_host: true,
                 })
             }
             SystemdTarget::Group(gid) => {
@@ -2241,9 +2333,9 @@ impl AgentCore {
                     icon: String::new(),
                     parameters: vec![],
                     button_label: "Run".into(),
-                    command_sequence: seq,
+                    command_sequence: host_wrap(cfg, seq),
                     required_role: None,
-                    on_host: false,
+                    on_host: true,
                 })
             }
         }
@@ -2252,14 +2344,24 @@ impl AgentCore {
 
 impl AgentCore {
     /// Compose content floor: the agent always enforces the configured
-    /// `security.default_policy` on compose writes/creates, so a hostile
+    /// floor policy (`security.policy_floor`, defaulting to
+    /// `security.default_policy`) on compose writes/creates, so a hostile
     /// server cannot skip policy checks entirely. Per-user stricter
-    /// policies remain a server-side concern.
-    fn enforce_policy_floor(&self, cfg: &AppConfig, compose: &str) -> Result<()> {
-        if let Some(policy) =
-            crate::api::services::resolve_policy(cfg, Some(&cfg.security.default_policy))
-        {
-            let violations = crate::policy::validate_compose(compose, &policy);
+    /// policies remain a server-side concern. `base_dir` is the directory
+    /// containing the compose file, used to resolve relative bind sources.
+    fn enforce_policy_floor(
+        &self,
+        cfg: &AppConfig,
+        compose: &str,
+        base_dir: Option<&std::path::Path>,
+    ) -> Result<()> {
+        let floor = cfg
+            .security
+            .policy_floor
+            .as_deref()
+            .unwrap_or(&cfg.security.default_policy);
+        if let Some(policy) = crate::api::services::resolve_policy(cfg, Some(floor)) {
+            let violations = crate::policy::validate_compose_in(compose, &policy, base_dir);
             if !violations.is_empty() {
                 bail!("compose violates default policy: {violations:?}");
             }

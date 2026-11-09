@@ -34,6 +34,10 @@ pub struct User {
     /// Named compose policy, or "unrestricted" to skip validation.
     #[serde(default)]
     pub compose_policy: Option<String>,
+    /// Bumped on every password change; tokens carry it as `sv` and die
+    /// when it no longer matches — password change revokes sessions.
+    #[serde(default)]
+    pub token_version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,6 +367,7 @@ pub fn cli_add_user(
         access: vec![],
         features: UserFeatures::default(),
         compose_policy: None,
+        token_version: 0,
     });
     Ok(())
 }
@@ -471,6 +476,7 @@ mod security_tests {
             access: vec![],
             features: UserFeatures::default(),
             compose_policy: None,
+            token_version: 0,
         });
         write_users_atomic(&path, &f).unwrap();
         let store = UserStore::load(&path).unwrap();

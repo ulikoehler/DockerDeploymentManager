@@ -27,6 +27,10 @@ pub struct Claims {
     /// narrow, never widen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<TokenScope>,
+    /// The user's `token_version` at issue time; bumped on password change
+    /// so old tokens die. Missing (=0) matches users never rotated.
+    #[serde(default)]
+    pub sv: u64,
 }
 
 /// Restrictions embedded in a token. When present, the authenticated user is
@@ -44,8 +48,18 @@ pub struct TokenScope {
 }
 
 /// Apply a token scope to a user, narrowing their effective permissions.
-pub fn apply_token_scope(user: &mut User, scope: &TokenScope) {
+/// `default_access` is the server's fallback for users with no matching
+/// access rule — the service scope is intersected with the user's *current*
+/// access, so a scope can only ever narrow, never widen.
+pub fn apply_token_scope(
+    user: &mut User,
+    scope: &TokenScope,
+    default_access: crate::config::DefaultAccess,
+) {
     use crate::users::{AccessEffect, AccessRuleType};
+    // Reference for "what could this user already reach" before any scope
+    // narrowing — evaluated against the pre-scope roles/rules.
+    let pre_scope = user.clone();
     if let Some(actions) = &scope.actions {
         let has = |a: &str| actions.iter().any(|x| x == a);
         // Keep only the requested roles the user actually has (has_role
@@ -76,18 +90,25 @@ pub fn apply_token_scope(user: &mut User, scope: &TokenScope) {
         // must not keep it, or the scope is a silent no-op.
         user.roles.retain(|r| r != "admin");
         // Intersection semantics: the user's explicit denies still apply,
-        // then exact allows for the scoped services, then deny the rest.
+        // then exact allows for the scoped services the user could already
+        // reach, then deny the rest. Services outside the user's current
+        // access are dropped — the scope narrows, it never widens.
         let mut rules: Vec<crate::users::AccessRule> = user
             .access
             .iter()
             .filter(|r| r.effect == AccessEffect::Deny)
             .cloned()
             .collect();
-        rules.extend(services.iter().map(|s| crate::users::AccessRule {
-            kind: AccessRuleType::Exact,
-            pattern: s.clone(),
-            effect: AccessEffect::Allow,
-        }));
+        rules.extend(
+            services
+                .iter()
+                .filter(|s| crate::permissions::can_access_service(&pre_scope, s, default_access))
+                .map(|s| crate::users::AccessRule {
+                    kind: AccessRuleType::Exact,
+                    pattern: s.clone(),
+                    effect: AccessEffect::Allow,
+                }),
+        );
         rules.push(crate::users::AccessRule {
             kind: AccessRuleType::Glob,
             pattern: "*".into(),
@@ -125,6 +146,7 @@ impl JwtKeys {
             exp: now + ttl_seconds,
             gen: *self.generation.read().unwrap(),
             scope,
+            sv: user.token_version,
         };
         encode(
             &Header::default(),
@@ -141,6 +163,7 @@ impl JwtKeys {
         roles: Vec<String>,
         ttl_seconds: i64,
         scope: Option<TokenScope>,
+        sv: u64,
     ) -> Result<String, jsonwebtoken::errors::Error> {
         let now = chrono::Utc::now().timestamp();
         let claims = Claims {
@@ -150,6 +173,7 @@ impl JwtKeys {
             exp: now + ttl_seconds,
             gen: *self.generation.read().unwrap(),
             scope,
+            sv,
         };
         encode(
             &Header::default(),
@@ -305,7 +329,8 @@ pub async fn authenticate(parts: &Parts, state: &crate::AppState) -> Result<Auth
     let mut user: User = serde_json::from_value(verified["user"].clone())
         .map_err(|_| error_response(StatusCode::UNAUTHORIZED, "unknown user"))?;
     if let Some(scope) = &claims.scope {
-        apply_token_scope(&mut user, scope);
+        let default_access = state.config.get().await.security.default_access;
+        apply_token_scope(&mut user, scope, default_access);
     }
     Ok(AuthUser {
         user,
@@ -437,6 +462,7 @@ mod security_tests {
             access: vec![],
             features: UserFeatures::default(),
             compose_policy: None,
+            token_version: 0,
         }
     }
 
@@ -501,7 +527,7 @@ mod security_tests {
             services: Some(vec!["web1".into()]),
             actions: Some(vec!["edit_compose".into()]),
         };
-        apply_token_scope(&mut user, &scope);
+        apply_token_scope(&mut user, &scope, DefaultAccess::Allow);
         assert!(!user.roles.iter().any(|r| r == "operator"));
         assert!(user.features.edit_compose);
         assert!(!user.features.run_commands);
@@ -515,8 +541,30 @@ mod security_tests {
             pattern: "web1".into(),
             effect: AccessEffect::Deny,
         }];
-        apply_token_scope(&mut user, &scope);
+        apply_token_scope(&mut user, &scope, DefaultAccess::Allow);
         assert!(!can_access_service(&user, "web1", DefaultAccess::Allow));
+
+        // a service scope must not widen access: with default-deny and an
+        // allow only for "web", scoping to ["web", "db"] grants web but not db
+        let mut user = u();
+        user.access = vec![AccessRule {
+            kind: AccessRuleType::Exact,
+            pattern: "web".into(),
+            effect: AccessEffect::Allow,
+        }];
+        let scope3 = TokenScope {
+            services: Some(vec!["web".into(), "db".into()]),
+            actions: None,
+        };
+        apply_token_scope(&mut user, &scope3, DefaultAccess::Deny);
+        assert!(can_access_service(&user, "web", DefaultAccess::Deny));
+        assert!(!can_access_service(&user, "db", DefaultAccess::Deny));
+
+        // ...and a user with no access at all gets nothing from a scope
+        let mut user = u();
+        apply_token_scope(&mut user, &scope3, DefaultAccess::Deny);
+        assert!(!can_access_service(&user, "web", DefaultAccess::Deny));
+        assert!(!can_access_service(&user, "db", DefaultAccess::Deny));
 
         // admin scoping to "operator" keeps operator rights (admin implies
         // all roles) but loses admin itself
@@ -526,7 +574,7 @@ mod security_tests {
             services: None,
             actions: Some(vec!["operator".into()]),
         };
-        apply_token_scope(&mut user, &scope2);
+        apply_token_scope(&mut user, &scope2, DefaultAccess::Deny);
         assert!(!user.is_admin());
         assert!(user.has_role("operator"));
 
@@ -538,6 +586,7 @@ mod security_tests {
                 services: None,
                 actions: None,
             },
+            DefaultAccess::Deny,
         );
         assert_eq!(user.roles, vec!["operator"]);
         assert!(user.access.is_empty());

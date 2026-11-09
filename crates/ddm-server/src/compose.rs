@@ -27,8 +27,18 @@ pub fn render_template(
     let raw = std::fs::read_to_string(&tpl.compose_template)
         .with_context(|| format!("reading compose template {}", tpl.compose_template))?;
     let mut out = raw;
-    out = out.replace("{service}", service);
-    out = out.replace("{dir}", host_dir);
+    // Built-in substitutions available to every template.
+    let builtins = [
+        ("service_name", service),
+        ("service", service),
+        ("name", service),
+        ("dir", host_dir),
+        ("host_dir", host_dir),
+    ];
+    for (k, v) in builtins {
+        out = out.replace(&format!("${{{k}}}"), v);
+        out = out.replace(&format!("{{{{{k}}}}}"), v);
+    }
     for v in &tpl.vars {
         let val = vars
             .get(&v.name)
