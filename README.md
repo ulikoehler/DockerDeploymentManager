@@ -78,26 +78,28 @@ backups.
 ## Quickstart
 
 ```bash
-# 1. prepare config
-mkdir -p data data-state
-cp config.example.yaml data/config.yaml
-cp users.example.yaml   data/users.yaml   # or start empty; CLI bootstrap below
-cp -r examples/templates data/templates
+# 1. install the latest release (bare metal + systemd; no clone needed)
+curl -fsSL https://raw.githubusercontent.com/ulikoehler/DockerDeploymentManager/main/install.sh | sudo bash
 
-# 2. build + run (needs DDM_JWT_SECRET)
-export DDM_JWT_SECRET=$(openssl rand -hex 32)
-docker compose up -d --build
+# 2. create the first admin
+/opt/ddm/bin/ddm-server --config /etc/ddm/config.yaml \
+    user add admin --role admin --generate
 
-# 3. create the first admin (works even while debugging)
-docker compose exec ddm ddm-server user add admin --role admin --generate
-# → generated password for admin: …
-
-# 4. open http://localhost:8080
+# 3. open http://localhost:8080
 ```
+
+The installer resolves the latest GitHub release, downloads the
+arch-matched tarball (static musl binary, web UI embedded), verifies
+its SHA256 checksum, and runs the packaged installer — every command
+is echoed as it runs. Pin a version with `DDM_VERSION=vX.Y.Z`.
 
 Service directories live under `paths.services_root` (default
 `/opt/services`). Copy `examples/hello-world` there and it shows up
 in the UI immediately.
+
+Prefer containers? `docker compose up -d --build` still works — see
+`docs/DEPLOYMENT.md` (Docker packaging is optional, not the standard
+install path).
 
 ## Repository layout
 
@@ -110,6 +112,7 @@ docs/                API.md CONFIG.md SECURITY.md DEPLOYMENT.md CLIENT.md
                      BACKUP.md MONITORING.md SERVER_CLI.md ARCHITECTURE.md GITOPS.md
 Dockerfile           optional image build (not the standard install path)
 docker-compose.yml   optional self-deployment (privileged, pid: host)
+install.sh            bootstrap: curl|bash one-liner → latest release
 deploy/bare-metal/   systemd unit + config + install.sh for the standard install
 .github/workflows/   ci.yml (test+image) and release.yml (binary tarballs)
 ```

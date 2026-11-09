@@ -10,9 +10,17 @@ adding isolation.
 
 ## Bare-metal install (standard)
 
-Release tarballs (`ddm-<ver>-linux-<arch>.tar.gz`) are attached to every
-`v*` GitHub release and contain `ddm-server`, `config.yaml`,
-`ddm.service`, and `install.sh`.
+One-liner — fetches the latest release, verifies SHA256, installs:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ulikoehler/DockerDeploymentManager/main/install.sh | sudo bash
+```
+
+Set `DDM_VERSION=vX.Y.Z` to pin a release instead of tracking latest.
+
+Or manually — release tarballs (`ddm-<ver>-linux-<arch>.tar.gz`) are
+attached to every `v*` GitHub release and contain `ddm-server`,
+`config.yaml`, `ddm.service`, and `install.sh`:
 
 ```bash
 tar xzf ddm-<ver>-linux-x86_64.tar.gz
