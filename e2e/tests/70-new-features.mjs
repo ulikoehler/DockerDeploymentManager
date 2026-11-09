@@ -52,14 +52,27 @@ export default async function (h) {
   ctx.check('tokens: mint via api', minted.status === 200 && !!minted.data?.token, `status=${minted.status}`);
   await sleep(800);
   const tokList = await h.api('/api/auth/tokens');
-  const rec = (tokList.data || []).find((t) => !t.revoked && t.exp * 1000 > Date.now());
+  // our minted token is the one scoped to the scratch service
+  const rec = (tokList.data || []).find(
+    (t) => !t.revoked && t.exp * 1000 > Date.now() && (t.services || []).includes(svc),
+  ) || (tokList.data || []).find((t) => !t.revoked && t.exp * 1000 > Date.now());
   ctx.check('tokens: minted token listed', !!rec, `count=${(tokList.data || []).length}`);
   const tokTxt = await h.compText('ddm-token');
   ctx.check('tokens: issued-tokens table rendered',
     /issued tokens/i.test(tokTxt || '') && /active|expired|revoked/i.test(tokTxt || ''), '');
   if (rec) {
-    await h.api(`/api/auth/tokens/${rec.jti}`, { method: 'DELETE' });
-    await sleep(500);
+    // revoke through the UI button on the row scoped to our scratch service
+    const clicked = await page.evaluate(() => {
+      const c = window.__deep('ddm-token');
+      if (!c?.shadowRoot) return false;
+      const rows = [...c.shadowRoot.querySelectorAll('tbody tr')];
+      const row = rows.find(r => /e2e-svc/.test(r.textContent) && /active/.test(r.textContent));
+      const btn = row && [...row.querySelectorAll('button')].find(b => /revoke/i.test(b.textContent));
+      if (btn) { btn.click(); return true; }
+      return false;
+    });
+    ctx.check('tokens: revoke button clicked in UI', clicked === true, '');
+    await sleep(1200);
     const after = await h.api('/api/auth/tokens');
     const gone = (after.data || []).find((t) => t.jti === rec.jti);
     ctx.check('tokens: revoke marks record', gone?.revoked === true, `revoked=${gone?.revoked}`);
