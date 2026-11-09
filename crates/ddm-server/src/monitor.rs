@@ -72,7 +72,11 @@ pub struct Monitor {
     core: Arc<crate::agent::AgentCore>,
     events: broadcast::Sender<EventMessage>,
     states: Mutex<HashMap<String, ServiceMonitorState>>,
-    tasks: Mutex<HashMap<String, Vec<JoinHandle<()>>>>,
+    /// service → (config signature, running check tasks). Tasks are
+    /// restarted whenever the desired config signature changes — a
+    /// service that already has tasks (e.g. a log watcher) must pick up
+    /// new health checks and alert changes.
+    tasks: Mutex<HashMap<String, (String, Vec<JoinHandle<()>>)>>,
     history: Mutex<VecDeque<AlertEvent>>,
     /// action attempt timestamps: key → instants within window
     action_attempts: Mutex<HashMap<String, VecDeque<Instant>>>,
@@ -164,19 +168,30 @@ impl Monitor {
         let keys: Vec<String> = tasks.keys().cloned().collect();
         for k in keys {
             if !desired.contains_key(&k) {
-                if let Some(ts) = tasks.remove(&k) {
+                if let Some((_, ts)) = tasks.remove(&k) {
                     for t in ts {
                         t.abort();
                     }
                 }
             }
         }
-        // (re)start tasks for services without a running set. Watchers are
-        // restarted on each config broadcast because run() calls reconcile.
+        // state for services that are no longer monitored is stale — drop it
+        {
+            let mut states = self.states.lock().await;
+            states.retain(|n, _| desired.contains_key(n));
+        }
+        // (re)start tasks whenever the desired config changed
         for (name, (health, alerts)) in desired {
-            let entry = tasks.entry(name.clone()).or_default();
-            if entry.is_empty() {
-                self.spawn_service(&name, health, alerts, entry);
+            let sig = format!("{health:?}|{alerts:?}");
+            let entry = tasks
+                .entry(name.clone())
+                .or_insert_with(|| (String::new(), Vec::new()));
+            if entry.0 != sig {
+                for t in entry.1.drain(..) {
+                    t.abort();
+                }
+                entry.0 = sig;
+                self.spawn_service(&name, health, alerts, &mut entry.1);
             }
         }
         Ok(())
