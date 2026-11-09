@@ -24,6 +24,11 @@ export class DdmLogViewer extends LitElement {
   @state() private tail = 200;
   private ws?: WebSocket;
 
+  connectedCallback() {
+    super.connectedCallback();
+    this.startFollow();
+  }
+
   disconnectedCallback() {
     this.ws?.close();
     super.disconnectedCallback();

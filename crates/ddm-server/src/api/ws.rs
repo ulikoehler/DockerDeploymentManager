@@ -314,9 +314,13 @@ async fn stream_service_logs(
                     return;
                 }
             };
-            while let Some(crate::protocol::ServerMessage::LogOutput { text, stream, .. }) =
-                stream.recv().await
-            {
+            // exec() always opens with ExecutionStarted and closes with
+            // ExecutionFinished — skip non-log frames instead of ending the
+            // stream on the first one.
+            while let Some(msg) = stream.recv().await {
+                let crate::protocol::ServerMessage::LogOutput { text, stream, .. } = msg else {
+                    continue;
+                };
                 if flt.matches(&text, &stream, Some(&svcname)) {
                     let _ = txc.send(
                         serde_json::json!({

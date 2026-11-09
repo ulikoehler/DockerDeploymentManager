@@ -113,10 +113,13 @@ export class DdmFiles extends LitElement {
 
   render() {
     const n = this.node;
+    // API node kinds are serde variants ("Dir"/"File"/"Binary") while
+    // entry kinds are lowercase — normalize before comparing.
+    const kind = n?.kind?.toLowerCase();
     return html`
       <div class="card">
         <div class="row"><h3>Files</h3>${this.crumbs()}</div>
-        ${n?.kind === 'dir'
+        ${kind === 'dir'
           ? html`
               <table><tbody>
                 ${(n.entries as Entry[]).map((e) => {
@@ -142,7 +145,7 @@ export class DdmFiles extends LitElement {
                 <button class="small secondary" @click=${this.mkdir}>mkdir</button>
                 <button class="small secondary" @click=${this.newFile}>new file</button>
               </div>`
-          : n?.kind === 'file'
+          : kind === 'file'
             ? html`
                 <textarea rows="24" style="width:100%" .value=${this.content}
                   @input=${(e: any) => { this.content = e.target.value; this.dirty = true; }}></textarea>
@@ -151,7 +154,7 @@ export class DdmFiles extends LitElement {
                   ${n.truncated ? html`<span class="muted">(file truncated at 512 KiB)</span>` : ''}
                   <span class="muted">${n.size} bytes</span>
                 </div>`
-            : html`<p class="muted">${n?.kind === 'binary' ? `binary file (${n.size} bytes)` : ''}</p>`}
+            : html`<p class="muted">${kind === 'binary' ? `binary file (${n.size} bytes)` : ''}</p>`}
         ${this.msg ? html`<p class="muted">${this.msg}</p>` : ''}
       </div>`;
   }
