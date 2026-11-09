@@ -115,3 +115,5 @@ export default async function run(h) {
     ctx.check('executions: detail endpoint', d.status === 200, `status=${d.status}`);
   }
 }
+
+// appended: batch-3 coverage lives in 90-batch3.mjs

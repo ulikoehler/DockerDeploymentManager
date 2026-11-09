@@ -1,6 +1,6 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { getToken, clearToken, apiMe } from '../api';
+import { getToken, clearToken, apiMe, apiExecutions } from '../api';
 import { sharedStyles } from '../styles';
 import './ddm-login';
 import './ddm-service-list';
@@ -81,6 +81,9 @@ export class DdmApp extends LitElement {
   @state() private authed = false;
   @state() private userName = '';
   @state() private isAdmin = false;
+  @state() private lastFailure: any = null;
+  private seenFailures = new Set<string>();
+  private pollTimer?: number;
 
   private onNav = () => { this.view = parseHash(); };
 
@@ -93,6 +96,7 @@ export class DdmApp extends LitElement {
           this.authed = true;
           this.userName = me.name;
           this.isAdmin = me.roles?.includes('admin');
+          this.startFailurePoll();
         })
         .catch(() => clearToken());
     }
@@ -100,7 +104,34 @@ export class DdmApp extends LitElement {
 
   disconnectedCallback() {
     window.removeEventListener('hashchange', this.onNav);
+    clearInterval(this.pollTimer);
     super.disconnectedCallback();
+  }
+
+  // Surface the most recent failed execution so async actions (backup,
+  // commands, git syncs) don't fail silently in the background.
+  private startFailurePoll() {
+    let first = true;
+    const tick = async () => {
+      try {
+        const list: any[] = await apiExecutions();
+        const failed = (list ?? [])
+          .filter((e) => e.success === false && e.finished_at)
+          .sort((a, b) => String(b.finished_at).localeCompare(String(a.finished_at)))[0];
+        if (failed && !this.seenFailures.has(failed.id)) {
+          // seed on the first poll so a stale historical failure doesn't
+          // banner on every login
+          if (first) this.seenFailures.add(failed.id);
+          else {
+            this.seenFailures.add(failed.id);
+            this.lastFailure = failed;
+          }
+        }
+      } catch { /* transient — keep polling */ }
+      first = false;
+    };
+    tick();
+    this.pollTimer = setInterval(tick, 15000) as unknown as number;
   }
 
   private onLogin(e: CustomEvent) {
@@ -145,6 +176,15 @@ export class DdmApp extends LitElement {
         <button class="secondary small" @click=${this.logout}>logout</button>
       </header>
       <main>
+        ${this.lastFailure
+          ? html`<div class="card" style="border-left:3px solid #e5534b;display:flex;gap:.8em;align-items:center">
+              <span class="error">✗</span>
+              <span style="flex:1">execution failed: <b>${this.lastFailure.title}</b>
+                <span class="muted">— ${this.lastFailure.service ?? 'global'} · ${this.lastFailure.user} · ${new Date(this.lastFailure.finished_at).toLocaleString()}</span></span>
+              <a href="#/executions">view executions</a>
+              <button class="small secondary" @click=${() => (this.lastFailure = null)}>dismiss</button>
+            </div>`
+          : ''}
         ${this.renderView()}
       </main>
     `;

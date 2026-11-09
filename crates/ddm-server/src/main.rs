@@ -115,7 +115,13 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
         agent::Agent::Local(core)
     };
 
-    let exec = Arc::new(exec::ExecutionManager::new(history));
+    // Finished executions persist to <config dir>/executions.jsonl so
+    // history survives restarts; output replay stays in-memory.
+    let exec_path = config_path.parent().map(|d| d.join("executions.jsonl"));
+    let exec = Arc::new(match exec_path {
+        Some(p) => exec::ExecutionManager::new(history).with_file(p),
+        None => exec::ExecutionManager::new(history),
+    });
     // Audit trail persists to <config dir>/audit.jsonl so it survives
     // restarts; the ring buffer caps what is held in memory.
     let audit_path = config_path.parent().map(|d| d.join("audit.jsonl"));

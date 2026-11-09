@@ -17,6 +17,9 @@ export class DdmExecutions extends LitElement {
   @state() private output = '';
   @state() private loading = false;
   @state() private error = '';
+  @state() private filter = '';
+  @state() private statusFilter = '';
+  @state() private serviceFilter = '';
   private ws?: WebSocket;
   private timer?: number;
 
@@ -89,18 +92,49 @@ export class DdmExecutions extends LitElement {
     return html`<span class="badge warn">running</span>`;
   }
 
+  private get filtered() {
+    const q = this.filter.trim().toLowerCase();
+    return this.execs.filter((e) => {
+      if (this.statusFilter === 'ok' && e.success !== true) return false;
+      if (this.statusFilter === 'failed' && e.success !== false) return false;
+      if (this.statusFilter === 'running' && e.success !== null && e.finished_at) return false;
+      if (this.serviceFilter && e.service !== this.serviceFilter) return false;
+      if (q && !`${e.title} ${e.service ?? ''} ${e.user} ${e.id}`.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }
+
+  private get services(): string[] {
+    return [...new Set(this.execs.map((e) => e.service).filter(Boolean))].sort() as string[];
+  }
+
   render() {
+    const rows = this.filtered;
     return html`
       <h2>Executions</h2>
       <p class="muted">async actions — service operations, backups, commands, git syncs.
         newest first; click a row to replay output.</p>
+      <div class="row" style="gap:.5em;flex-wrap:wrap;margin-bottom:.6em">
+        <input placeholder="filter title/service/user/id…" style="flex:1;min-width:12em"
+          .value=${this.filter} @input=${(e: any) => (this.filter = e.target.value)}>
+        <select .value=${this.statusFilter} @change=${(e: any) => (this.statusFilter = e.target.value)}>
+          <option value="">all statuses</option>
+          <option value="ok">ok</option>
+          <option value="failed">failed</option>
+          <option value="running">running</option>
+        </select>
+        <select .value=${this.serviceFilter} @change=${(e: any) => (this.serviceFilter = e.target.value)}>
+          <option value="">all services</option>
+          ${this.services.map((s) => html`<option value=${s}>${s}</option>`)}
+        </select>
+      </div>
       ${this.error ? html`<p class="error">${this.error}</p>` : ''}
       <table>
         <thead><tr>
           <th>started</th><th>title</th><th>service</th><th>user</th><th>result</th>
         </tr></thead>
         <tbody>
-          ${this.execs.map(
+          ${rows.map(
             (e) => html`<tr style="cursor:pointer" @click=${() => this.select(e.id)}>
               <td class="muted">${this.fmt(e.started_at)}</td>
               <td>${e.title}</td>
@@ -109,8 +143,8 @@ export class DdmExecutions extends LitElement {
               <td>${this.badge(e)}</td>
             </tr>`,
           )}
-          ${!this.execs.length
-            ? html`<tr><td colspan="5" class="muted">no executions yet</td></tr>`
+          ${!rows.length
+            ? html`<tr><td colspan="5" class="muted">${this.execs.length ? 'no executions match the filter' : 'no executions yet'}</td></tr>`
             : ''}
         </tbody>
       </table>

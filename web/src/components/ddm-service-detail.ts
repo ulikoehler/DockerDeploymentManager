@@ -1,6 +1,6 @@
 import { LitElement, html, css, PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { apiService, apiAction, apiCheckUnit, apiDeleteService, apiExecContainer, wsUrl } from '../api';
+import { apiService, apiAction, apiCheckUnit, apiDeleteService, apiExecContainer, apiExecutions, wsUrl } from '../api';
 import { sharedStyles } from '../styles';
 import './ddm-log-viewer';
 import './ddm-compose-editor';
@@ -45,6 +45,7 @@ export class DdmServiceDetail extends LitElement {
   @state() private execCmd = 'sh';
   @state() private execOutput = '';
   @state() private execRunning = false;
+  @state() private lastExec: any = null;
   private execWs?: WebSocket;
   private loadedFor = '';
 
@@ -111,9 +112,14 @@ export class DdmServiceDetail extends LitElement {
     try {
       const detail = await apiService(n);
       const unitReport = await apiCheckUnit(n).catch(() => null);
+      const execs: any[] = await apiExecutions().catch(() => []);
+      const mine = (execs ?? [])
+        .filter((e) => e.service === n)
+        .sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)))[0] ?? null;
       if (this.name !== n) return; // navigated to another service mid-flight
       this.detail = detail;
       this.unitReport = unitReport;
+      this.lastExec = mine;
       this.error = '';
     } catch (e: any) {
       if (this.name !== n) return;
@@ -224,7 +230,24 @@ export class DdmServiceDetail extends LitElement {
 
   private renderOverview() {
     const d = this.detail;
+    const meta = d.meta ?? {};
+    const bk = meta.backup ?? {};
+    const mon = meta.monitoring ?? {};
     return html`
+      <div class="card">
+        <h3>Status</h3>
+        <p>
+          backup: ${bk.enabled === false ? html`<span class="badge warn">disabled</span>` : html`enabled${bk.schedule_enabled === false ? ' (manual only)' : ''}`}
+          · monitoring: ${!mon.health || mon.health.enabled === false ? html`<span class="muted">off</span>` : html`<span class="ok-text">on</span> <span class="muted">(${mon.health.kind ?? 'healthcheck'})</span>`}
+          · containers: ${html`<b>${(d.containers || []).filter((c: any) => c.state === 'running').length}</b>`}/${(d.containers || []).length} running
+        </p>
+        ${this.lastExec
+          ? html`<p class="muted">last action: <b>${this.lastExec.title}</b>
+              — ${this.lastExec.success === true ? html`<span class="ok-text">ok</span>` : this.lastExec.success === false ? html`<span class="error">failed</span>` : html`<span class="muted">running</span>`}
+              <span class="muted">(${new Date(this.lastExec.started_at).toLocaleString()}${this.lastExec.user ? `, ${this.lastExec.user}` : ''})
+              · <a href="#/executions">all executions</a></span></p>`
+          : html`<p class="muted">no recorded actions yet</p>`}
+      </div>
       <div class="card">
         <h3>Containers</h3>
         <table>

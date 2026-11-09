@@ -89,38 +89,21 @@ export default async function (h) {
     auditTxt.slice(0, 100).replace(/\n/g, ' '));
 
   // ============ commands: admin section editor ============
+  // (structured per-item editing is covered end-to-end in 90-batch3;
+  // here we keep the lightweight checks that don't duplicate it)
   await h.goto('/commands');
   await sleep(1500);
   const editBtn = await h.clickIn('ddm-commands', 'edit sections');
   ctx.check('commands: edit sections button (admin)', editBtn === true, '');
   await sleep(800);
-  const added = await page.evaluate(() => {
+  const structEditor = await page.evaluate(() => {
     const c = window.__deep('ddm-commands');
     if (!c?.shadowRoot) return false;
-    const tas = [...c.shadowRoot.querySelectorAll('textarea')];
-    const ta = tas[tas.length - 1]; // "new section" textarea is last
-    if (!ta) return false;
-    window.__setVal(ta, JSON.stringify({
-      title: 'E2E Section', collapsed: true,
-      items: [{ title: 'e2e item', description: 'ui-added', button_label: 'Run',
-        command_sequence: [{ program: 'echo', args: [{ type: 'value', value: 'ui-ok' }] }],
-        on_host: true }],
-    }));
-    return [...c.shadowRoot.querySelectorAll('button')].some(b => /add section/i.test(b.textContent));
+    const t = c.shadowRoot.textContent;
+    return /\+ item/.test(t) && /save/.test(t);
   });
-  ctx.check('commands: new-section form present', added === true, '');
-  await h.clickIn('ddm-commands', 'add section');
-  await sleep(1200);
-  const secs = await h.api('/api/commands/sections');
-  const idx = (secs.data || []).findIndex((s) => s.title === 'E2E Section');
-  ctx.check('commands: UI-added section persisted', idx >= 0, `sections=${(secs.data || []).length}`);
+  ctx.check('commands: structured section/item editor present', structEditor === true, '');
   await h.clickIn('ddm-commands', 'done editing');
-  await sleep(600);
-  const cmdTxt = await h.compText('ddm-commands');
-  ctx.check('commands: new section visible in run view', /E2E Section/i.test(cmdTxt || ''), '');
-  if (idx >= 0) {
-    await h.api('/api/commands/sections', { method: 'POST', body: { op: 'delete', index: idx } });
-  }
 
   // ============ gitops config form ============
   await h.goto('/gitops');

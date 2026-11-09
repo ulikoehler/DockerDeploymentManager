@@ -2,6 +2,8 @@ use crate::config::{CommandArg, CommandDefinition, CommandItem};
 use crate::protocol::{ExecutionInfo, ServerMessage};
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -17,6 +19,7 @@ pub struct ExecutionManager {
     channels: Mutex<HashMap<String, ExecChannel>>,
     history: Mutex<VecDeque<ExecutionInfo>>,
     max_history: usize,
+    path: Option<PathBuf>,
 }
 
 struct ExecChannel {
@@ -32,7 +35,59 @@ impl ExecutionManager {
             channels: Mutex::new(HashMap::new()),
             history: Mutex::new(VecDeque::new()),
             max_history,
+            path: None,
         }
+    }
+
+    /// Persist finished execution records to `path` (JSONL) and reload the
+    /// last `max_history` on startup. Only completed records are written —
+    /// running executions are ephemeral by nature. Best-effort: I/O
+    /// failures never affect execution.
+    pub fn with_file(mut self, path: PathBuf) -> Self {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let entries: Vec<ExecutionInfo> = text
+                .lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect();
+            let skip = entries.len().saturating_sub(self.max_history);
+            *self.history.lock().unwrap() = entries.into_iter().skip(skip).collect();
+        }
+        self.path = Some(path);
+        self
+    }
+
+    fn persist(&self, e: &ExecutionInfo) {
+        let Some(path) = &self.path else { return };
+        let Ok(mut line) = serde_json::to_string(e) else {
+            return;
+        };
+        line.push('\n');
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+        // Bound the file like the audit log: ~4× cap entries → rewrite.
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.len() > 4 * self.max_history as u64 * 512 {
+                self.trim_file(path);
+            }
+        }
+    }
+
+    fn trim_file(&self, path: &Path) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let keep: Vec<&str> = text.lines().rev().take(self.max_history).collect();
+        let mut out = keep.into_iter().rev().collect::<Vec<_>>().join("\n");
+        out.push('\n');
+        let _ = std::fs::write(path, out);
     }
 
     /// Create a channel for an execution id.
@@ -160,10 +215,18 @@ impl ExecutionManager {
     }
 
     fn mark_finished(&self, id: &str, success: bool) {
-        let mut h = self.history.lock().unwrap();
-        if let Some(e) = h.iter_mut().find(|e| e.id == id) {
-            e.finished_at = Some(chrono::Utc::now());
-            e.success = Some(success);
+        let entry = {
+            let mut h = self.history.lock().unwrap();
+            if let Some(e) = h.iter_mut().find(|e| e.id == id) {
+                e.finished_at = Some(chrono::Utc::now());
+                e.success = Some(success);
+                Some(e.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(e) = entry {
+            self.persist(&e);
         }
     }
 }
@@ -480,5 +543,25 @@ mod tests {
         }];
         assert_eq!(build_args(&args, &p(&[("name", "x")])), vec!["--name", "x"]);
         assert!(build_args(&args, &p(&[])).is_empty());
+    }
+
+    #[test]
+    fn finished_executions_persist_and_reload() {
+        let dir = std::env::temp_dir().join(format!("ddm-exec-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("executions.jsonl");
+        let m = ExecutionManager::new(10).with_file(path.clone());
+        let id = "exec-1".to_string();
+        m.register(&id);
+        m.push_history(&id, "test job", Some("svc".into()), "u");
+        m.mark_finished(&id, true);
+        drop(m);
+
+        // reload: finished record comes back with success + finished_at
+        let m2 = ExecutionManager::new(10).with_file(path.clone());
+        let e = m2.get(&id).expect("persisted execution missing");
+        assert_eq!(e.title, "test job");
+        assert_eq!(e.success, Some(true));
+        assert!(e.finished_at.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
