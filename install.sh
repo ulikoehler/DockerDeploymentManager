@@ -61,7 +61,7 @@ run curl -fsSL "$base/$tb" -o "$TMP/$tb"
 run curl -fsSL "$base/SHA256SUMS" -o "$TMP/SHA256SUMS"
 
 say "Verifying checksum ..."
-( cd "$TMP" && run grep -F "$tb" SHA256SUMS | run sha256sum -c - )
+( cd "$TMP" && run sh -c "grep -F '$tb' SHA256SUMS | sha256sum -c -" )
 
 say "Extracting ..."
 run tar -xzf "$TMP/$tb" -C "$TMP"
