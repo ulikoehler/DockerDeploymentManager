@@ -53,11 +53,15 @@ excluded. `stdin_dumps` stream
 
 `POST /api/services/{name}/backup/provision` (or UI → Backup → provision):
 
-1. creates `.restic_password` (0600, random) if missing,
+1. creates `.restic_password` (0600, random) if missing — or restores it
+   from the sidecar `<config_dir>/backup-passwords/<service>` when the
+   service was deleted and recreated (the repository outlives the service
+   dir, so the password must too, or old snapshots become unreadable),
 2. renders `backup.sh` (0755),
 3. writes `ddm-backup-<svc>.service` (oneshot) + `.timer` into the host
    systemd dir and `enable --now`s the timer,
-4. runs `restic init` once (`.restic_inited` marker).
+4. runs `restic init` once (`.restic_inited` marker; an already-initialized
+   repo is verified via `restic cat config` instead of failing).
 
 Idempotent — safe to re-run.
 

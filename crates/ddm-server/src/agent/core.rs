@@ -1482,7 +1482,9 @@ impl AgentCore {
                 self.justify_token(token, "backup_provision", &service)?;
                 let svc = svc_ops::get_service(&cfg, &service)?;
                 let bin = self.restic_bin(&cfg).await?;
-                let steps = crate::backup::provision(&cfg, &self.host, &svc, &bin).await?;
+                let cfg_dir = self.cfg.dir();
+                let steps =
+                    crate::backup::provision(&cfg, &self.host, &svc, &bin, &cfg_dir).await?;
                 Ok(serde_json::to_value(steps)?)
             }
             SyncVerb::ContainerLogsCollect { id, tail, since } => {

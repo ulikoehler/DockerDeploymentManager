@@ -191,31 +191,90 @@ pub fn render_backup_units(cfg: &AppConfig, svc: &Service) -> (String, String) {
 // Provision & check
 // ---------------------------------------------------------------------------
 
-/// Generate a random password file (0600). Returns whether it was created.
-pub fn ensure_password_file(svc: &Service) -> Result<bool> {
+/// What `ensure_password_file` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasswordSetup {
+    /// `.restic_password` already present in the service dir.
+    Existing,
+    /// Restored from the sidecar after the service dir was recreated.
+    Restored,
+    /// Newly generated (and sidecar-written).
+    Created,
+}
+
+/// Directory holding per-service restic password sidecars, inside the
+/// config dir: `<config_dir>/backup-passwords/<service>`.
+///
+/// The primary password file lives in the service dir, which is deleted
+/// with the service — but the restic repository (and its encrypted
+/// snapshots) lives outside it. Without a sidecar, deleting and
+/// recreating a service would silently orphan every existing backup:
+/// provision would generate a fresh random password that cannot unlock
+/// the old repo ("wrong password or no key found"). The sidecar survives
+/// service deletion and works for any repository type (local path, s3,
+/// rest, sftp), unlike storing it next to the repo.
+pub fn password_sidecar_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("backup-passwords")
+}
+
+fn password_sidecar_path(config_dir: &Path, service: &str) -> PathBuf {
+    password_sidecar_dir(config_dir).join(service)
+}
+
+/// Ensure `.restic_password` exists in the service dir (0600).
+///
+/// Order: existing file → sidecar restore → generate new. The sidecar is
+/// written best-effort on creation; a failure there only means a future
+/// recreate can't restore (same as before this feature), never breaks
+/// provisioning itself.
+pub fn ensure_password_file(svc: &Service, config_dir: &Path) -> Result<PasswordSetup> {
     use std::os::unix::fs::PermissionsExt;
     let p = svc.dir.join(PASSWORD_FILE);
     if p.exists() {
-        return Ok(false);
+        return Ok(PasswordSetup::Existing);
+    }
+    let sidecar = password_sidecar_path(config_dir, &svc.name);
+    if let Ok(pw) = std::fs::read_to_string(&sidecar) {
+        // write back byte-identical — restic may treat the file content
+        // literally, so don't normalize whitespace
+        if !pw.trim().is_empty() {
+            std::fs::write(&p, &pw)?;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
+            return Ok(PasswordSetup::Restored);
+        }
     }
     let pw = crate::users::generate_password();
-    std::fs::write(&p, pw)?;
+    std::fs::write(&p, &pw)?;
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
-    Ok(true)
+    // best-effort sidecar — ignore errors (read-only config dir etc.)
+    let _ = std::fs::create_dir_all(password_sidecar_dir(config_dir));
+    let _ = std::fs::write(&sidecar, &pw);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(PasswordSetup::Created)
 }
 
 /// Write script + units + init repo + enable timer. Idempotent.
+/// `config_dir` is the directory containing the loaded config file —
+/// used for the restic password sidecar so a recreated service can
+/// unlock its pre-existing repository.
 pub async fn provision(
     cfg: &AppConfig,
     host: &Arc<dyn HostExec>,
     svc: &Service,
     host_bin: &str,
+    config_dir: &Path,
 ) -> Result<Vec<String>> {
     let mut done = vec![];
     let bcfg = svc.meta.backup.clone().unwrap_or_default();
 
-    if ensure_password_file(svc)? {
-        done.push("created .restic_password".into());
+    match ensure_password_file(svc, config_dir)? {
+        PasswordSetup::Existing => {}
+        PasswordSetup::Restored => done.push("restored .restic_password from sidecar".into()),
+        PasswordSetup::Created => done.push("created .restic_password".into()),
     }
     let script = render_backup_script(cfg, svc, &bcfg)?;
     crate::services::write_service_file(&svc.dir, SCRIPT_FILE, &script, 0o755)?;
@@ -235,12 +294,17 @@ pub async fn provision(
         done.push(format!("enable --now timer: status {}", en.status));
     }
 
-    // restic init on the host (idempotent; .restic_inited marker on host dir)
+    // restic init on the host (idempotent; .restic_inited marker on host dir).
+    // The marker lives in the service dir, so a recreated service loses it
+    // while the repo survives — `restic init` then fails with "config file
+    // already exists". Treat that as success by verifying repo access with
+    // `restic cat config` (which also proves the password unlocks the repo).
     let inited_marker = svc.dir.join(INITED_FILE);
     if !inited_marker.exists() {
         let repo = repository_for(&cfg.backup, &svc.name);
         let script = format!(
-            "cd {dir} && RESTIC_REPOSITORY={repo} RESTIC_PASSWORD_FILE={pw} {bin} init && touch {marker}",
+            "cd {dir} && export RESTIC_REPOSITORY={repo} RESTIC_PASSWORD_FILE={pw} && \
+             ({bin} init || {bin} cat config >/dev/null) && touch {marker}",
             dir = shell_quote(&svc.host_dir.to_string_lossy()),
             repo = shell_quote(&repo),
             pw = shell_quote(&svc.host_dir.join(PASSWORD_FILE).to_string_lossy()),
@@ -778,5 +842,48 @@ mod tests {
         assert!(ls_script(&c, &s, "restic", "latest", Some("data/x")).is_ok());
         assert!(ls_script(&c, &s, "restic", "latest", Some("../x")).is_err());
         assert!(ls_script(&c, &s, "restic", "abc;rm", None).is_err());
+    }
+
+    #[test]
+    fn password_sidecar_survives_service_recreate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_dir = tmp.path().join("etc-ddm");
+        let svc_dir = tmp.path().join("services").join("pg-app");
+        std::fs::create_dir_all(&svc_dir).unwrap();
+        let s = Service {
+            name: "pg-app".into(),
+            dir: svc_dir.clone(),
+            host_dir: svc_dir.clone(),
+            compose_path: svc_dir.join("docker-compose.yml"),
+            meta: Default::default(),
+        };
+
+        // first provision: generates a password + sidecar
+        assert_eq!(
+            ensure_password_file(&s, &cfg_dir).unwrap(),
+            PasswordSetup::Created
+        );
+        let pw1 = std::fs::read_to_string(svc_dir.join(PASSWORD_FILE)).unwrap();
+        let sidecar = password_sidecar_path(&cfg_dir, "pg-app");
+        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), pw1);
+
+        // idempotent: existing file wins
+        assert_eq!(
+            ensure_password_file(&s, &cfg_dir).unwrap(),
+            PasswordSetup::Existing
+        );
+
+        // simulate service delete + recreate: service dir gone, sidecar stays
+        std::fs::remove_dir_all(&svc_dir).unwrap();
+        std::fs::create_dir_all(&svc_dir).unwrap();
+        assert_eq!(
+            ensure_password_file(&s, &cfg_dir).unwrap(),
+            PasswordSetup::Restored
+        );
+        assert_eq!(
+            std::fs::read_to_string(svc_dir.join(PASSWORD_FILE)).unwrap(),
+            pw1,
+            "recreated service must recover the SAME password or the old repo is unreachable"
+        );
     }
 }
