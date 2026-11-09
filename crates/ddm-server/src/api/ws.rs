@@ -174,9 +174,22 @@ async fn stream_execution(
             let _ = tx.send(
                 serde_json::json!({"type": "error", "message": "execution not found"}).to_string(),
             );
-        } else if let Some(mut bcast) = state.exec.subscribe(&id) {
+        } else if let Some((replay, mut bcast)) = state.exec.subscribe(&id) {
             let txh = tx.clone();
             tokio::spawn(async move {
+                // frames emitted before we subscribed — replay keeps early
+                // output of fast commands from being silently dropped
+                let mut finished = false;
+                for msg in replay {
+                    finished = matches!(msg, ServerMessage::ExecutionFinished { .. });
+                    let text = serde_json::to_string(&msg).unwrap_or_default();
+                    if txh.send(text).is_err() {
+                        return;
+                    }
+                }
+                if finished {
+                    return;
+                }
                 loop {
                     match bcast.recv().await {
                         Ok(msg) => {

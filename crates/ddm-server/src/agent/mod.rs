@@ -130,7 +130,7 @@ impl Agent {
     ) -> Result<String> {
         let title = title.into();
         let eid = Uuid::new_v4().to_string();
-        let tx = mgr.adopt(&eid, &title, service.clone(), user);
+        let _tx = mgr.adopt(&eid, &title, service.clone(), user);
         let rx = match self {
             Agent::Local(core) => core.exec(verb, eid.clone(), title.clone(), token).await?,
             Agent::Remote(s) => exec_remote(s, &verb, &eid, &title, service, token).await?,
@@ -143,7 +143,7 @@ impl Agent {
                 if let ServerMessage::ExecutionFinished { success, .. } = &msg {
                     mgr.note_finished(&id, *success);
                 }
-                let _ = tx.send(msg);
+                mgr.publish(&id, msg);
             }
             // keep the channel alive briefly so late subscribers see the end
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;

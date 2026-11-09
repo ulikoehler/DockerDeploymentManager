@@ -10,11 +10,21 @@ use tracing::warn;
 use uuid::Uuid;
 
 /// Central execution bookkeeping: broadcast channels per execution + history.
+/// Each channel keeps a replay buffer so subscribers that connect slightly
+/// after an execution starts still see its early output — broadcast alone
+/// would silently drop everything emitted before `subscribe()`.
 pub struct ExecutionManager {
-    channels: Mutex<HashMap<String, broadcast::Sender<ServerMessage>>>,
+    channels: Mutex<HashMap<String, ExecChannel>>,
     history: Mutex<VecDeque<ExecutionInfo>>,
     max_history: usize,
 }
+
+struct ExecChannel {
+    tx: broadcast::Sender<ServerMessage>,
+    replay: VecDeque<ServerMessage>,
+}
+
+const REPLAY_CAP: usize = 1000;
 
 impl ExecutionManager {
     pub fn new(max_history: usize) -> Self {
@@ -28,15 +38,40 @@ impl ExecutionManager {
     /// Create a channel for an execution id.
     pub fn register(&self, id: &str) -> broadcast::Sender<ServerMessage> {
         let (tx, _) = broadcast::channel(512);
-        self.channels
-            .lock()
-            .unwrap()
-            .insert(id.to_string(), tx.clone());
+        self.channels.lock().unwrap().insert(
+            id.to_string(),
+            ExecChannel {
+                tx: tx.clone(),
+                replay: VecDeque::new(),
+            },
+        );
         tx
     }
 
-    pub fn subscribe(&self, id: &str) -> Option<broadcast::Receiver<ServerMessage>> {
-        self.channels.lock().unwrap().get(id).map(|t| t.subscribe())
+    /// Atomically snapshot the replay buffer and subscribe to live frames.
+    /// Holding the lock across both operations guarantees no message is
+    /// missed (appended after snapshot -> arrives via the receiver) and
+    /// none is duplicated (sent before subscribe -> only in the snapshot).
+    pub fn subscribe(
+        &self,
+        id: &str,
+    ) -> Option<(Vec<ServerMessage>, broadcast::Receiver<ServerMessage>)> {
+        let ch = self.channels.lock().unwrap();
+        ch.get(id)
+            .map(|c| (c.replay.iter().cloned().collect(), c.tx.subscribe()))
+    }
+
+    /// Append to the replay buffer and broadcast — call while NOT holding
+    /// other locks; the channel lock is taken internally.
+    pub fn publish(&self, id: &str, msg: ServerMessage) {
+        let mut ch = self.channels.lock().unwrap();
+        if let Some(c) = ch.get_mut(id) {
+            if c.replay.len() >= REPLAY_CAP {
+                c.replay.pop_front();
+            }
+            c.replay.push_back(msg.clone());
+            let _ = c.tx.send(msg);
+        }
     }
 
     pub fn history(&self) -> Vec<ExecutionInfo> {
@@ -63,12 +98,11 @@ impl ExecutionManager {
         on_host: bool,
     ) -> String {
         let id = Uuid::new_v4().to_string();
-        let tx = self.register(&id);
+        self.register(&id);
         self.push_history(&id, &item.title, service, user);
 
         let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<ServerMessage>(256);
         {
-            let tx = tx.clone();
             let this = Arc::clone(self);
             let exec_id = id.clone();
             tokio::spawn(async move {
@@ -76,7 +110,7 @@ impl ExecutionManager {
                     if let ServerMessage::ExecutionFinished { success, .. } = &msg {
                         this.mark_finished(&exec_id, *success);
                     }
-                    let _ = tx.send(msg);
+                    this.publish(&exec_id, msg);
                 }
                 // keep channel alive briefly so late subscribers see the end
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
