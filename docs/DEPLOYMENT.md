@@ -121,6 +121,76 @@ If the service dir must have different paths inside/outside, set
 - `restic` (only if `backup.enabled` — resolved via `which` on the host)
 - git (for git clone/pull features)
 
+## Exposing the UI through a reverse proxy
+
+DDM serves plain HTTP and has its own login + JWT sessions, so any
+reverse proxy works. WebSocket endpoints (`/ws/*`, log follow, exec
+output) need no special handling beyond normal HTTP upgrade support —
+Traefik, nginx, and Caddy all proxy them transparently.
+
+### Traefik (file provider, live-reload)
+
+This is the setup running on `localgrid.de` (`ddm.localgrid.de` →
+DDM on `:8090`). Traefik runs with `network_mode: host`, so it reaches
+the bare-metal DDM via loopback — no extra container or host-gateway
+mapping needed.
+
+Drop a file into the watched conf dir (e.g.
+`/opt/services/traefik/conf/ddm.toml`); Traefik picks it up within a
+second, no restart:
+
+```toml
+# DDM — bare-metal on :8090. TLS via the existing cloudflare DNS-01
+# wildcard cert (*.localgrid.de).
+[http.routers.ddm]
+rule = "Host(`ddm.localgrid.de`)"
+service = "ddm"
+entryPoints = ["websecure"]
+
+[http.routers.ddm.tls]
+certresolver = "cloudflare"
+
+[http.services.ddm.loadbalancer]
+passHostHeader = true   # DDM's WS Origin check needs the real Host
+
+[[http.services.ddm.loadbalancer.servers]]
+url = "http://127.0.0.1:8090"
+```
+
+Notes:
+
+- `passHostHeader = true` matters: the WebSocket handlers validate
+  `Origin`/`Host`, so the browser-visible hostname must reach DDM.
+- If you terminate TLS at the proxy, leave `listen` on plain HTTP —
+  do not configure `tls` inside DDM.
+- For an extra auth layer in front of the DDM login, attach a
+  `basicAuth`/`forwardAuth` middleware to the router — but note DDM
+  still requires its own login afterwards.
+- If Traefik is NOT host-networked (bridge mode), point the server URL
+  at the host gateway instead, e.g. `http://172.17.0.1:8090`, and make
+  sure `0.0.0.0:8090` is reachable from the docker bridge (it is, since
+  `listen` binds all interfaces — consider a firewall rule if the port
+  should not be publicly reachable directly).
+
+### nginx example
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name ddm.example.com;
+    # ssl_certificate / ssl_certificate_key ...
+
+    location / {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;   # websockets
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+```
+
 ## Upgrades
 
 **Bare metal:** download the new tarball, `systemctl stop ddm`, replace
