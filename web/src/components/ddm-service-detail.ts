@@ -1,4 +1,4 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiService, apiAction, apiCheckUnit, apiDeleteService, apiExecContainer, wsUrl } from '../api';
 import { sharedStyles } from '../styles';
@@ -46,10 +46,24 @@ export class DdmServiceDetail extends LitElement {
   @state() private execOutput = '';
   @state() private execRunning = false;
   private execWs?: WebSocket;
+  private loadedFor = '';
 
   connectedCallback() {
     super.connectedCallback();
     this.refresh();
+  }
+
+  updated(changed: PropertyValues) {
+    // `name` can change without remounting (hash nav #/service/a →
+    // #/service/b reuses this element). Refetch and reset view state —
+    // otherwise we'd render service A's data while actions target B.
+    if (changed.has('name') && this.name && this.name !== this.loadedFor) {
+      this.detail = null;
+      this.error = '';
+      this.tab = 'overview';
+      this.execTarget = null;
+      this.refresh();
+    }
   }
 
   disconnectedCallback() {
@@ -92,11 +106,17 @@ export class DdmServiceDetail extends LitElement {
   }
 
   private async refresh() {
+    const n = this.name;
+    this.loadedFor = n;
     try {
-      this.detail = await apiService(this.name);
-      this.unitReport = await apiCheckUnit(this.name).catch(() => null);
+      const detail = await apiService(n);
+      const unitReport = await apiCheckUnit(n).catch(() => null);
+      if (this.name !== n) return; // navigated to another service mid-flight
+      this.detail = detail;
+      this.unitReport = unitReport;
       this.error = '';
     } catch (e: any) {
+      if (this.name !== n) return;
       this.error = e.message;
     }
   }
