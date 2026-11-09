@@ -1635,8 +1635,10 @@ mod tests {
         let mut named = ComposePolicy::unrestricted_baseline();
         named.deny_privileged = false;
         named.allowed_port_range = (8080, 8080);
-        let mut r = UserRestrictions::default();
-        r.deny_privileged = false; // admin explicitly allows privileged
+        let r = UserRestrictions {
+            deny_privileged: false, // admin explicitly allows privileged
+            ..Default::default()
+        };
         let p = named.with_user_restrictions(&r);
         assert!(!p.deny_privileged); // stays allowed
         assert_eq!(p.allowed_port_range, (8080, 8080)); // untouched

@@ -64,6 +64,9 @@ pub struct ServiceMonitorState {
     pub checks: Vec<CheckStatus>,
 }
 
+/// Running monitor tasks for one service: (config signature, task handles).
+type MonitorTasks = (String, Vec<JoinHandle<()>>);
+
 /// The monitor supervisor. Reconciles desired checks vs running tasks.
 pub struct Monitor {
     cfg: Arc<SharedConfig>,
@@ -76,7 +79,7 @@ pub struct Monitor {
     /// restarted whenever the desired config signature changes — a
     /// service that already has tasks (e.g. a log watcher) must pick up
     /// new health checks and alert changes.
-    tasks: Mutex<HashMap<String, (String, Vec<JoinHandle<()>>)>>,
+    tasks: Mutex<HashMap<String, MonitorTasks>>,
     history: Mutex<VecDeque<AlertEvent>>,
     /// action attempt timestamps: key → instants within window
     action_attempts: Mutex<HashMap<String, VecDeque<Instant>>>,
