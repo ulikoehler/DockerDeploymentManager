@@ -131,7 +131,7 @@ export class DdmApp extends LitElement {
           ${this.navLink('events', 'Events')}
           ${this.isAdmin ? this.navLink('users', 'Users') : ''}
           ${this.isAdmin ? this.navLink('gitops', 'GitOps') : ''}
-          ${this.navLink('token', 'MCP')}
+          ${this.navLink('token', 'Tokens')}
         </nav>
         <span class="spacer"></span>
         <span class="user-chip"><span class="dot"></span>${this.userName}</span>

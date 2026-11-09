@@ -98,12 +98,17 @@ export class DdmToken extends LitElement {
     );
   }
 
+  private restExample(token: string): string {
+    return `curl -H "Authorization: Bearer ${token}" \\\n  ${location.origin}/api/services`;
+  }
+
   render() {
     return html`
-      <h2>MCP access token</h2>
+      <h2>Access tokens</h2>
       <p class="muted">
-        Issue a time-limited bearer token for MCP clients (endpoint
-        <code>${location.origin}/mcp</code>). The token acts as
+        Issue a time-limited bearer token for agents — it works on the
+        REST API (<code>/api/*</code>) and the MCP endpoint
+        (<code>${location.origin}/mcp</code>). The token acts as
         <b>${this.me?.name ?? '…'}</b>; scope selections below can only narrow
         your permissions.
       </p>
@@ -172,8 +177,12 @@ export class DdmToken extends LitElement {
             <div class="toolbar">
               <button class="small" @click=${() => this.copy(this.issued!.token)}>copy token</button>
               <button class="small secondary" @click=${() => this.copy(this.clientConfig(this.issued!.token))}>
-                copy client config</button>
+                copy MCP client config</button>
+              <button class="small secondary" @click=${() => this.copy(this.restExample(this.issued!.token))}>
+                copy REST example</button>
             </div>
+            <p class="muted">REST API usage:</p>
+            <pre>${this.restExample(this.issued.token)}</pre>
             <p class="muted">MCP client configuration:</p>
             <pre>${this.clientConfig(this.issued.token)}</pre>
           </div>`

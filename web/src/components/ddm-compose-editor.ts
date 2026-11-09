@@ -1,6 +1,6 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { apiGetCompose, apiPutCompose } from '../api';
+import { apiGetCompose, apiPutCompose, apiPolicy } from '../api';
 import { sharedStyles } from '../styles';
 
 @customElement('ddm-compose-editor')
@@ -14,10 +14,14 @@ export class DdmComposeEditor extends LitElement {
   @state() private content = '';
   @state() private violations: { path: string; message: string }[] = [];
   @state() private msg = '';
+  @state() private policyName = '';
 
   connectedCallback() {
     super.connectedCallback();
     this.load();
+    apiPolicy()
+      .then((p: any) => (this.policyName = p?.policy ?? ''))
+      .catch(() => {});
   }
 
   private async load() {
@@ -38,11 +42,20 @@ export class DdmComposeEditor extends LitElement {
       this.violations = [];
     } catch (e: any) {
       this.msg = e.message;
+      // policy rejections need remediation context — the bare violation
+      // list doesn't say WHO can change it
+      if (/policy violation/i.test(e.message) && this.policyName) {
+        this.msg += ` — blocked by compose policy '${this.policyName}'; ` +
+          `an admin can change your user's policy under Users → compose policy`;
+      }
     }
   }
 
   render() {
     return html`
+      ${this.policyName
+        ? html`<p class="muted">enforced compose policy: <b>${this.policyName}</b></p>`
+        : ''}
       <textarea .value=${this.content}
         @input=${(e: any) => (this.content = e.target.value)}
         spellcheck="false"></textarea>

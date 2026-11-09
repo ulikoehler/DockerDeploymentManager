@@ -33,10 +33,16 @@ export default async function (h) {
   const good = await h.api(`/api/services/${svc}/compose`, { method: 'PUT', body: { content: 'services:\n  web:\n    image: nginx:alpine\n' } });
   ctx.check('compose: restore valid via api', good.status === 200, `status=${good.status}`);
 
-  // policy-violating compose (privileged) -> denied for restricted user, error shown
-  r = await page.evaluate(async () => {
+  // privileged compose: denied under strict/infra, allowed under unrestricted —
+  // assert whichever outcome the effective policy implies, and that the UI explains it
+  const effPol = await h.api('/api/policy');
+  const polName = effPol.data?.policy || effPol.data?.effective || '';
+  const privilegedDenied = effPol.data?.rules?.deny_privileged === true ||
+    ['strict', 'infra'].includes(String(polName));
+  const afterPriv = await page.evaluate(async () => {
     const ce = window.__deep('ddm-compose-editor');
-    const ta = ce && ce.shadowRoot ? ce.shadowRoot.querySelector('textarea') : null;
+    if (!ce) return { err: 'no compose editor' };
+    const ta = ce.shadowRoot.querySelector('textarea');
     if (!ta) return { err: 'no textarea' };
     window.__setVal(ta, 'services:\n  web:\n    image: nginx:alpine\n    privileged: true\n');
     await new Promise(r => setTimeout(r, 300));
@@ -44,7 +50,21 @@ export default async function (h) {
     await new Promise(r => setTimeout(r, 2500));
     return { msg: ce.shadowRoot.textContent.slice(0, 400) };
   });
-  ctx.check('compose: privileged denied + error shown', /privileged|denied|policy|violation|error/i.test(r.msg || ''), (r.msg || '').slice(0, 120));
+  const compAfter = await h.api(`/api/services/${svc}/compose`);
+  const stillPriv = String(compAfter.data?.content || '').includes('privileged: true');
+  if (privilegedDenied) {
+    ctx.check('compose: privileged denied + error shown', !stillPriv && /privileged|denied|policy|violation|error/i.test(afterPriv.msg || ''), (afterPriv.msg || '').slice(0, 120));
+    // policy rejections must explain the remediation, not just the violation
+    ctx.check('compose: policy error names remediation', /compose policy|Users/i.test(afterPriv.msg || ''), (afterPriv.msg || '').slice(0, 160));
+  } else {
+    ctx.check('compose: privileged allowed under ' + polName, stillPriv === true, (afterPriv.msg || '').slice(0, 120));
+  }
+  // the editor shows which policy is enforced
+  const polTxt = await page.evaluate(() => {
+    const ce = window.__deep('ddm-compose-editor');
+    return ce?.shadowRoot?.textContent || '';
+  });
+  ctx.check('compose: enforced policy displayed', new RegExp('enforced compose policy: ' + polName, 'i').test(polTxt), polTxt.slice(0, 80));
   await h.api(`/api/services/${svc}/compose`, { method: 'PUT', body: { content: 'services:\n  web:\n    image: nginx:alpine\n' } });
 
   // ---- files ----
@@ -122,6 +142,26 @@ export default async function (h) {
   const fDel = await h.api(`/api/services/${svc}/files?path=e2e_renamed.txt`);
   ctx.check('files: delete via confirm', r.ok === true && fDel.status !== 200, `status=${fDel.status}`);
 
+  // regression: clicking a file must load its content into the editor —
+  // the API node kind is "File" (serde variant), not "file"
+  const w = await h.api(`/api/services/${svc}/files`, { method: 'PUT', body: { path: 'e2e_ui.txt', content: 'ui-content-marker' } });
+  ctx.check('files: seed content file', w.status === 200, `status=${w.status}`);
+  r = await page.evaluate(async () => {
+    const ff = window.__deep('ddm-files');
+    // back to root via the first breadcrumb segment (service name)
+    const seg = [...ff.shadowRoot.querySelectorAll('a')][0];
+    if (seg) seg.click();
+    await new Promise(r => setTimeout(r, 800));
+    const link = [...ff.shadowRoot.querySelectorAll('a')].find(a => a.textContent.includes('e2e_ui.txt'));
+    if (!link) return { err: 'no file link' };
+    link.click();
+    await new Promise(r => setTimeout(r, 1200));
+    const ta = ff.shadowRoot.querySelector('textarea');
+    return { ok: !!ta && ta.value.includes('ui-content-marker'), val: ta ? ta.value.slice(0, 60) : '' };
+  });
+  ctx.check('files: file content loads in editor', r.ok === true, (r.val || r.err || '').slice(0, 80));
+
   // cleanup dir via API
   await h.api(`/api/services/${svc}/files?path=e2e_dir`, { method: 'DELETE' });
+  await h.api(`/api/services/${svc}/files?path=e2e_ui.txt`, { method: 'DELETE' });
 }

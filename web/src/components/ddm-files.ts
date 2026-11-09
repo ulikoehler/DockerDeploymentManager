@@ -37,7 +37,9 @@ export class DdmFiles extends LitElement {
       const n: any = await apiFiles(this.name, path);
       this.node = n;
       this.path = n.path ?? path;
-      this.content = n.kind === 'file' ? n.content : '';
+      // node kind is a serde variant ("File"/"Dir"/"Binary") — normalize
+      // before comparing or every file renders as an empty editor
+      this.content = n.kind?.toLowerCase() === 'file' ? n.content : '';
       this.dirty = false;
       this.msg = '';
     } catch (e: any) {

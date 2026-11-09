@@ -164,6 +164,8 @@ export const apiGitAction = (name: string, path: string, op: string, gitRef?: st
 export const apiGetMonitoring = (name: string) => api(`/api/services/${name}/monitoring`);
 export const apiPutMonitoring = (name: string, cfg: unknown) =>
   api(`/api/services/${name}/monitoring`, { method: 'PUT', body: cfg });
+export const apiMonitoringTest = (name: string) =>
+  api(`/api/services/${name}/monitoring/test`, { method: 'POST' });
 export const apiMonitorStatus = () => api('/api/monitoring/status');
 export const apiMonitorEvents = (service?: string, limit = 100) =>
   api('/api/monitoring/events', { query: { service, limit } });

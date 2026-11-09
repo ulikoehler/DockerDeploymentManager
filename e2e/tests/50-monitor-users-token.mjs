@@ -92,21 +92,45 @@ export default async function (h) {
     ctx.fail('monitor: edit/test/delete skipped (add failed)');
   }
 
-  // ============ service monitoring config ============
+  // ============ service monitoring config (structured health-check form) ============
   await h.goto(`/service/${svc}`);
   await sleep(1000);
   await h.tab('Monitoring');
+  await sleep(800);
   r = await page.evaluate(async () => {
     const sm = window.__deep('ddm-service-monitoring');
     const edit = [...sm.shadowRoot.querySelectorAll('button')].find(b => b.textContent.includes('edit config'));
-    if (edit) edit.click();
+    if (!edit) return { err: 'no edit config button' };
+    edit.click();
     await new Promise(r => setTimeout(r, 700));
+    // pick kind = container_running (no target needed)
+    const sel = sm.shadowRoot.querySelector('select');
+    if (sel) {
+      sel.value = 'container_running';
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    await new Promise(r => setTimeout(r, 300));
     const save = [...sm.shadowRoot.querySelectorAll('button')].find(b => b.textContent.trim() === 'save' && b.offsetParent);
-    if (save) save.click();
-    await new Promise(r => setTimeout(r, 1500));
-    return { ok: !!save };
+    if (!save) return { err: 'no save button' };
+    save.click();
+    await new Promise(r => setTimeout(r, 2000));
+    return { ok: true, txt: sm.shadowRoot.textContent.slice(0, 300) };
   });
-  ctx.check('monitoring: service edit config + save', r.ok === true);
+  ctx.check('monitoring: health form save', r.ok === true, (r.txt || r.err || '').slice(0, 120));
+  // verify the config actually landed
+  const mon = await h.api(`/api/services/${svc}/monitoring`);
+  const hkind = mon.data?.config?.health?.kind;
+  ctx.check('monitoring: health kind persisted', hkind === 'container_running', `kind=${hkind}`);
+  // "check now" button reports container state
+  r = await page.evaluate(async () => {
+    const sm = window.__deep('ddm-service-monitoring');
+    const b = [...sm.shadowRoot.querySelectorAll('button')].find(x => x.textContent.trim() === 'check now');
+    if (!b) return { err: 'no check now' };
+    b.click();
+    await new Promise(r => setTimeout(r, 2500));
+    return { txt: sm.shadowRoot.textContent };
+  });
+  ctx.check('monitoring: check now reports containers', /web-1|running|no containers/i.test(r.txt || ''), (r.txt || '').slice(0, 100));
 
   // ============ users ============
   await h.goto('/users');
@@ -261,6 +285,12 @@ export default async function (h) {
     return { clicked: ok, hasToken: !!m, token: m ? m[0] : null, copyBtn: !!copyBtn };
   });
   ctx.check('token: generate + display + copy', r.clicked === true && r.hasToken === true && r.copyBtn === true, '');
+  // the page must explain the token works on the REST API too, not only MCP
+  const tokPage = await page.evaluate(() => {
+    const tt = window.__deep('ddm-token');
+    return tt ? tt.shadowRoot.textContent : '';
+  });
+  ctx.check('token: page documents REST API usage', /REST API|\/api\/\*/.test(tokPage), tokPage.slice(0, 80));
 
   // scoped token: limit to e2e-svc only -> other service denied
   r = await page.evaluate(async (svcName) => {
