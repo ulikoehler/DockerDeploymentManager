@@ -95,6 +95,7 @@ export interface UserView {
   access: { type: string; pattern: string; effect: string }[];
   features: Record<string, boolean>;
   compose_policy?: string;
+  restrictions?: Record<string, boolean>;
 }
 
 export const apiLogin = (name: string, password: string) =>
@@ -167,6 +168,7 @@ export const apiPutMonitoring = (name: string, cfg: unknown) =>
 export const apiMonitoringTest = (name: string) =>
   api(`/api/services/${name}/monitoring/test`, { method: 'POST' });
 export const apiMonitorStatus = () => api('/api/monitoring/status');
+export const apiWebdavStatus = () => api<any>('/api/webdav/status');
 export const apiMonitorEvents = (service?: string, limit = 100) =>
   api('/api/monitoring/events', { query: { service, limit } });
 export const apiNotifiers = () => api('/api/monitoring/notifiers');
@@ -187,6 +189,8 @@ export const apiSetPassword = (name: string, password: string) =>
   api(`/api/users/${name}/password`, { method: 'PUT', body: { password } });
 export const apiSetAccess = (name: string, rules: unknown) =>
   api(`/api/users/${name}/access`, { method: 'PUT', body: rules });
+export const apiUserEffective = (name: string) => api(`/api/users/${name}/effective`);
+export const apiLogoutAll = () => api('/api/auth/logout-all', { method: 'POST' });
 export const apiExecContainer = (name: string, container: string, command: string) =>
   api(`/api/services/${name}/exec`, { method: 'POST', body: { container, command } });
 export const apiCommands = () => api('/api/commands');
@@ -200,3 +204,34 @@ export const apiAudit = () => api('/api/audit');
 export const apiGitopsStatus = () => api('/api/gitops/status');
 export const apiGitopsSync = () => api('/api/gitops/sync', { method: 'POST' });
 export const apiGitopsPush = () => api('/api/gitops/push', { method: 'POST' });
+export const apiGitopsConfig = () => api('/api/gitops/config');
+export const apiPutGitopsConfig = (cfg: unknown) =>
+  api('/api/gitops/config', { method: 'PUT', body: cfg });
+export const apiTokens = () => api<any[]>('/api/auth/tokens');
+export const apiRevokeToken = (jti: string) =>
+  api(`/api/auth/tokens/${jti}`, { method: 'DELETE' });
+export const apiSectionsRaw = () => api<any[]>('/api/commands/sections');
+export const apiSectionsMut = (op: unknown) =>
+  api('/api/commands/sections', { method: 'POST', body: op });
+
+/// Binary-safe file endpoints — these do NOT go through `api()` (which
+/// assumes a JSON envelope); download hits the URL directly, upload sends
+/// a raw body.
+export function fileDownloadUrl(name: string, path: string): string {
+  return `/api/services/${name}/files/download?path=${encodeURIComponent(path)}`;
+}
+export async function apiUploadFile(name: string, path: string, data: Blob | ArrayBuffer): Promise<any> {
+  const res = await fetch(`/api/services/${name}/files/upload?path=${encodeURIComponent(path)}`, {
+    method: 'PUT',
+    headers: {
+      ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+    },
+    body: data,
+  });
+  const json = await res.json().catch(() => ({ success: false, error: `HTTP ${res.status}` }));
+  if (!res.ok || json.success === false) {
+    if (res.status === 401) clearToken();
+    throw new ApiError(res.status, json.error || `HTTP ${res.status}`);
+  }
+  return json.data ?? json;
+}

@@ -1,7 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import {
-  apiIssueToken, apiMe, apiServices, ServiceSummary,
+  apiIssueToken, apiMe, apiServices, apiTokens, apiRevokeToken, ServiceSummary,
 } from '../api';
 import { sharedStyles } from '../styles';
 
@@ -36,12 +36,32 @@ export class DdmToken extends LitElement {
   @state() private selServices = new Set<string>();
   @state() private selActions = new Set<string>();
   @state() private issued: { token: string; expires_at: number } | null = null;
+  @state() private tokens: any[] = [];
   @state() private msg = '';
 
   connectedCallback() {
     super.connectedCallback();
     apiMe().then((me: any) => (this.me = me)).catch(() => {});
     apiServices().then((s) => (this.services = s)).catch(() => {});
+    this.loadTokens();
+  }
+
+  private async loadTokens() {
+    try {
+      this.tokens = await apiTokens();
+    } catch {
+      this.tokens = [];
+    }
+  }
+
+  private async revoke(jti: string) {
+    try {
+      await apiRevokeToken(jti);
+      this.msg = 'token revoked';
+      this.loadTokens();
+    } catch (e: any) {
+      this.msg = e.message;
+    }
   }
 
   /** Capabilities this user actually has — a scope can only narrow. */
@@ -73,6 +93,7 @@ export class DdmToken extends LitElement {
     if (this.scopeActions) body.actions = [...this.selActions];
     try {
       this.issued = await apiIssueToken(body);
+      this.loadTokens();
     } catch (e: any) {
       this.msg = e.message;
     }
@@ -187,6 +208,37 @@ export class DdmToken extends LitElement {
             <pre>${this.clientConfig(this.issued.token)}</pre>
           </div>`
         : ''}
+
+      <div class="card">
+        <h3>issued tokens</h3>
+        ${this.tokens.length
+          ? html`<table><thead><tr>
+              <th>user</th><th>scope</th><th>issued</th><th>expires</th><th>state</th><th></th>
+            </tr></thead>
+            <tbody>${this.tokens.map(
+              (t) => html`<tr>
+                <td>${t.user}</td>
+                <td class="muted">${
+                  [
+                    t.services ? `svc: ${t.services.join(',')}` : '',
+                    t.actions ? `act: ${t.actions.join(',')}` : '',
+                  ].filter(Boolean).join(' · ') || 'full'
+                }</td>
+                <td class="muted">${new Date(t.iat * 1000).toLocaleString()}</td>
+                <td class="muted">${new Date(t.exp * 1000).toLocaleString()}</td>
+                <td>${t.revoked
+                  ? html`<span class="badge err">revoked</span>`
+                  : t.exp * 1000 < Date.now()
+                    ? html`<span class="badge">expired</span>`
+                    : html`<span class="badge ok">active</span>`}</td>
+                <td>${!t.revoked && t.exp * 1000 > Date.now()
+                  ? html`<button class="small danger" @click=${() => this.revoke(t.jti)}>revoke</button>`
+                  : ''}</td>
+              </tr>`,
+            )}</tbody></table>`
+          : html`<p class="muted">no minted tokens — tokens you generate above appear here and can be revoked</p>`}
+        <p class="muted">your login session is not listed here; use "logout all" on the Users page to invalidate sessions</p>
+      </div>
     `;
   }
 }

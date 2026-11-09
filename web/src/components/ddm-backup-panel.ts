@@ -17,6 +17,13 @@ export class DdmBackupPanel extends LitElement {
   @state() private msg = '';
   @state() private editing = false;
   @state() private cfgText = '';
+  // structured form state
+  @state() private fEnabled = true;
+  @state() private fSchedule = true;
+  @state() private fPaths = '';
+  @state() private fExcludes = '';
+  @state() private fDumpsJson = '[]';
+  @state() private showAdvanced = false;
 
   connectedCallback() {
     super.connectedCallback();
@@ -44,8 +51,11 @@ export class DdmBackupPanel extends LitElement {
 
   private async run() {
     try {
-      await apiBackupRun(this.name);
-      this.msg = 'backup started';
+      const r: any = await apiBackupRun(this.name);
+      this.msg = r?.execution_id
+        ? `backup started — execution ${String(r.execution_id).slice(0, 8)} (see Events)`
+        : 'backup started';
+      setTimeout(() => this.refresh(), 3000);
     } catch (e: any) {
       this.msg = e.message;
     }
@@ -63,8 +73,11 @@ export class DdmBackupPanel extends LitElement {
   private async forget() {
     if (!confirm('run restic forget --prune?')) return;
     try {
-      await apiBackupForget(this.name);
-      this.msg = 'forget started';
+      const r: any = await apiBackupForget(this.name);
+      this.msg = r?.execution_id
+        ? `forget started — execution ${String(r.execution_id).slice(0, 8)} (see Events)`
+        : 'forget started';
+      setTimeout(() => this.refresh(), 3000);
     } catch (e: any) {
       this.msg = e.message;
     }
@@ -74,23 +87,38 @@ export class DdmBackupPanel extends LitElement {
     const target = prompt('restore target dir (absolute path on host):', '/tmp/restore-' + this.name);
     if (!target) return;
     try {
-      await apiBackupRestore(this.name, snapshot, target);
-      this.msg = `restore ${snapshot} → ${target} started`;
+      const r: any = await apiBackupRestore(this.name, snapshot, target);
+      this.msg = r?.execution_id
+        ? `restore ${snapshot} → ${target} started — execution ${String(r.execution_id).slice(0, 8)} (see Events)`
+        : `restore ${snapshot} → ${target} started`;
     } catch (e: any) {
       this.msg = e.message;
     }
   }
 
   private startEdit() {
-    this.cfgText = JSON.stringify(this.info?.config ?? {
-      enabled: true, paths: [], excludes: [], stdin_dumps: [], schedule_enabled: true,
-    }, null, 2);
+    const c: any = this.info?.config ?? {};
+    this.fEnabled = c.enabled !== false;
+    this.fSchedule = c.schedule_enabled !== false;
+    this.fPaths = (c.paths ?? []).join('\n');
+    this.fExcludes = (c.excludes ?? []).join('\n');
+    this.fDumpsJson = JSON.stringify(c.stdin_dumps ?? [], null, 2);
     this.editing = true;
+  }
+
+  private lines(v: string): string[] {
+    return v.split('\n').map((s) => s.trim()).filter(Boolean);
   }
 
   private async saveCfg() {
     try {
-      const cfg = JSON.parse(this.cfgText);
+      const cfg = {
+        enabled: this.fEnabled,
+        schedule_enabled: this.fSchedule,
+        paths: this.lines(this.fPaths),
+        excludes: this.lines(this.fExcludes),
+        stdin_dumps: JSON.parse(this.fDumpsJson || '[]'),
+      };
       await apiPutBackup(this.name, cfg);
       this.editing = false;
       this.msg = 'config saved';
@@ -133,12 +161,39 @@ export class DdmBackupPanel extends LitElement {
           <span class="muted">${this.msg}</span>
         </div>
         ${this.editing
-          ? html`<textarea style="width:100%;min-height:14em;font-family:ui-monospace,monospace"
-              .value=${this.cfgText} @input=${(e: any) => (this.cfgText = e.target.value)}></textarea>
+          ? html`<div class="card">
+              <h3>Backup configuration</h3>
+              <div class="row" style="flex-wrap:wrap;gap:.8em">
+                <label><input type="checkbox" .checked=${this.fEnabled}
+                  @change=${(e: any) => (this.fEnabled = e.target.checked)}> enabled</label>
+                <label><input type="checkbox" .checked=${this.fSchedule}
+                  @change=${(e: any) => (this.fSchedule = e.target.checked)}> scheduled backups</label>
+              </div>
+              <div class="row" style="margin-top:.5em">
+                <label class="muted" style="width:10em">paths <span class="muted">(one per line, relative to service dir; empty = compose file + backup.sh)</span></label>
+                <textarea style="flex:1;min-height:4em;font-family:ui-monospace,monospace"
+                  placeholder="docker-compose.yml&#10;backup.sh"
+                  .value=${this.fPaths}
+                  @input=${(e: any) => (this.fPaths = e.target.value)}></textarea>
+              </div>
+              <div class="row" style="margin-top:.4em">
+                <label class="muted" style="width:10em">excludes</label>
+                <textarea style="flex:1;min-height:3em;font-family:ui-monospace,monospace"
+                  .value=${this.fExcludes}
+                  @input=${(e: any) => (this.fExcludes = e.target.value)}></textarea>
+              </div>
+              <details style="margin-top:.5em" @toggle=${(e: any) => (this.showAdvanced = e.target.open)}>
+                <summary class="muted">advanced: stdin dumps (JSON)</summary>
+                <textarea style="width:100%;min-height:6em;font-family:ui-monospace,monospace"
+                  .value=${this.fDumpsJson}
+                  @input=${(e: any) => (this.fDumpsJson = e.target.value)}></textarea>
+                <p class="muted">[{"name","program","args"?,"when"?}] — dump command output into the snapshot</p>
+              </details>
               <div class="toolbar">
                 <button @click=${this.saveCfg}>save</button>
                 <button class="secondary" @click=${() => (this.editing = false)}>cancel</button>
-              </div>`
+              </div>
+            </div>`
           : ''}
         ${this.snapshots.length
           ? html`<table><thead><tr><th>snapshot</th><th>time</th><th></th></tr></thead>

@@ -6,6 +6,10 @@ import {
   apiMkdir,
   apiRename,
   apiDeleteFile,
+  apiUploadFile,
+  fileDownloadUrl,
+  getToken,
+  apiWebdavStatus,
 } from '../api';
 import { sharedStyles } from '../styles';
 
@@ -26,10 +30,14 @@ export class DdmFiles extends LitElement {
   @state() private dirty = false;
   @state() private msg = '';
   @state() private newName = '';
+  @state() private webdavEnabled = false;
 
   connectedCallback() {
     super.connectedCallback();
     this.browse('');
+    apiWebdavStatus()
+      .then((s: any) => (this.webdavEnabled = !!s?.enabled))
+      .catch(() => {});
   }
 
   private async browse(path: string) {
@@ -113,6 +121,48 @@ export class DdmFiles extends LitElement {
     }
   }
 
+  private async download() {
+    // the endpoint needs the bearer header — fetch→blob→object-url
+    try {
+      const res = await fetch(fileDownloadUrl(this.name, this.path), {
+        headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {},
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = this.path.split('/').pop() || 'download';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e: any) {
+      this.msg = `download failed: ${e.message}`;
+    }
+  }
+
+  private async upload(file: File) {
+    // dir view → upload into it; file view → replace the open file
+    const target = this.node?.kind?.toLowerCase() === 'file'
+      ? this.path
+      : this.path ? `${this.path}/${file.name}` : file.name;
+    try {
+      await apiUploadFile(this.name, target, await file.arrayBuffer());
+      this.msg = `uploaded ${target}`;
+      this.browse(this.path);
+    } catch (e: any) {
+      this.msg = `upload failed: ${e.message}`;
+    }
+  }
+
+  private pickUpload() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.onchange = () => {
+      const f = input.files?.[0];
+      if (f) void this.upload(f);
+    };
+    input.click();
+  }
+
   render() {
     const n = this.node;
     // API node kinds are serde variants ("Dir"/"File"/"Binary") while
@@ -121,6 +171,9 @@ export class DdmFiles extends LitElement {
     return html`
       <div class="card">
         <div class="row"><h3>Files</h3>${this.crumbs()}</div>
+        ${this.webdavEnabled
+          ? html`<p class="muted" style="margin:.2em 0 .6em">this service is also reachable via WebDAV at <code>/dav/${this.name}/</code> — mount it in Finder/Files or use any WebDAV client (requires the <code>mount_files</code> feature)</p>`
+          : ''}
         ${kind === 'dir'
           ? html`
               <table><tbody>
@@ -146,6 +199,7 @@ export class DdmFiles extends LitElement {
                   @input=${(e: any) => (this.newName = e.target.value)} />
                 <button class="small secondary" @click=${this.mkdir}>mkdir</button>
                 <button class="small secondary" @click=${this.newFile}>new file</button>
+                <button class="small secondary" @click=${this.pickUpload}>upload…</button>
               </div>`
           : kind === 'file'
             ? html`
@@ -153,10 +207,16 @@ export class DdmFiles extends LitElement {
                   @input=${(e: any) => { this.content = e.target.value; this.dirty = true; }}></textarea>
                 <div class="row" style="margin-top:.4em">
                   <button ?disabled=${!this.dirty} @click=${this.saveFile}>save</button>
+                  <button class="small secondary" @click=${this.download}>download</button>
+                  <button class="small secondary" @click=${this.pickUpload}>replace…</button>
                   ${n.truncated ? html`<span class="muted">(file truncated at 512 KiB)</span>` : ''}
                   <span class="muted">${n.size} bytes</span>
                 </div>`
-            : html`<p class="muted">${kind === 'binary' ? `binary file (${n.size} bytes)` : ''}</p>`}
+            : html`<div class="row">
+                <p class="muted" style="margin:0">${kind === 'binary' ? `binary file (${n.size} bytes)` : ''}</p>
+                <button class="small secondary" @click=${this.download}>download</button>
+                <button class="small secondary" @click=${this.pickUpload}>replace…</button>
+              </div>`}
         ${this.msg ? html`<p class="muted">${this.msg}</p>` : ''}
       </div>`;
   }

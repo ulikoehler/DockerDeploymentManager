@@ -12,6 +12,7 @@ import './ddm-monitor-panel';
 import './ddm-gitops-panel';
 import './ddm-events-view';
 import './ddm-token';
+import './ddm-audit';
 
 type View = { name: string; service?: string };
 
@@ -130,10 +131,14 @@ export class DdmApp extends LitElement {
           ${this.navLink('monitor', 'Monitoring')}
           ${this.navLink('events', 'Events')}
           ${this.isAdmin ? this.navLink('users', 'Users') : ''}
+          ${this.isAdmin ? this.navLink('audit', 'Audit') : ''}
           ${this.isAdmin ? this.navLink('gitops', 'GitOps') : ''}
           ${this.navLink('token', 'Tokens')}
         </nav>
         <span class="spacer"></span>
+        <a class="user-chip" style="text-decoration:none"
+          href="https://github.com/ulikoehler/DockerDeploymentManager"
+          target="_blank" rel="noopener" title="documentation">docs</a>
         <span class="user-chip"><span class="dot"></span>${this.userName}</span>
         <button class="secondary small" @click=${this.logout}>logout</button>
       </header>
@@ -161,6 +166,8 @@ export class DdmApp extends LitElement {
           : html`<p class="error">forbidden</p>`;
       case 'events':
         return html`<ddm-events-view></ddm-events-view>`;
+      case 'audit':
+        return this.isAdmin ? html`<ddm-audit></ddm-audit>` : html`<p class="error">forbidden</p>`;
       case 'token':
         return html`<ddm-token></ddm-token>`;
       default:

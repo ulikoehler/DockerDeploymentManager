@@ -31,6 +31,10 @@ pub struct Claims {
     /// so old tokens die. Missing (=0) matches users never rotated.
     #[serde(default)]
     pub sv: u64,
+    /// Unique id for minted (agent) tokens — enables per-token revocation
+    /// via the token registry. Session tokens have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
 }
 
 /// Restrictions embedded in a token. When present, the authenticated user is
@@ -147,6 +151,7 @@ impl JwtKeys {
             gen: *self.generation.read().unwrap(),
             scope,
             sv: user.token_version,
+            jti: None,
         };
         encode(
             &Header::default(),
@@ -157,6 +162,9 @@ impl JwtKeys {
 
     /// Issue a token from raw claims fields — used by the agent when
     /// minting scoped children (the caller's narrowed roles are preserved).
+    /// `jti` registers the token for revocation; pass `None` for
+    /// unregistered tokens.
+    #[allow(clippy::too_many_arguments)]
     pub fn issue_claims(
         &self,
         sub: &str,
@@ -164,6 +172,7 @@ impl JwtKeys {
         ttl_seconds: i64,
         scope: Option<TokenScope>,
         sv: u64,
+        jti: Option<String>,
     ) -> Result<String, jsonwebtoken::errors::Error> {
         let now = chrono::Utc::now().timestamp();
         let claims = Claims {
@@ -174,6 +183,7 @@ impl JwtKeys {
             gen: *self.generation.read().unwrap(),
             scope,
             sv,
+            jti,
         };
         encode(
             &Header::default(),

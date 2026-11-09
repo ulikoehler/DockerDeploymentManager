@@ -851,7 +851,8 @@ pub enum GitOpsTargetKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitOpsTarget {
     pub into: GitOpsTargetKind,
-    /// Subdirectory inside the repo mapped to the target ("" = repo root).
+    /// Subdirectory inside the repo mapped to the target. Must be a
+    /// non-empty relative path (validated — no root mapping, no escapes).
     #[serde(default)]
     pub path: String,
 }

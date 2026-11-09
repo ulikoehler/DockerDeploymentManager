@@ -206,6 +206,16 @@ pub enum SyncVerb {
     NotifierMut {
         op: NotifierMut,
     },
+    /// Admin: mutate config sections (commands) in config.yaml.
+    SectionsMut {
+        op: SectionMutOp,
+    },
+    /// Admin: replace the gitops config. Secret fields (token,
+    /// webhook_secret) left empty or "***" keep their stored values —
+    /// the server only ever sees the redacted config.
+    GitOpsPut {
+        cfg: serde_json::Value,
+    },
     BackupCheck {
         service: String,
     },
@@ -339,6 +349,18 @@ pub enum CryptoOp {
         token: String,
         op: UserMut,
     },
+    /// List minted (revocable) tokens: admins see all, others only their
+    /// own (`sub` match). Session tokens are not registered and never
+    /// appear here.
+    TokensList {
+        token: String,
+    },
+    /// Revoke a minted token by jti. Admins may revoke any; a user may
+    /// revoke their own tokens but only from an unscoped session token.
+    RevokeToken {
+        token: String,
+        jti: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -469,5 +491,59 @@ pub enum NotifierMut {
     },
     Delete {
         id: String,
+    },
+}
+
+/// One registered minted token — persisted in `<config_dir>/tokens.json`.
+/// Never contains the token itself or any secret.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenRecord {
+    pub jti: String,
+    /// User the token was minted for (`sub` claim).
+    pub user: String,
+    #[serde(with = "chrono::serde::ts_seconds")]
+    pub iat: chrono::DateTime<chrono::Utc>,
+    #[serde(with = "chrono::serde::ts_seconds")]
+    pub exp: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<String>>,
+    #[serde(default)]
+    pub revoked: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "chrono::serde::ts_seconds_option"
+    )]
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Section (command group) mutations applied to `config.sections`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum SectionMutOp {
+    Add {
+        section: crate::config::Section,
+    },
+    Update {
+        index: usize,
+        section: crate::config::Section,
+    },
+    Delete {
+        index: usize,
+    },
+    AddItem {
+        section: usize,
+        item: crate::config::CommandItem,
+    },
+    UpdateItem {
+        section: usize,
+        index: usize,
+        item: crate::config::CommandItem,
+    },
+    DeleteItem {
+        section: usize,
+        index: usize,
     },
 }

@@ -2,9 +2,21 @@ import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import {
   apiUsers, apiCreateUser, apiDeleteUser, apiSetPassword, apiSetAccess,
-  apiUpdateUser, UserView,
+  apiUpdateUser, apiUserEffective, apiLogoutAll, UserView,
 } from '../api';
 import { sharedStyles } from '../styles';
+
+const FEATURE_LABELS: Record<string, string> = {
+  create_services: 'create services',
+  edit_compose: 'edit compose files',
+  edit_units: 'edit systemd units',
+  run_commands: 'run commands',
+  manage_backup: 'manage backups',
+  manage_monitoring: 'manage monitoring',
+  edit_files: 'edit files & git',
+  exec_containers: 'exec in containers',
+  mount_files: 'mount files (WebDAV)',
+};
 
 @customElement('ddm-users')
 export class DdmUsers extends LitElement {
@@ -15,6 +27,7 @@ export class DdmUsers extends LitElement {
 
   @state() private users: UserView[] = [];
   @state() private selected = '';
+  @state() private effective: any = null;
   @state() private msg = '';
 
   connectedCallback() {
@@ -24,10 +37,27 @@ export class DdmUsers extends LitElement {
 
   private async refresh() {
     this.users = await apiUsers().catch(() => []);
+    this.loadEffective();
+  }
+
+  private async loadEffective() {
+    this.effective = null;
+    if (!this.selected) return;
+    this.effective = await apiUserEffective(this.selected).catch(() => null);
   }
 
   private sel() {
     return this.users.find((u) => u.name === this.selected);
+  }
+
+  private async logoutAll() {
+    if (!confirm('invalidate ALL sessions and minted tokens? everyone must log in again')) return;
+    try {
+      await apiLogoutAll();
+      this.msg = 'all sessions invalidated';
+    } catch (e: any) {
+      this.msg = e.message;
+    }
   }
 
   private async addUser(e: Event) {
@@ -110,19 +140,39 @@ export class DdmUsers extends LitElement {
     return u.access.map((r) => `${r.effect} ${r.type}:${r.pattern}`).join('\n');
   }
 
+  private select(name: string) {
+    this.selected = name;
+    this.loadEffective();
+  }
+
   render() {
     const u = this.sel();
+    const effSvcs = this.effective?.services ? Object.entries(this.effective.services) : [];
     return html`
       <h2>Users</h2>
       ${this.msg ? html`<p class="muted">${this.msg}</p>` : ''}
+      <details class="card" style="margin-bottom:1em">
+        <summary><b>How permissions work</b> <span class="muted">— click to expand</span></summary>
+        <ul class="muted" style="margin:.5em 0">
+          <li><b>roles</b> (viewer/operator/admin) — admin bypasses everything; operator adds service actions</li>
+          <li><b>features</b> — per-capability switches (compose, files, backups, exec…); admin ignores them</li>
+          <li><b>access rules</b> — per-service allow/deny (exact/glob/regex, first match wins); unmatched services fall back to the server's <code>default_access</code></li>
+          <li><b>compose policy</b> — which compose features this user may use (strict/relaxed/unrestricted); "default" inherits the server policy</li>
+          <li><b>restrictions</b> — hard denies (privileged, host namespaces, docker socket, devices…) applied on top of everything except admin</li>
+          <li>scoped <a href="#/token">tokens</a> can only ever narrow these — never widen</li>
+        </ul>
+      </details>
       <div class="row" style="align-items:flex-start">
         <div class="card" style="min-width:320px">
+          <div class="toolbar" style="justify-content:flex-end">
+            <button class="small danger" @click=${this.logoutAll}>logout all sessions</button>
+          </div>
           <table>
             <thead><tr><th>name</th><th>roles</th><th></th></tr></thead>
             <tbody>
               ${this.users.map(
                 (x) => html`<tr>
-                  <td><a href="#" @click=${(e: Event) => { e.preventDefault(); this.selected = x.name; }}
+                  <td><a href="#" @click=${(e: Event) => { e.preventDefault(); this.select(x.name); }}
                     style="color:var(--link)">${x.name}</a></td>
                   <td class="muted">${x.roles.join(', ')}</td>
                   <td>
@@ -167,13 +217,31 @@ export class DdmUsers extends LitElement {
                   this.savePolicy(u, (this.shadowRoot!.getElementById('policy-sel') as HTMLSelectElement).value)
                 }>save</button>
               </div>
-              <h4>Features</h4>
-              ${['create_services', 'edit_compose', 'edit_units', 'run_commands', 'manage_backup', 'manage_monitoring', 'exec_containers', 'mount_files'].map(
-                (k) => html`<label style="margin-right:1em">
-                  <input type="checkbox" .checked=${!!u.features[k]}
-                    @change=${() => this.toggleFeature(u, k)}> ${k}
-                </label>`,
-              )}
+              <h4>Features <span class="muted">(ignored for admin)</span></h4>
+              <div class="checks" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:.2em">
+                ${Object.keys(FEATURE_LABELS).map(
+                  (k) => html`<label style="margin-right:1em">
+                    <input type="checkbox" .checked=${!!u.features[k]}
+                      @change=${() => this.toggleFeature(u, k)}> ${FEATURE_LABELS[k]}
+                  </label>`,
+                )}
+              </div>
+              ${u.restrictions && Object.values(u.restrictions).some(Boolean)
+                ? html`<p class="muted">restrictions: ${Object.entries(u.restrictions)
+                    .filter(([, v]) => v)
+                    .map(([k]) => k.replace('deny_', ''))
+                    .join(', ')} <span class="badge warn">hard denies</span></p>`
+                : ''}
+              ${this.effective
+                ? html`<h4>Effective access <span class="muted">(as enforced — default_access: ${this.effective.default_access}, compose policy: ${this.effective.compose_policy})</span></h4>
+                    <div class="checks">
+                      ${effSvcs.map(
+                        ([name, ok]) => html`<span class="badge ${ok ? 'ok' : 'err'}"
+                          title="${name}: ${ok ? 'allowed' : 'denied'}">${name}</span>`,
+                      )}
+                      ${!effSvcs.length ? html`<span class="muted">no services</span>` : ''}
+                    </div>`
+                : html`<p class="muted">loading effective access…</p>`}
               <h4>Access rules <span class="muted">(first match wins; deny first)</span></h4>
               <textarea style="width:100%;min-height:8em" id="access-ta"
                 placeholder="deny exact:core&#10;allow glob:web-*&#10;allow regex:^stg-[0-9]+$">${this.accessText(u)}</textarea>

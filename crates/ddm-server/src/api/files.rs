@@ -1,11 +1,14 @@
 use crate::auth::{bad_request, forbidden, ok, AuthUser};
 use crate::{files, gitops, AppState};
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
-    response::Response,
+    http::header,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
+use tokio::io::AsyncReadExt;
 
 use super::services::require_service_access;
 
@@ -108,6 +111,89 @@ pub async fn write_file(
         .audit
         .record(&user.user.name, "file_write", &name, &req.path);
     Ok(ok(true))
+}
+
+/// Download a file (binary-safe) — streams through the agent like WebDAV.
+/// Read access to the service is sufficient; the agent re-checks anyway.
+pub async fn download_file(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<PathQuery>,
+) -> Result<Response, Response> {
+    require_service_access(&state, &user, &name).await?;
+    let (meta, sent, mut stream) = state
+        .agent
+        .file_get(&name, &q.path, 0, 0, &user.token)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    if meta.kind != "file" {
+        return Err(bad_request("not a file"));
+    }
+    let _ = sent;
+    // Buffer up to the cap — service files are small; this keeps the
+    // handler simple and the response a plain body.
+    let mut buf = Vec::with_capacity(meta.size.min(8 * 1024 * 1024) as usize);
+    stream
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|e| bad_request(format!("read failed: {e}")))?;
+    let filename = q.path.rsplit('/').next().unwrap_or("download").to_string();
+    let mime = mime_guess::from_path(&filename)
+        .first_or_octet_stream()
+        .to_string();
+    let mut res = Body::from(buf).into_response();
+    let h = res.headers_mut();
+    h.insert(header::CONTENT_TYPE, mime.parse().unwrap());
+    h.insert(
+        header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{filename}\"")
+            .parse()
+            .unwrap(),
+    );
+    Ok(res)
+}
+
+/// Largest REST upload accepted (bytes). WebDAV has its own knob; this
+/// endpoint buffers the body so it stays modest.
+const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+/// Upload/replace a file (binary-safe) — raw request body, streamed to
+/// the agent which authorizes before accepting payload.
+pub async fn upload_file(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<PathQuery>,
+    body: Body,
+) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
+    require_edit_files(&user)?;
+    let svc = require_service_access(&state, &user, &name).await?;
+    let cfg = state.config.get().await;
+    if is_compose_path(&svc, &q.path, &cfg.paths.compose_file) {
+        require_compose_write(&user)?;
+    }
+    drop(cfg);
+    let bytes = axum::body::to_bytes(body, MAX_UPLOAD_BYTES)
+        .await
+        .map_err(|_| bad_request("upload too large or unreadable"))?;
+    let len = bytes.len() as u64;
+    let mut sink = state
+        .agent
+        .file_put(&name, &q.path, len, &user.token)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    sink.write(&bytes)
+        .await
+        .map_err(|e| bad_request(format!("upload failed: {e}")))?;
+    let meta = sink
+        .finish()
+        .await
+        .map_err(|e| bad_request(format!("upload failed: {e}")))?;
+    state
+        .audit
+        .record(&user.user.name, "file_upload", &name, &q.path);
+    Ok(ok(serde_json::json!({ "path": q.path, "size": meta.size })))
 }
 
 #[derive(Deserialize)]

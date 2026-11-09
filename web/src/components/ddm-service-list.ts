@@ -9,6 +9,8 @@ export class DdmServiceList extends LitElement {
 
   @state() private services: ServiceSummary[] = [];
   @state() private error = '';
+  @state() private query = '';
+  @state() private filter = 'all';
   private timer?: number;
 
   connectedCallback() {
@@ -39,6 +41,22 @@ export class DdmServiceList extends LitElement {
     }
   }
 
+  private filtered(): ServiceSummary[] {
+    const q = this.query.trim().toLowerCase();
+    return this.services.filter((s) => {
+      if (this.filter === 'running' && s.running === 0) return false;
+      if (this.filter === 'down' && s.running >= s.total && s.total > 0) return false;
+      if (this.filter === 'alerting' && s.monitor_state !== 'alerting') return false;
+      if (this.filter === 'unmonitored' && s.monitor_state) return false;
+      if (!q) return true;
+      return (
+        s.name.toLowerCase().includes(q) ||
+        (s.description ?? '').toLowerCase().includes(q) ||
+        s.containers.some((c) => c.service.toLowerCase().includes(q))
+      );
+    });
+  }
+
   private unitBadge(s: ServiceSummary) {
     if (!s.unit.exists) return html`<span class="badge warn">no unit</span>`;
     if (s.unit.active === 'active')
@@ -51,23 +69,52 @@ export class DdmServiceList extends LitElement {
       return html`<span class="badge err">alerting</span>`;
     if (s.monitor_state === 'ok')
       return html`<span class="badge ok">monitored</span>`;
-    return '';
+    return html`<span class="badge muted">unmonitored</span>`;
   }
 
   render() {
+    const rows = this.filtered();
     return html`
       <div class="row">
         <h2>Services</h2>
         <span class="spacer" style="flex:1"></span>
         <a href="#/create"><button>+ new service</button></a>
       </div>
+      <div class="row" style="margin-bottom:.5em">
+        <input placeholder="filter by name, description or container…"
+          style="flex:1;max-width:22em"
+          .value=${this.query}
+          @input=${(e: any) => (this.query = e.target.value)}>
+        <select .value=${this.filter}
+          @change=${(e: any) => (this.filter = e.target.value)}>
+          <option value="all">all</option>
+          <option value="running">with running containers</option>
+          <option value="down">with stopped containers</option>
+          <option value="alerting">alerting</option>
+          <option value="unmonitored">unmonitored</option>
+        </select>
+        <span class="muted">${rows.length}/${this.services.length}</span>
+      </div>
       ${this.error ? html`<p class="error">${this.error}</p>` : ''}
+      ${!this.services.length && !this.query
+        ? html`<div class="card">
+            <h3>Welcome to DDM</h3>
+            <p>No services yet. Get started:</p>
+            <ol>
+              <li>Create your first service — <a href="#/create">+ new service</a> — paste a
+                <code>docker-compose.yml</code> or pick a template.</li>
+              <li>Manage users &amp; permissions under <a href="#/users">Users</a> (admin)
+                and API tokens under <a href="#/token">Tokens</a>.</li>
+              <li>Docs: <a href="https://github.com/ulikoehler/DockerDeploymentManager" target="_blank" rel="noopener">github.com/ulikoehler/DockerDeploymentManager</a></li>
+            </ol>
+          </div>`
+        : ''}
       <table>
         <thead>
           <tr><th>name</th><th>containers</th><th>unit</th><th>monitor</th><th>actions</th></tr>
         </thead>
         <tbody>
-          ${this.services.map(
+          ${rows.map(
             (s) => html`
               <tr>
                 <td>
@@ -95,6 +142,9 @@ export class DdmServiceList extends LitElement {
               </tr>
             `,
           )}
+          ${!rows.length
+            ? html`<tr><td colspan="5" class="muted">no services match</td></tr>`
+            : ''}
         </tbody>
       </table>
     `;

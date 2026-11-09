@@ -211,7 +211,7 @@ export default async function (h) {
       const uu = window.__deep('ddm-users');
       const cb = [...uu.shadowRoot.querySelectorAll('input[type=checkbox]')].find(c => {
         const l = c.closest('label');
-        return l && /run_commands/.test(l.textContent);
+        return l && /run commands/i.test(l.textContent);
       });
       if (!cb) return { err: 'no feature cb' };
       cb.click();

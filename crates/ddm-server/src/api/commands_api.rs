@@ -110,6 +110,43 @@ pub fn authorized_item(
     Ok(item)
 }
 
+/// Admin: the raw `config.sections` (including `command_sequence`, which
+/// the run-view deliberately strips). Powers the UI editor.
+pub async fn sections_raw(
+    user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
+    if !user.user.is_admin() {
+        return Err(forbidden());
+    }
+    let cfg = state.config.get().await;
+    Ok(ok(serde_json::to_value(&cfg.sections).unwrap_or_default()))
+}
+
+/// Admin: mutate command sections — the agent owns config.yaml, applies
+/// the op atomically and hot-reloads.
+pub async fn sections_mut(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Json(op): Json<crate::agent::proto::SectionMutOp>,
+) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
+    if !user.user.is_admin() {
+        return Err(forbidden());
+    }
+    state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::SectionsMut { op },
+            &user.token,
+        )
+        .await
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    state
+        .audit
+        .record(&user.user.name, "sections_mut", "config", "");
+    Ok(ok(true))
+}
+
 #[derive(Deserialize)]
 pub struct RunRequest {
     #[serde(default)]

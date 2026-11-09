@@ -123,6 +123,44 @@ pub struct AgentCore {
     webhook_seen: Mutex<HashMap<String, std::time::Instant>>,
     /// Last accepted webhook sync, for rate limiting.
     last_webhook_sync: Mutex<Option<std::time::Instant>>,
+    /// Registry of minted tokens (`<config_dir>/tokens.json`) — revocation
+    /// is checked on every token verification.
+    tokens: Mutex<TokenBook>,
+}
+
+/// Persisted registry of minted tokens. Records carry no secrets — only
+/// the jti, owner, scope summary and timestamps.
+#[derive(Default)]
+struct TokenBook {
+    path: PathBuf,
+    records: Vec<TokenRecord>,
+}
+
+impl TokenBook {
+    fn load(path: PathBuf) -> Self {
+        let records = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Vec<TokenRecord>>(&t).ok())
+            .unwrap_or_default();
+        Self { path, records }
+    }
+
+    fn is_revoked(&self, jti: &str) -> bool {
+        self.records.iter().any(|r| r.jti == jti && r.revoked)
+    }
+
+    fn save(&self) -> Result<()> {
+        if self.path.as_os_str().is_empty() {
+            return Ok(());
+        }
+        if let Some(p) = self.path.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(&self.records)?)?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
 }
 
 impl AgentCore {
@@ -146,6 +184,7 @@ impl AgentCore {
             .append(true)
             .open(audit_path)
             .with_context(|| format!("opening justification log {}", audit_path.display()))?;
+        let tokens_path = config_dir.join("tokens.json");
         Ok(Self {
             cfg,
             config_dir,
@@ -161,6 +200,7 @@ impl AgentCore {
             monitor: Mutex::new(None),
             webhook_seen: Mutex::new(HashMap::new()),
             last_webhook_sync: Mutex::new(None),
+            tokens: Mutex::new(TokenBook::load(tokens_path)),
         })
     }
 
@@ -295,7 +335,19 @@ impl AgentCore {
         if claims.sv != user.token_version {
             bail!("token revoked (password changed)");
         }
+        self.check_not_revoked(&claims)?;
         Ok((claims, user))
+    }
+
+    /// Minted tokens carry a `jti` registered in the token book; a revoked
+    /// jti kills the token immediately, everywhere `token_user` runs.
+    fn check_not_revoked(&self, claims: &Claims) -> Result<()> {
+        if let Some(jti) = &claims.jti {
+            if self.tokens.lock().unwrap().is_revoked(jti) {
+                bail!("token revoked");
+            }
+        }
+        Ok(())
     }
 
     /// Admin check against the *fresh* user record, not the signed claims —
@@ -684,6 +736,7 @@ impl AgentCore {
                 if claims.sv != user.token_version {
                     bail!("token revoked (password changed)");
                 }
+                self.check_not_revoked(&claims)?;
                 let mut user = user;
                 user.password_hash.clear();
                 Ok(serde_json::json!({"claims": claims, "user": user}))
@@ -790,6 +843,47 @@ impl AgentCore {
                 Ok(serde_json::to_value(file.users)?)
             }
             CryptoOp::UserMutate { token, op } => self.do_user_mutate(&token, op).await,
+            CryptoOp::TokensList { token } => {
+                let (claims, user) = self.token_user(&token)?;
+                self.justify(&claims, "tokens_list", "");
+                let book = self.tokens.lock().unwrap();
+                let now = chrono::Utc::now();
+                let mut recs: Vec<TokenRecord> = book
+                    .records
+                    .iter()
+                    .filter(|r| {
+                        // keep unexpired records plus recently revoked ones
+                        // so the UI can show what was killed
+                        r.exp > now || r.revoked
+                    })
+                    .filter(|r| user.is_admin() || r.user == claims.sub)
+                    .cloned()
+                    .collect();
+                recs.sort_by_key(|r| r.iat);
+                Ok(serde_json::to_value(recs)?)
+            }
+            CryptoOp::RevokeToken { token, jti } => {
+                let (claims, user) = self.token_user(&token)?;
+                let mut book = self.tokens.lock().unwrap();
+                let rec = book
+                    .records
+                    .iter()
+                    .find(|r| r.jti == jti)
+                    .ok_or_else(|| anyhow!("token not found"))?;
+                // Admins revoke anything; a user may revoke their own
+                // tokens but only from an unscoped session — a scoped
+                // (already-narrowed) token must not kill sibling tokens.
+                let allowed = user.is_admin() || (claims.scope.is_none() && rec.user == claims.sub);
+                if !allowed {
+                    bail!("cannot revoke this token");
+                }
+                let slot = book.records.iter_mut().find(|r| r.jti == jti).unwrap();
+                slot.revoked = true;
+                slot.revoked_at = Some(chrono::Utc::now());
+                book.save()?;
+                self.justify(&claims, "token_revoke", &jti);
+                Ok(serde_json::json!(true))
+            }
         }
     }
 
@@ -893,12 +987,41 @@ impl AgentCore {
         if scope.as_ref().and_then(|s| s.services.as_ref()).is_some() {
             roles.retain(|r| r != "admin");
         }
-        let token =
-            self.jwt
-                .issue_claims(&parent_claims.sub, roles, ttl, scope, fresh.token_version)?;
+        // A revoked parent must not mint children.
+        self.check_not_revoked(&parent_claims)?;
+        let jti = uuid::Uuid::new_v4().to_string();
+        let token = self.jwt.issue_claims(
+            &parent_claims.sub,
+            roles,
+            ttl,
+            scope.clone(),
+            fresh.token_version,
+            Some(jti.clone()),
+        )?;
         let claims = self.jwt.verify(&token).unwrap();
+        // Register the minted token so it can be listed and revoked.
+        {
+            let mut book = self.tokens.lock().unwrap();
+            book.records
+                .retain(|r| r.exp > chrono::Utc::now() || !r.revoked);
+            book.records.push(TokenRecord {
+                jti: jti.clone(),
+                user: parent_claims.sub.clone(),
+                iat: chrono::DateTime::from_timestamp(claims.iat, 0)
+                    .unwrap_or_else(chrono::Utc::now),
+                exp: chrono::DateTime::from_timestamp(claims.exp, 0)
+                    .unwrap_or_else(chrono::Utc::now),
+                services: scope.as_ref().and_then(|s| s.services.clone()),
+                actions: scope.as_ref().and_then(|s| s.actions.clone()),
+                revoked: false,
+                revoked_at: None,
+            });
+            if let Err(e) = book.save() {
+                tracing::error!("token registry write failed: {e}");
+            }
+        }
         self.justify(&claims, "mint", &parent_claims.sub);
-        Ok(serde_json::json!({ "token": token, "expires_at": claims.exp }))
+        Ok(serde_json::json!({ "token": token, "expires_at": claims.exp, "jti": jti }))
     }
 
     async fn do_set_password(
@@ -1261,6 +1384,82 @@ impl AgentCore {
                                 }
                             }
                         }
+                        Ok(())
+                    })
+                    .await?;
+                Ok(serde_json::json!(true))
+            }
+            SyncVerb::SectionsMut { op } => {
+                let (_claims, _caller) = self.unscoped_admin(token)?;
+                self.justify(&_claims, "sections_mut", "");
+                self.cfg
+                    .mutate(move |c| {
+                        match op {
+                            SectionMutOp::Add { section } => {
+                                c.sections.push(section);
+                            }
+                            SectionMutOp::Update { index, section } => {
+                                let slot = c
+                                    .sections
+                                    .get_mut(index)
+                                    .ok_or_else(|| anyhow!("section index out of range"))?;
+                                *slot = section;
+                            }
+                            SectionMutOp::Delete { index } => {
+                                if index >= c.sections.len() {
+                                    bail!("section index out of range");
+                                }
+                                c.sections.remove(index);
+                            }
+                            SectionMutOp::AddItem { section, item } => {
+                                c.sections
+                                    .get_mut(section)
+                                    .ok_or_else(|| anyhow!("section index out of range"))?
+                                    .items
+                                    .push(item);
+                            }
+                            SectionMutOp::UpdateItem {
+                                section,
+                                index,
+                                item,
+                            } => {
+                                let slot = c
+                                    .sections
+                                    .get_mut(section)
+                                    .and_then(|s| s.items.get_mut(index))
+                                    .ok_or_else(|| anyhow!("item index out of range"))?;
+                                *slot = item;
+                            }
+                            SectionMutOp::DeleteItem { section, index } => {
+                                let items = &mut c
+                                    .sections
+                                    .get_mut(section)
+                                    .ok_or_else(|| anyhow!("section index out of range"))?
+                                    .items;
+                                if index >= items.len() {
+                                    bail!("item index out of range");
+                                }
+                                items.remove(index);
+                            }
+                        }
+                        Ok(())
+                    })
+                    .await?;
+                Ok(serde_json::json!(true))
+            }
+            SyncVerb::GitOpsPut { cfg: patch } => {
+                let (_claims, _caller) = self.unscoped_admin(token)?;
+                self.justify(&_claims, "gitops_put", "");
+                self.cfg
+                    .mutate(move |c| {
+                        // Merge secret fields against the stored config —
+                        // the server only sees redacted values ("***" or
+                        // empty), which mean "keep the existing secret".
+                        let old_v = serde_json::to_value(&c.gitops).unwrap_or_default();
+                        let mut merged = patch.clone();
+                        merge_gitops_secrets(&mut merged, Some(&old_v));
+                        c.gitops = serde_json::from_value(merged)
+                            .map_err(|e| anyhow!("invalid gitops config: {e}"))?;
                         Ok(())
                     })
                     .await?;
@@ -2456,6 +2655,33 @@ const NOTIFIER_SECRET_KEYS: &[&str] = &[
     "username_env",
     "headers",
 ];
+
+/// GitOps secret fields — same "***"/empty-means-keep semantics as
+/// notifier secrets.
+const GITOPS_SECRET_KEYS: &[&str] = &["token", "webhook_secret"];
+
+fn merge_gitops_secrets(new: &mut serde_json::Value, old: Option<&serde_json::Value>) {
+    let Some(old) = old else { return };
+    for key in GITOPS_SECRET_KEYS {
+        let keep = match new.get(*key) {
+            None | Some(serde_json::Value::Null) => true,
+            Some(serde_json::Value::String(s)) => s.is_empty() || s == "***",
+            _ => false,
+        };
+        if keep {
+            match old.get(*key) {
+                Some(v) if !v.is_null() => {
+                    new.as_object_mut()
+                        .unwrap()
+                        .insert(key.to_string(), v.clone());
+                }
+                _ => {
+                    new.as_object_mut().unwrap().remove(*key);
+                }
+            }
+        }
+    }
+}
 
 fn merge_notifier_secrets(new: &mut serde_json::Value, old: Option<&serde_json::Value>) {
     let Some(old) = old else { return };

@@ -104,6 +104,21 @@ pub async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
+/// WebDAV surface status — lets the UI tell users the /dav mount exists
+/// and whether it is enabled. No secrets involved.
+pub async fn webdav_status(
+    _user: AuthUser,
+    State(state): State<AppState>,
+) -> Json<crate::auth::SuccessResponse<serde_json::Value>> {
+    let cfg = state.config.get().await;
+    let w = &cfg.webdav;
+    ok(serde_json::json!({
+        "enabled": w.enabled,
+        "max_upload_mb": w.max_upload_bytes / (1024 * 1024),
+        "lock_timeout_secs": w.lock_timeout_secs,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // policy introspection
 // ---------------------------------------------------------------------------
@@ -449,6 +464,56 @@ pub async fn gitops_status(
         .await
         .unwrap_or_else(|_| serde_json::json!({"error":"agent unavailable"}));
     Ok(ok(v))
+}
+
+/// Admin: current gitops config (secrets redacted to "***" by the agent's
+/// config view — the UI must not echo them back as real values).
+pub async fn gitops_config_get(
+    user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
+    if !user.user.is_admin() {
+        return Err(forbidden());
+    }
+    let cfg = state.config.get().await;
+    let mut v = serde_json::to_value(&cfg.gitops).unwrap_or_default();
+    // Secrets are write-only through this API: report "***" when set so
+    // the UI can show "configured" without ever receiving the value.
+    // (In split-agent mode the config is already redacted; in single
+    // process it is not — redact here unconditionally.)
+    if let Some(obj) = v.as_object_mut() {
+        for key in ["token", "webhook_secret"] {
+            if obj.get(key).map(|s| !s.is_null()).unwrap_or(false) {
+                obj.insert(key.into(), serde_json::Value::String("***".into()));
+            }
+        }
+    }
+    Ok(ok(v))
+}
+
+/// Admin: replace the gitops config. Secret fields (token,
+/// webhook_secret) that are empty or "***" keep their stored values —
+/// the merge happens agent-side where the real secrets live.
+pub async fn gitops_config_put(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Json(patch): Json<serde_json::Value>,
+) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
+    if !user.user.is_admin() {
+        return Err(forbidden());
+    }
+    state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::GitOpsPut { cfg: patch },
+            &user.token,
+        )
+        .await
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    state
+        .audit
+        .record(&user.user.name, "gitops_config", "gitops", "");
+    Ok(ok(true))
 }
 
 pub async fn gitops_sync(

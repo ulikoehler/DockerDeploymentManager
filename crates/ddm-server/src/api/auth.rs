@@ -130,6 +130,39 @@ pub async fn issue_token(
     Ok(ok(TokenResponse { token, expires_at }))
 }
 
+/// List minted tokens: admins see all, other users only their own.
+/// Session tokens are not registered and never appear here.
+pub async fn tokens_list(
+    user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
+    let v = state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::TokensList {
+            token: user.token.clone(),
+        })
+        .await
+        .map_err(|e| crate::auth::internal(format!("{e:#}")))?;
+    Ok(ok(v))
+}
+
+/// Revoke a minted token by jti — takes effect on the next request.
+pub async fn revoke_token(
+    user: AuthUser,
+    State(state): State<AppState>,
+    axum::extract::Path(jti): axum::extract::Path<String>,
+) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
+    state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::RevokeToken {
+            token: user.token.clone(),
+            jti,
+        })
+        .await
+        .map_err(|e| crate::auth::bad_request(format!("{e:#}")))?;
+    Ok(ok(true))
+}
+
 #[derive(Serialize)]
 pub struct MeResponse {
     pub name: String,

@@ -67,6 +67,64 @@ pub async fn get_one(
     Ok(ok(view(&u)))
 }
 
+/// Effective permissions preview for one user: per-service access as
+/// actually enforced (roles + access rules + default_access), the
+/// resolved compose policy, and whether hard restrictions apply.
+/// Admins may inspect anyone; users may inspect themselves.
+pub async fn effective(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
+    if !user.user.is_admin() && user.user.name != name {
+        return Err(forbidden());
+    }
+    let u = state
+        .users
+        .get(&name)
+        .await
+        .ok_or_else(|| not_found("user not found"))?;
+    let cfg = state.config.get().await;
+    // Service names come from the agent (authoritative dir listing).
+    let svc_names: Vec<String> = state
+        .agent
+        .call(crate::agent::proto::SyncVerb::ServicesList, &user.token)
+        .await
+        .ok()
+        .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v).ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| s["name"].as_str().map(String::from))
+        .collect();
+    let mut services = serde_json::Map::new();
+    for s in &svc_names {
+        services.insert(
+            s.clone(),
+            serde_json::Value::Bool(crate::permissions::can_access_service(
+                &u,
+                s,
+                cfg.security.default_access,
+            )),
+        );
+    }
+    let policy_name = u
+        .compose_policy
+        .clone()
+        .unwrap_or_else(|| cfg.security.default_policy.clone());
+    let policy_name = if !u.is_admin() && u.restrictions.has_restrictions() {
+        format!("{policy_name}+restrictions")
+    } else {
+        policy_name
+    };
+    Ok(ok(serde_json::json!({
+        "services": services,
+        "default_access": format!("{:?}", cfg.security.default_access).to_lowercase(),
+        "compose_policy": policy_name,
+        "features": u.features,
+        "restrictions": u.restrictions,
+    })))
+}
+
 #[derive(Deserialize)]
 pub struct CreateUser {
     pub name: String,

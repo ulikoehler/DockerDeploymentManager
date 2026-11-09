@@ -9,7 +9,7 @@ pub mod users;
 pub mod ws;
 
 use crate::AppState;
-use axum::routing::{any, get, post, put};
+use axum::routing::{any, delete, get, post, put};
 use axum::Router;
 
 pub fn api_router() -> Router<AppState> {
@@ -25,6 +25,8 @@ pub fn api_router() -> Router<AppState> {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/me", get(auth::me))
         .route("/api/auth/token", post(auth::issue_token))
+        .route("/api/auth/tokens", get(auth::tokens_list))
+        .route("/api/auth/tokens/:jti", delete(auth::revoke_token))
         .route("/api/auth/logout-all", post(auth::logout_all))
         .route("/api/auth/ws-ticket", post(auth::ws_ticket))
         // users (admin)
@@ -33,6 +35,7 @@ pub fn api_router() -> Router<AppState> {
             "/api/users/:name",
             get(users::get_one).put(users::update).delete(users::delete),
         )
+        .route("/api/users/:name/effective", get(users::effective))
         .route("/api/users/:name/password", put(users::set_password))
         .route("/api/users/:name/access", put(users::set_access))
         // services
@@ -68,6 +71,11 @@ pub fn api_router() -> Router<AppState> {
         )
         .route("/api/services/:name/files/mkdir", post(files::mkdir))
         .route("/api/services/:name/files/rename", post(files::rename))
+        .route(
+            "/api/services/:name/files/download",
+            get(files::download_file),
+        )
+        .route("/api/services/:name/files/upload", put(files::upload_file))
         .route("/api/services/:name/git/repos", get(files::git_repos))
         .route("/api/services/:name/git/status", get(files::git_status))
         .route("/api/services/:name/git/log", get(files::git_log))
@@ -151,6 +159,16 @@ pub fn api_router() -> Router<AppState> {
         // generic commands
         .route("/api/commands", get(commands_api::list))
         .route("/api/commands/:section/:item", post(commands_api::run))
+        // command sections CRUD (admin; agent owns config.yaml)
+        .route(
+            "/api/commands/sections",
+            get(commands_api::sections_raw).post(commands_api::sections_mut),
+        )
+        // gitops config (admin; agent owns config.yaml)
+        .route(
+            "/api/gitops/config",
+            get(misc::gitops_config_get).put(misc::gitops_config_put),
+        )
         // gitops (webhook is public, secret-verified)
         .route("/api/gitops/status", get(misc::gitops_status))
         .route("/api/gitops/sync", post(misc::gitops_sync))
@@ -159,6 +177,7 @@ pub fn api_router() -> Router<AppState> {
         // misc
         .route("/api/config", get(misc::get_config))
         .route("/api/config/status", get(misc::config_status))
+        .route("/api/webdav/status", get(misc::webdav_status))
         .route("/api/policy", get(misc::effective_policy))
         .route("/api/templates", get(misc::templates))
         .route("/api/audit", get(misc::audit_entries))
