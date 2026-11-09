@@ -1,6 +1,6 @@
 import { LitElement, html, css, PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { apiService, apiAction, apiCheckUnit, apiDeleteService, apiExecContainer, apiExecutions, wsUrl } from '../api';
+import { apiService, apiAction, apiCheckUnit, apiDeleteService, apiExecContainer, apiExecutions, apiBackupCheck, wsUrl } from '../api';
 import { sharedStyles } from '../styles';
 import './ddm-log-viewer';
 import './ddm-compose-editor';
@@ -46,6 +46,7 @@ export class DdmServiceDetail extends LitElement {
   @state() private execOutput = '';
   @state() private execRunning = false;
   @state() private lastExec: any = null;
+  @state() private backupCheck: any = null;
   private execWs?: WebSocket;
   private loadedFor = '';
 
@@ -113,6 +114,7 @@ export class DdmServiceDetail extends LitElement {
       const detail = await apiService(n);
       const unitReport = await apiCheckUnit(n).catch(() => null);
       const execs: any[] = await apiExecutions().catch(() => []);
+      const bk = await apiBackupCheck(n).catch(() => null);
       const mine = (execs ?? [])
         .filter((e) => e.service === n)
         .sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)))[0] ?? null;
@@ -120,6 +122,7 @@ export class DdmServiceDetail extends LitElement {
       this.detail = detail;
       this.unitReport = unitReport;
       this.lastExec = mine;
+      this.backupCheck = bk;
       this.error = '';
     } catch (e: any) {
       if (this.name !== n) return;
@@ -237,7 +240,7 @@ export class DdmServiceDetail extends LitElement {
       <div class="card">
         <h3>Status</h3>
         <p>
-          backup: ${bk.enabled === false ? html`<span class="badge warn">disabled</span>` : html`enabled${bk.schedule_enabled === false ? ' (manual only)' : ''}`}
+          backup: ${bk.enabled === false ? html`<span class="badge warn">disabled</span>` : html`enabled${bk.schedule_enabled === false ? ' (manual only)' : ''}`}${this.backupCheck?.last_run ? html` <span class="muted">(last: ${this.backupCheck.last_run})</span>` : ''}
           · monitoring: ${!mon.health || mon.health.enabled === false ? html`<span class="muted">off</span>` : html`<span class="ok-text">on</span> <span class="muted">(${mon.health.kind ?? 'healthcheck'})</span>`}
           · containers: ${html`<b>${(d.containers || []).filter((c: any) => c.state === 'running').length}</b>`}/${(d.containers || []).length} running
         </p>

@@ -12,6 +12,7 @@ import {
   apiWebdavStatus,
 } from '../api';
 import { sharedStyles } from '../styles';
+import './ddm-code-editor';
 
 interface Entry {
   name: string;
@@ -31,6 +32,7 @@ export class DdmFiles extends LitElement {
   @state() private msg = '';
   @state() private newName = '';
   @state() private webdavEnabled = false;
+  @state() private imgUrl: string | null = null;
 
   connectedCallback() {
     super.connectedCallback();
@@ -48,6 +50,10 @@ export class DdmFiles extends LitElement {
       // node kind is a serde variant ("File"/"Dir"/"Binary") — normalize
       // before comparing or every file renders as an empty editor
       this.content = n.kind?.toLowerCase() === 'file' ? n.content : '';
+      this.imgUrl = null;
+      if (this.isImage(path) && (n.kind?.toLowerCase() === 'file' || n.kind?.toLowerCase() === 'binary')) {
+        this.imageUrl().then((u) => { if (u) this.imgUrl = u; });
+      }
       this.dirty = false;
       this.msg = '';
     } catch (e: any) {
@@ -139,6 +145,28 @@ export class DdmFiles extends LitElement {
     }
   }
 
+  private langFor(path: string): 'json' | 'yaml' | 'shell' | 'text' {
+    const ext = (path.split('/').pop() ?? '').split('.').pop()?.toLowerCase() ?? '';
+    if (ext === 'json') return 'json';
+    if (ext === 'yaml' || ext === 'yml') return 'yaml';
+    if (['sh', 'bash', 'zsh', 'ksh'].includes(ext)) return 'shell';
+    return 'text';
+  }
+
+  private isImage(path: string): boolean {
+    return /\.(png|jpe?g|gif|webp|svg|ico|bmp|avif)$/i.test(path);
+  }
+
+  private async imageUrl(): Promise<string | null> {
+    try {
+      const res = await fetch(fileDownloadUrl(this.name, this.path), {
+        headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {},
+      });
+      if (!res.ok) return null;
+      return URL.createObjectURL(await res.blob());
+    } catch { return null; }
+  }
+
   private async upload(file: File) {
     // dir view → upload into it; file view → replace the open file
     const target = this.node?.kind?.toLowerCase() === 'file'
@@ -201,23 +229,31 @@ export class DdmFiles extends LitElement {
                 <button class="small secondary" @click=${this.newFile}>new file</button>
                 <button class="small secondary" @click=${this.pickUpload}>upload…</button>
               </div>`
-          : kind === 'file'
-            ? html`
-                <textarea rows="24" style="width:100%" .value=${this.content}
-                  @input=${(e: any) => { this.content = e.target.value; this.dirty = true; }}></textarea>
-                <div class="row" style="margin-top:.4em">
-                  <button ?disabled=${!this.dirty} @click=${this.saveFile}>save</button>
-                  <button class="small secondary" @click=${this.download}>download</button>
-                  <button class="small secondary" @click=${this.pickUpload}>replace…</button>
-                  ${n.truncated ? html`<span class="muted">(file truncated at 512 KiB)</span>` : ''}
-                  <span class="muted">${n.size} bytes</span>
-                </div>`
-            : html`<div class="row">
-                <p class="muted" style="margin:0">${kind === 'binary' ? `binary file (${n.size} bytes)` : ''}</p>
-                <button class="small secondary" @click=${this.download}>download</button>
-                <button class="small secondary" @click=${this.pickUpload}>replace…</button>
-              </div>`}
-        ${this.msg ? html`<p class="muted">${this.msg}</p>` : ''}
+          : html`
+              ${this.imgUrl
+                ? html`<div class="card" style="text-align:center;padding:.6em">
+                    <img src=${this.imgUrl} alt="preview" style="max-width:100%;max-height:60vh;border-radius:6px">
+                    <div class="muted" style="margin-top:.3em">image preview — <a href="#" @click=${(e: Event) => { e.preventDefault(); this.imgUrl = null; }}>hide</a></div>
+                  </div>`
+                : ''}
+              ${kind === 'file'
+                ? html`
+                    <ddm-code-editor .value=${this.content} lang=${this.langFor(this.path)} height="24rem"
+                      @change=${(e: any) => { this.content = e.detail.value; this.dirty = true; }}></ddm-code-editor>
+                    <div class="row" style="margin-top:.4em">
+                      <button ?disabled=${!this.dirty} @click=${this.saveFile}>save</button>
+                      <button class="small secondary" @click=${this.download}>download</button>
+                      <button class="small secondary" @click=${this.pickUpload}>replace…</button>
+                      ${n.truncated ? html`<span class="muted">(file truncated at 512 KiB)</span>` : ''}
+                      <span class="muted">${n.size} bytes</span>
+                    </div>`
+                : html`<div class="row">
+                    <p class="muted" style="margin:0">${kind === 'binary' ? `binary file (${n.size} bytes)` : ''}</p>
+                    <button class="small secondary" @click=${this.download}>download</button>
+                    <button class="small secondary" @click=${this.pickUpload}>replace…</button>
+                  </div>`}
+              ${this.msg ? html`<p class="muted">${this.msg}</p>` : ''}
+            `}
       </div>`;
   }
 }

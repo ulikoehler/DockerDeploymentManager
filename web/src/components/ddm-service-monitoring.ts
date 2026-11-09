@@ -7,6 +7,7 @@ import {
   apiMonitoringTest,
 } from '../api';
 import { sharedStyles } from '../styles';
+import './ddm-code-editor';
 
 const HEALTH_KINDS = [
   { id: 'docker_healthcheck', label: 'docker healthcheck' },
@@ -225,9 +226,8 @@ export class DdmServiceMonitoring extends LitElement {
         <div class="card">
           <h3>Log alerts <span class="muted">(JSON — advanced)</span></h3>
           <p class="muted">[{"id","regex","exclude_regex"?,"container"?,"notify"?,"cooldown_secs"?,"actions"?}]</p>
-          <textarea rows="8" style="width:100%;font-family:ui-monospace,monospace"
-            .value=${this.fLogAlertsJson}
-            @input=${(e: any) => (this.fLogAlertsJson = e.target.value)}></textarea>
+          <ddm-code-editor .value=${this.fLogAlertsJson} lang="json" height="12rem"
+            @change=${(e: any) => (this.fLogAlertsJson = e.detail.value)}></ddm-code-editor>
         </div>
 
         <div class="toolbar">

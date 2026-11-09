@@ -5,6 +5,7 @@ import {
   apiGitopsConfig, apiPutGitopsConfig,
 } from '../api';
 import { sharedStyles } from '../styles';
+import './ddm-code-editor';
 
 interface GitsyncStatus {
   enabled: boolean;
@@ -196,9 +197,8 @@ export class DdmGitopsPanel extends LitElement {
                     @change=${(e: any) => (this.cfg = { ...this.cfg, prune: e.target.checked })}> prune deleted files</label>
                 </div>
                 <h4>targets <span class="muted">— [{"into":"services"|"config","path":"subdir"}]</span></h4>
-                <textarea style="width:100%;min-height:6em;font-family:ui-monospace,monospace"
-                  .value=${this.targetsJson}
-                  @input=${(e: any) => (this.targetsJson = e.target.value)}></textarea>
+                <ddm-code-editor .value=${this.targetsJson} lang="json" height="10rem"
+                  @change=${(e: any) => (this.targetsJson = e.detail.value)}></ddm-code-editor>
                 <div class="toolbar">
                   <button @click=${this.saveCfg}>save</button>
                   <span class="muted">secrets marked *** keep their stored value</span>

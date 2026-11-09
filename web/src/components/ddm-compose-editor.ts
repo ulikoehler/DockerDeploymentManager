@@ -2,12 +2,13 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiGetCompose, apiPutCompose, apiPolicy } from '../api';
 import { sharedStyles } from '../styles';
+import './ddm-code-editor';
 
 @customElement('ddm-compose-editor')
 export class DdmComposeEditor extends LitElement {
   static styles = [
     sharedStyles,
-    css`textarea { width: 100%; min-height: 50vh; font-family: ui-monospace, monospace; }`,
+    
   ];
 
   @property() name = '';
@@ -56,9 +57,8 @@ export class DdmComposeEditor extends LitElement {
       ${this.policyName
         ? html`<p class="muted">enforced compose policy: <b>${this.policyName}</b></p>`
         : ''}
-      <textarea .value=${this.content}
-        @input=${(e: any) => (this.content = e.target.value)}
-        spellcheck="false"></textarea>
+      <ddm-code-editor .value=${this.content} lang="yaml" height="50vh"
+        @change=${(e: any) => (this.content = e.detail.value)}></ddm-code-editor>
       ${this.violations.length
         ? html`<ul>${this.violations.map(
             (v) => html`<li class="error">${v.path}: ${v.message}</li>`,

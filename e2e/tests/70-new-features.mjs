@@ -114,8 +114,12 @@ export default async function (h) {
   const gitopsSaved = await page.evaluate(async () => {
     const c = window.__deep('ddm-gitops-panel');
     if (!c?.shadowRoot) return 'no-component';
-    const ta = c.shadowRoot.querySelector('textarea');
-    if (ta) window.__setVal(ta, JSON.stringify([{ into: 'services', path: 'e2e' }]));
+    const ed = c.shadowRoot.querySelector('ddm-code-editor');
+    if (ed) ed.setDoc(JSON.stringify([{ into: 'services', path: 'e2e' }]));
+    else {
+      const ta = c.shadowRoot.querySelector('textarea');
+      if (ta) window.__setVal(ta, JSON.stringify([{ into: 'services', path: 'e2e' }]));
+    }
     const save = [...c.shadowRoot.querySelectorAll('button')].find(b => b.textContent.trim() === 'save');
     if (!save) return 'no-save';
     save.click();

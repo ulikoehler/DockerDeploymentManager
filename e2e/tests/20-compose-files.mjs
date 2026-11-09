@@ -19,9 +19,9 @@ export default async function (h) {
   // invalid YAML -> error surfaced in panel
   r = await page.evaluate(async () => {
     const ce = window.__deep('ddm-compose-editor');
-    const ta = ce && ce.shadowRoot ? ce.shadowRoot.querySelector('textarea') : null;
-    if (!ta) return { err: 'no textarea' };
-    window.__setVal(ta, 'this is: [not: valid: yaml');
+    const ed = ce && ce.shadowRoot ? ce.shadowRoot.querySelector('ddm-code-editor') : null;
+    if (!ed) return { err: 'no code editor' };
+    ed.setDoc('this is: [not: valid: yaml');
     await new Promise(r => setTimeout(r, 300));
     window.__clickText('save');
     await new Promise(r => setTimeout(r, 2500));
@@ -42,9 +42,9 @@ export default async function (h) {
   const afterPriv = await page.evaluate(async () => {
     const ce = window.__deep('ddm-compose-editor');
     if (!ce) return { err: 'no compose editor' };
-    const ta = ce.shadowRoot.querySelector('textarea');
-    if (!ta) return { err: 'no textarea' };
-    window.__setVal(ta, 'services:\n  web:\n    image: nginx:alpine\n    privileged: true\n');
+    const ed = ce.shadowRoot.querySelector('ddm-code-editor');
+    if (!ed) return { err: 'no code editor' };
+    ed.setDoc('services:\n  web:\n    image: nginx:alpine\n    privileged: true\n');
     await new Promise(r => setTimeout(r, 300));
     window.__clickText('save');
     await new Promise(r => setTimeout(r, 2500));
@@ -81,9 +81,9 @@ export default async function (h) {
     await new Promise(r => setTimeout(r, 300));
     window.__clickText('new file');
     await new Promise(r => setTimeout(r, 1200));
-    const ta = window.__deep('textarea');
-    if (!ta) return { err: 'no textarea after new file' };
-    window.__setVal(ta, 'ui-e2e-content\n');
+    const ed = window.__deep('ddm-code-editor');
+    if (!ed) return { err: 'no code editor after new file' };
+    ed.setDoc('ui-e2e-content\n');
     await new Promise(r => setTimeout(r, 300));
     const saveBtn = window.__deepAll('button').find(b => b.textContent.trim() === 'save' && !b.disabled && b.offsetParent);
     if (!saveBtn) return { err: 'save disabled' };
@@ -156,8 +156,8 @@ export default async function (h) {
     if (!link) return { err: 'no file link' };
     link.click();
     await new Promise(r => setTimeout(r, 1200));
-    const ta = ff.shadowRoot.querySelector('textarea');
-    return { ok: !!ta && ta.value.includes('ui-content-marker'), val: ta ? ta.value.slice(0, 60) : '' };
+    const ed = ff.shadowRoot.querySelector('ddm-code-editor');
+    return { ok: !!ed && String(ed.value).includes('ui-content-marker'), val: ed ? String(ed.value).slice(0, 60) : '' };
   });
   ctx.check('files: file content loads in editor', r.ok === true, (r.val || r.err || '').slice(0, 80));
 

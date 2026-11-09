@@ -14,6 +14,7 @@ import './ddm-events-view';
 import './ddm-executions';
 import './ddm-token';
 import './ddm-audit';
+import './ddm-api-docs';
 
 type View = { name: string; service?: string };
 
@@ -167,6 +168,7 @@ export class DdmApp extends LitElement {
           ${this.isAdmin ? this.navLink('audit', 'Audit') : ''}
           ${this.isAdmin ? this.navLink('gitops', 'GitOps') : ''}
           ${this.navLink('token', 'Tokens')}
+          ${this.navLink('api', 'API')}
         </nav>
         <span class="spacer"></span>
         <a class="user-chip" style="text-decoration:none"
@@ -214,6 +216,8 @@ export class DdmApp extends LitElement {
         return this.isAdmin ? html`<ddm-audit></ddm-audit>` : html`<p class="error">forbidden</p>`;
       case 'token':
         return html`<ddm-token></ddm-token>`;
+      case 'api':
+        return html`<ddm-api-docs></ddm-api-docs>`;
       default:
         return html`<ddm-service-list></ddm-service-list>`;
     }

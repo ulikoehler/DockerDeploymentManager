@@ -6,6 +6,7 @@ import {
   apiBackupGlobalGet, apiBackupGlobalPut, apiMe,
 } from '../api';
 import { sharedStyles } from '../styles';
+import './ddm-code-editor';
 
 @customElement('ddm-backup-panel')
 export class DdmBackupPanel extends LitElement {
@@ -225,9 +226,8 @@ export class DdmBackupPanel extends LitElement {
               </div>
               <details style="margin-top:.5em" @toggle=${(e: any) => (this.showAdvanced = e.target.open)}>
                 <summary class="muted">advanced: stdin dumps (JSON)</summary>
-                <textarea style="width:100%;min-height:6em;font-family:ui-monospace,monospace"
-                  .value=${this.fDumpsJson}
-                  @input=${(e: any) => (this.fDumpsJson = e.target.value)}></textarea>
+                <ddm-code-editor .value=${this.fDumpsJson} lang="json" height="10rem"
+                  @change=${(e: any) => (this.fDumpsJson = e.detail.value)}></ddm-code-editor>
                 <p class="muted">[{"name","program","args"?,"when"?}] — dump command output into the snapshot</p>
               </details>
               <div class="toolbar">

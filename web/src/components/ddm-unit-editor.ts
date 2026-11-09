@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiGetUnit, apiPutUnit, apiCheckUnit, apiRegenUnit } from '../api';
 import { sharedStyles } from '../styles';
+import './ddm-code-editor';
 
 @customElement('ddm-unit-editor')
 export class DdmUnitEditor extends LitElement {
@@ -75,9 +76,8 @@ export class DdmUnitEditor extends LitElement {
         : this.check
           ? html`<p class="ok-text">unit ok</p>`
           : ''}
-      <textarea .value=${this.content}
-        @input=${(e: any) => (this.content = e.target.value)}
-        spellcheck="false"></textarea>
+      <ddm-code-editor .value=${this.content} lang="text" height="40vh"
+        @change=${(e: any) => (this.content = e.detail.value)}></ddm-code-editor>
       <div class="toolbar">
         <button @click=${() => this.save(false)}>save</button>
         <button class="secondary" @click=${() => this.save(true)}>save &amp; restart</button>
