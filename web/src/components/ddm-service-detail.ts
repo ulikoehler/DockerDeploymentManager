@@ -125,11 +125,33 @@ export class DdmServiceDetail extends LitElement {
     try {
       const r: any = await apiAction(this.name, action);
       location.hash = '#/service/' + this.name;
-      setTimeout(() => this.refresh(), 1500);
-      if (r?.execution_id) this.tab = 'logs';
+      if (r?.execution_id) {
+        // actions are async executions — refresh once when the execution
+        // finishes, not on a fixed timer that races container recreation
+        this.tab = 'logs';
+        this.watchExecution(r.execution_id);
+      } else {
+        setTimeout(() => this.refresh(), 1500);
+      }
     } catch (e: any) {
       this.error = e.message;
     }
+  }
+
+  private watchExecution(id: string) {
+    const ws = new WebSocket(wsUrl(`/ws/executions/${id}`));
+    ws.onmessage = (ev) => {
+      try {
+        const m = JSON.parse(ev.data);
+        if (m.type === 'ExecutionFinished' || m.data?.success !== undefined) {
+          ws.close();
+          this.refresh();
+        }
+      } catch { /* ignore */ }
+    };
+    ws.onclose = () => this.refresh();
+    // safety net if the socket never delivers a finish frame
+    setTimeout(() => { try { ws.close(); } catch {} this.refresh(); }, 120000);
   }
 
   private async removeService() {
