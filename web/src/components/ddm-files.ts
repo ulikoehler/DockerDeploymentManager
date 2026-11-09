@@ -172,7 +172,7 @@ export class DdmFiles extends LitElement {
       <div class="card">
         <div class="row"><h3>Files</h3>${this.crumbs()}</div>
         ${this.webdavEnabled
-          ? html`<p class="muted" style="margin:.2em 0 .6em">this service is also reachable via WebDAV at <code>/dav/${this.name}/</code> — mount it in Finder/Files or use any WebDAV client (requires the <code>mount_files</code> feature)</p>`
+          ? html`<p class="muted" style="margin:.2em 0 .6em">this service is also reachable via WebDAV at <code>/dav/${this.name}/</code> — mount it in Finder/Files or use any WebDAV client (requires the <code>mount_files</code> feature). Auth: send a JWT as <code>Authorization: Bearer …</code>, or Basic auth with any username and a <a href="#/token">minted token</a> as the password.</p>`
           : ''}
         ${kind === 'dir'
           ? html`

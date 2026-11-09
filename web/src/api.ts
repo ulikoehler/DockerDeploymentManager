@@ -169,6 +169,13 @@ export const apiMonitoringTest = (name: string) =>
   api(`/api/services/${name}/monitoring/test`, { method: 'POST' });
 export const apiMonitorStatus = () => api('/api/monitoring/status');
 export const apiWebdavStatus = () => api<any>('/api/webdav/status');
+export const apiExecution = (id: string) => api<any>(`/api/executions/${id}`);
+export const apiSetupStatus = () => api<any>('/api/setup');
+export const apiSetupCreate = (name: string, password: string) =>
+  api('/api/setup', { method: 'POST', body: { name, password } });
+export const apiBackupGlobalGet = () => api<any>('/api/backup/global');
+export const apiBackupGlobalPut = (patch: unknown) =>
+  api('/api/backup/global', { method: 'PUT', body: patch });
 export const apiMonitorEvents = (service?: string, limit = 100) =>
   api('/api/monitoring/events', { query: { service, limit } });
 export const apiNotifiers = () => api('/api/monitoring/notifiers');
@@ -185,8 +192,11 @@ export const apiCreateUser = (body: unknown) => api('/api/users', { method: 'POS
 export const apiUpdateUser = (name: string, body: unknown) =>
   api(`/api/users/${name}`, { method: 'PUT', body });
 export const apiDeleteUser = (name: string) => api(`/api/users/${name}`, { method: 'DELETE' });
-export const apiSetPassword = (name: string, password: string) =>
-  api(`/api/users/${name}/password`, { method: 'PUT', body: { password } });
+export const apiSetPassword = (name: string, password: string, currentPassword?: string) =>
+  api(`/api/users/${name}/password`, {
+    method: 'PUT',
+    body: { password, current_password: currentPassword },
+  });
 export const apiSetAccess = (name: string, rules: unknown) =>
   api(`/api/users/${name}/access`, { method: 'PUT', body: rules });
 export const apiUserEffective = (name: string) => api(`/api/users/${name}/effective`);

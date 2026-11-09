@@ -255,6 +255,14 @@ pub enum SyncVerb {
         service: String,
         cfg: ServiceBackupConfig,
     },
+    /// Admin: read the global backup section (config.yaml `backup:`) —
+    /// only the UI-editable subset is returned (no extra_env secrets).
+    BackupGlobalGet,
+    /// Admin: patch the global backup section. Only the fields present
+    /// in `patch` are touched; unknown keys are rejected.
+    BackupGlobalPut {
+        patch: serde_json::Value,
+    },
     ResolveComposeBin,
     GitSyncStatus,
     GitSyncRun,
@@ -360,6 +368,16 @@ pub enum CryptoOp {
     RevokeToken {
         token: String,
         jti: String,
+    },
+    /// Unauthenticated bootstrap check: true while users.yaml has zero
+    /// users. Once any user exists this is permanently false.
+    SetupNeeded,
+    /// Unauthenticated first-admin creation — only succeeds while the
+    /// user store is empty; afterwards it always fails. This is the
+    /// sole unauthenticated write path and it closes itself.
+    SetupCreate {
+        name: String,
+        password: String,
     },
 }
 

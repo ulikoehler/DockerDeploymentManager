@@ -11,6 +11,7 @@ import './ddm-commands';
 import './ddm-monitor-panel';
 import './ddm-gitops-panel';
 import './ddm-events-view';
+import './ddm-executions';
 import './ddm-token';
 import './ddm-audit';
 
@@ -130,6 +131,7 @@ export class DdmApp extends LitElement {
           ${this.navLink('commands', 'Commands')}
           ${this.navLink('monitor', 'Monitoring')}
           ${this.navLink('events', 'Events')}
+          ${this.navLink('executions', 'Executions')}
           ${this.isAdmin ? this.navLink('users', 'Users') : ''}
           ${this.isAdmin ? this.navLink('audit', 'Audit') : ''}
           ${this.isAdmin ? this.navLink('gitops', 'GitOps') : ''}
@@ -166,6 +168,8 @@ export class DdmApp extends LitElement {
           : html`<p class="error">forbidden</p>`;
       case 'events':
         return html`<ddm-events-view></ddm-events-view>`;
+      case 'executions':
+        return html`<ddm-executions></ddm-executions>`;
       case 'audit':
         return this.isAdmin ? html`<ddm-audit></ddm-audit>` : html`<p class="error">forbidden</p>`;
       case 'token':

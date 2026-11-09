@@ -884,6 +884,35 @@ impl AgentCore {
                 self.justify(&claims, "token_revoke", &jti);
                 Ok(serde_json::json!(true))
             }
+            CryptoOp::SetupNeeded => {
+                let file = self.users_file()?;
+                Ok(serde_json::json!({ "needed": file.users.is_empty() }))
+            }
+            CryptoOp::SetupCreate { name, password } => {
+                let mut file = self.users_file()?;
+                if !file.users.is_empty() {
+                    bail!("setup already completed — users exist");
+                }
+                if name.trim().is_empty() || name.len() > 64 {
+                    bail!("invalid user name");
+                }
+                if password.len() < 8 {
+                    bail!("password too short");
+                }
+                file.users.push(User {
+                    name: name.clone(),
+                    password_hash: users::hash_password(&self.peppered(&password))?,
+                    roles: vec!["admin".to_string()],
+                    access: vec![],
+                    features: Default::default(),
+                    compose_policy: None,
+                    token_version: 0,
+                    restrictions: Default::default(),
+                });
+                self.write_users(&file)?;
+                self.justify_internal("setup", "user_create", &name);
+                Ok(serde_json::json!(true))
+            }
         }
     }
 
@@ -1580,6 +1609,29 @@ impl AgentCore {
                 let mut svc = svc_ops::get_service(&cfg, &service)?;
                 svc.meta.backup = Some(b);
                 svc_ops::save_meta(&svc.dir, &svc.meta)?;
+                Ok(serde_json::json!(true))
+            }
+            SyncVerb::BackupGlobalGet => {
+                let (_claims, _caller) = self.unscoped_admin(token)?;
+                self.justify(&_claims, "backup_global_get", "");
+                let b = &cfg.backup;
+                Ok(serde_json::json!({
+                    "enabled": b.enabled,
+                    "scheduler": b.scheduler,
+                    "on_calendar": b.on_calendar,
+                    "excludes": b.excludes,
+                    "retention": b.retention,
+                }))
+            }
+            SyncVerb::BackupGlobalPut { patch } => {
+                let (_claims, _caller) = self.unscoped_admin(token)?;
+                self.justify(&_claims, "backup_global_put", "");
+                self.cfg
+                    .mutate(move |c| {
+                        apply_backup_global_patch(&mut c.backup, &patch)?;
+                        Ok(())
+                    })
+                    .await?;
                 Ok(serde_json::json!(true))
             }
             SyncVerb::ResolveComposeBin => {
@@ -2659,6 +2711,59 @@ const NOTIFIER_SECRET_KEYS: &[&str] = &[
 /// GitOps secret fields — same "***"/empty-means-keep semantics as
 /// notifier secrets.
 const GITOPS_SECRET_KEYS: &[&str] = &["token", "webhook_secret"];
+
+/// Apply a UI patch to the global `backup:` config section. Only the
+/// whitelisted keys are touched — repository paths, extra_env and other
+/// sensitive/advanced fields stay file-managed. Unknown keys fail closed.
+fn apply_backup_global_patch(
+    b: &mut crate::config::BackupConfig,
+    patch: &serde_json::Value,
+) -> Result<()> {
+    let obj = patch
+        .as_object()
+        .ok_or_else(|| anyhow!("backup patch must be an object"))?;
+    for key in obj.keys() {
+        if !matches!(
+            key.as_str(),
+            "enabled" | "scheduler" | "on_calendar" | "excludes" | "retention"
+        ) {
+            bail!("backup patch: unknown key '{key}'");
+        }
+    }
+    if let Some(v) = obj.get("enabled") {
+        b.enabled = v
+            .as_bool()
+            .ok_or_else(|| anyhow!("backup.enabled must be bool"))?;
+    }
+    if let Some(v) = obj.get("scheduler") {
+        b.scheduler = serde_json::from_value(v.clone())
+            .map_err(|_| anyhow!("backup.scheduler must be systemd_timer|internal|none"))?;
+    }
+    if let Some(v) = obj.get("on_calendar") {
+        let s = v
+            .as_str()
+            .ok_or_else(|| anyhow!("backup.on_calendar must be a string"))?;
+        if s.is_empty() || s.len() > 100 || s.contains('\n') {
+            bail!("invalid on_calendar");
+        }
+        b.on_calendar = s.to_string();
+    }
+    if let Some(v) = obj.get("excludes") {
+        b.excludes = serde_json::from_value(v.clone())
+            .map_err(|_| anyhow!("backup.excludes must be a list of strings"))?;
+    }
+    if let Some(v) = obj.get("retention") {
+        b.retention = if v.is_null() {
+            None
+        } else {
+            Some(
+                serde_json::from_value(v.clone())
+                    .map_err(|_| anyhow!("invalid retention policy"))?,
+            )
+        };
+    }
+    Ok(())
+}
 
 fn merge_gitops_secrets(new: &mut serde_json::Value, old: Option<&serde_json::Value>) {
     let Some(old) = old else { return };

@@ -23,6 +23,10 @@ pub fn api_router() -> Router<AppState> {
         .route("/dav/*path", any(crate::webdav::handle))
         // auth
         .route("/api/auth/login", post(auth::login))
+        .route(
+            "/api/setup",
+            get(auth::setup_status).post(auth::setup_create),
+        )
         .route("/api/auth/me", get(auth::me))
         .route("/api/auth/token", post(auth::issue_token))
         .route("/api/auth/tokens", get(auth::tokens_list))
@@ -172,6 +176,10 @@ pub fn api_router() -> Router<AppState> {
         // gitops (webhook is public, secret-verified)
         .route("/api/gitops/status", get(misc::gitops_status))
         .route("/api/gitops/sync", post(misc::gitops_sync))
+        .route(
+            "/api/backup/global",
+            get(misc::backup_global_get).put(misc::backup_global_put),
+        )
         .route("/api/gitops/push", post(misc::gitops_push))
         .route("/api/gitops/webhook", post(misc::gitops_webhook))
         // misc

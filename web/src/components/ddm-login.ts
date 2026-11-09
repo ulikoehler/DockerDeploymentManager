@@ -1,6 +1,6 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { apiLogin, setToken, ApiError } from '../api';
+import { apiLogin, apiSetupStatus, apiSetupCreate, setToken, ApiError } from '../api';
 import { sharedStyles } from '../styles';
 
 @customElement('ddm-login')
@@ -27,6 +27,14 @@ export class DdmLogin extends LitElement {
 
   @state() private error = '';
   @state() private busy = false;
+  @state() private setupNeeded: boolean | null = null;
+
+  connectedCallback() {
+    super.connectedCallback();
+    apiSetupStatus()
+      .then((s: any) => (this.setupNeeded = !!s?.needed))
+      .catch(() => (this.setupNeeded = false));
+  }
 
   private async submit(e: Event) {
     e.preventDefault();
@@ -46,7 +54,48 @@ export class DdmLogin extends LitElement {
     }
   }
 
+  private async submitSetup(e: Event) {
+    e.preventDefault();
+    const form = e.target as HTMLFormElement;
+    const name = (form.elements.namedItem('name') as HTMLInputElement).value;
+    const password = (form.elements.namedItem('password') as HTMLInputElement).value;
+    const confirm = (form.elements.namedItem('confirm') as HTMLInputElement).value;
+    if (password !== confirm) {
+      this.error = 'passwords do not match';
+      return;
+    }
+    this.busy = true;
+    this.error = '';
+    try {
+      await apiSetupCreate(name, password);
+      // straight into login with the new admin
+      const r = await apiLogin(name, password);
+      setToken(r.token);
+      this.dispatchEvent(new CustomEvent('login', { detail: r }));
+    } catch (err) {
+      this.error = err instanceof ApiError ? err.message : 'setup failed';
+      this.busy = false;
+    }
+  }
+
   render() {
+    if (this.setupNeeded) {
+      return html`
+        <div class="box card">
+          <p class="brand">DDM</p>
+          <p class="sub">first run — create the admin account</p>
+          <form @submit=${this.submitSetup}>
+            <input name="name" placeholder="admin username" autocomplete="username" required>
+            <input name="password" type="password" placeholder="password (min 8 chars)"
+                   autocomplete="new-password" required>
+            <input name="confirm" type="password" placeholder="confirm password"
+                   autocomplete="new-password" required>
+            <button ?disabled=${this.busy}>${this.busy ? '…' : 'Create admin & sign in'}</button>
+          </form>
+          ${this.error ? html`<p class="error">${this.error}</p>` : ''}
+        </div>
+      `;
+    }
     return html`
       <div class="box card">
         <p class="brand">DDM</p>

@@ -26,7 +26,7 @@ export class DdmAudit extends LitElement {
   render() {
     return html`
       <h2>Audit log</h2>
-      <p class="muted">sensitive actions recorded by the server — newest first (in-memory, last ~2000 entries)</p>
+      <p class="muted">sensitive actions recorded by the server — newest first (persisted to audit.jsonl, last ~2000 entries)</p>
       ${this.msg ? html`<p class="error">${this.msg}</p>` : ''}
       <div class="card">
         ${this.entries.length

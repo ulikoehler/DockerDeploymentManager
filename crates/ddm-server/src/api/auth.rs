@@ -60,6 +60,45 @@ pub async fn login(
     }))
 }
 
+/// Unauthenticated: is first-run setup still needed (zero users)?
+/// Safe to expose — it reveals nothing beyond "no users exist yet".
+pub async fn setup_status(
+    State(state): State<AppState>,
+) -> Json<crate::auth::SuccessResponse<serde_json::Value>> {
+    let v = state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::SetupNeeded)
+        .await
+        .unwrap_or_else(|_| serde_json::json!({"needed": false}));
+    ok(v)
+}
+
+#[derive(Deserialize)]
+pub struct SetupRequest {
+    pub name: String,
+    pub password: String,
+}
+
+/// Unauthenticated first-admin creation. The agent enforces the only
+/// rule that matters: it succeeds solely while the user store is empty.
+pub async fn setup_create(
+    State(state): State<AppState>,
+    Json(req): Json<SetupRequest>,
+) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
+    state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::SetupCreate {
+            name: req.name,
+            password: req.password,
+        })
+        .await
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    state
+        .audit
+        .record("setup", "user_create", "bootstrap", "first admin");
+    Ok(ok(true))
+}
+
 /// Mint a single-use WebSocket ticket for the caller's session — use
 /// `?ticket=` on `/ws/*` instead of `?token=` so the JWT never appears
 /// in a URL.

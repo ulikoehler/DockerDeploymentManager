@@ -116,7 +116,13 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
     };
 
     let exec = Arc::new(exec::ExecutionManager::new(history));
-    let audit = Arc::new(audit::AuditLog::new(2048));
+    // Audit trail persists to <config dir>/audit.jsonl so it survives
+    // restarts; the ring buffer caps what is held in memory.
+    let audit_path = config_path.parent().map(|d| d.join("audit.jsonl"));
+    let audit = Arc::new(match audit_path {
+        Some(p) => audit::AuditLog::new(2048).with_file(p),
+        None => audit::AuditLog::new(2048),
+    });
 
     // CORS: closed by default; only the configured origins get a
     // permissive layer (bearer-token API — no cookies are ever allowed).

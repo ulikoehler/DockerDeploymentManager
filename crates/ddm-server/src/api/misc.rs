@@ -516,6 +516,47 @@ pub async fn gitops_config_put(
     Ok(ok(true))
 }
 
+/// Admin: global backup config (config.yaml `backup:`) — editable subset
+/// only; repository paths and extra_env stay file-managed.
+pub async fn backup_global_get(
+    user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
+    if !user.user.is_admin() {
+        return Err(forbidden());
+    }
+    let v = state
+        .agent
+        .call(crate::agent::proto::SyncVerb::BackupGlobalGet, &user.token)
+        .await
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(ok(v))
+}
+
+/// Admin: patch the global backup config (whitelisted keys only,
+/// enforced agent-side).
+pub async fn backup_global_put(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Json(patch): Json<serde_json::Value>,
+) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
+    if !user.user.is_admin() {
+        return Err(forbidden());
+    }
+    state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::BackupGlobalPut { patch },
+            &user.token,
+        )
+        .await
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    state
+        .audit
+        .record(&user.user.name, "backup_global", "backup", "");
+    Ok(ok(true))
+}
+
 pub async fn gitops_sync(
     user: AuthUser,
     State(state): State<AppState>,

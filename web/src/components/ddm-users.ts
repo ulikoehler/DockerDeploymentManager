@@ -2,7 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import {
   apiUsers, apiCreateUser, apiDeleteUser, apiSetPassword, apiSetAccess,
-  apiUpdateUser, apiUserEffective, apiLogoutAll, UserView,
+  apiUpdateUser, apiUserEffective, apiLogoutAll, apiMe, UserView,
 } from '../api';
 import { sharedStyles } from '../styles';
 
@@ -84,10 +84,19 @@ export class DdmUsers extends LitElement {
   }
 
   private async changePw(name: string) {
+    // non-admin self-service changes require the current password —
+    // ask for it up front instead of failing after the fact.
+    const me = await apiMe().catch(() => null);
+    const isSelf = me?.name === name;
+    const needsCurrent = isSelf && !(me?.roles ?? []).includes('admin');
+    const current = needsCurrent
+      ? prompt(`current password for ${name}`)
+      : null;
+    if (needsCurrent && !current) return;
     const password = prompt(`new password for ${name} (min 8 chars)`);
     if (!password) return;
     try {
-      await apiSetPassword(name, password);
+      await apiSetPassword(name, password, current ?? undefined);
       this.msg = 'password updated';
     } catch (e: any) {
       this.msg = e.message;
