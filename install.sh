@@ -56,6 +56,30 @@ esac
 base="https://github.com/$REPO/releases/download/$tag"
 tb="ddm-${ver}-linux-${arch}.tar.gz"
 
+# already installed? compare the on-disk binary's version with the target
+installed_ver=""
+if [ -x /opt/ddm/bin/ddm-server ]; then
+    installed_ver=$(/opt/ddm/bin/ddm-server --version 2>/dev/null | awk '{print $2}')
+fi
+
+if [ -n "$installed_ver" ] && [ "$installed_ver" = "$ver" ] \
+    && systemctl cat ddm.service >/dev/null 2>&1; then
+    say "ddm-server $ver is already installed."
+    if ! systemctl is-active --quiet ddm.service; then
+        say "Service is not running — restarting it."
+        run systemctl restart ddm.service
+    else
+        say "Service is active — nothing to do."
+    fi
+    exit 0
+fi
+
+if [ -n "$installed_ver" ]; then
+    say "Updating ddm-server $installed_ver -> $ver"
+else
+    say "No existing install found — installing ddm-server $ver"
+fi
+
 say "Downloading $tb ..."
 run curl -fsSL "$base/$tb" -o "$TMP/$tb"
 run curl -fsSL "$base/SHA256SUMS" -o "$TMP/SHA256SUMS"
