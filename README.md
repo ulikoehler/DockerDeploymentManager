@@ -1,10 +1,17 @@
 # Docker Deployment Manager (ddm)
 
 A generic, self-hosting manager for docker-compose deployments on a single
-host. ddm itself runs as a **privileged docker service** (`privileged: true`,
-`pid: host`) and manages compose projects, their systemd units, restic
-backups, and monitoring/alerting — all behind a web UI, REST API, and a
-Python CLI.
+host. ddm is a **single binary** (`ddm-server`, web UI + REST API + MCP +
+CLI compiled in) installed bare-metal as a systemd service. It manages
+compose projects, their systemd units, restic backups, and
+monitoring/alerting — all behind a web UI, REST API, and a Python CLI.
+An optional privileged Docker image is published for hosts that prefer
+`docker compose up`.
+
+> **Warning:** ddm admin access is equivalent to SSH root on the host —
+> it can exec into containers, write systemd units, and run arbitrary
+> commands as root. Never give admin tokens to agents or automation;
+> use scoped, short-lived tokens instead. See `docs/SECURITY.md`.
 
 ## How it works
 
@@ -14,10 +21,12 @@ API, or CLI you can pull/update/restart them, edit their compose files and
 generated systemd units, stream filtered logs, schedule restic backups, and
 get notified on health-check failures or error patterns in logs.
 
-Because it needs to control the **host**'s systemd and docker, ddm runs as a
-privileged container with `pid: host`; host commands are executed via
-`nsenter` into PID 1's namespaces. Compose files live on a bind mount shared
-with the host so generated systemd units reference real paths.
+Because it needs to control the **host**'s systemd and docker, ddm runs with
+effective host root — bare-metal it calls `systemctl`/`docker`/`restic`
+directly (`host_exec: local`); in the optional container deploy, host
+commands run via `nsenter` into PID 1's namespaces. Compose files live on a
+bind mount (container) or directly on the host (bare metal) so generated
+systemd units reference real paths.
 
 **Host requirements**: docker + compose, systemd, optionally `restic` for
 backups.
@@ -99,8 +108,10 @@ python/              ddm_client package + `ddm` CLI (httpx, websockets)
 examples/            hello-world service, pg-app (backup+monitoring), templates
 docs/                API.md CONFIG.md SECURITY.md DEPLOYMENT.md CLIENT.md
                      BACKUP.md MONITORING.md SERVER_CLI.md ARCHITECTURE.md GITOPS.md
-Dockerfile           multi-stage build → runtime image
-docker-compose.yml   self-deployment (privileged, pid: host)
+Dockerfile           optional image build (not the standard install path)
+docker-compose.yml   optional self-deployment (privileged, pid: host)
+deploy/bare-metal/   systemd unit + config + install.sh for the standard install
+.github/workflows/   ci.yml (test+image) and release.yml (binary tarballs)
 ```
 
 ## Development

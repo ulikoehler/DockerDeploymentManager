@@ -350,12 +350,14 @@ pub enum UserMut {
         access: Vec<AccessRule>,
         features: Option<crate::users::UserFeatures>,
         compose_policy: Option<String>,
+        restrictions: Option<crate::users::UserRestrictions>,
     },
     Update {
         name: String,
         roles: Option<Vec<String>>,
         features: Option<crate::users::UserFeatures>,
         compose_policy: Option<Option<String>>,
+        restrictions: Option<crate::users::UserRestrictions>,
     },
     Delete {
         name: String,

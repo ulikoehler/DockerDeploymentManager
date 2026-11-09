@@ -118,13 +118,18 @@ pub async fn effective_policy(
         .compose_policy
         .clone()
         .unwrap_or_else(|| cfg.security.default_policy.clone());
-    // resolve_policy falls back to default/strict for unknown names so the
-    // reported policy matches what is actually enforced
-    let policy =
-        match crate::api::services::resolve_policy(&cfg, user.user.compose_policy.as_deref()) {
-            None => serde_json::Value::String("unrestricted".into()),
-            Some(p) => serde_json::to_value(&p).unwrap_or(serde_json::Value::Null),
-        };
+    // effective_policy_for_user reports what is actually enforced:
+    // resolved policy plus the user's hard restrictions
+    let policy = match crate::api::services::effective_policy_for_user(&cfg, &user.user) {
+        None => serde_json::Value::String("unrestricted".into()),
+        Some(p) => serde_json::to_value(&p).unwrap_or(serde_json::Value::Null),
+    };
+    let restricted = !user.user.is_admin() && user.user.restrictions.has_restrictions();
+    let name = if restricted {
+        format!("{}+restrictions", name)
+    } else {
+        name
+    };
     ok(serde_json::json!({ "policy": name, "rules": policy }))
 }
 

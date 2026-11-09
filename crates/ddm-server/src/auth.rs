@@ -463,6 +463,7 @@ mod security_tests {
             features: UserFeatures::default(),
             compose_policy: None,
             token_version: 0,
+            restrictions: crate::users::UserRestrictions::default(),
         }
     }
 

@@ -38,6 +38,76 @@ pub struct User {
     /// when it no longer matches — password change revokes sessions.
     #[serde(default)]
     pub token_version: u64,
+    /// Hard ceiling on dangerous container runtime modes, applied on top
+    /// of whatever compose policy resolves — restrictions only ever add
+    /// denies, they cannot loosen a policy. All fields default to denied
+    /// ("default prevented"); an admin must explicitly allow a user to
+    /// create privileged/host-mode containers. Not applied to `admin`
+    /// users (they are root-equivalent anyway); scoped tokens that lose
+    /// the admin role are restricted again.
+    #[serde(default)]
+    pub restrictions: UserRestrictions,
+}
+
+/// Per-user restrictions on dangerous compose features. Each flag, when
+/// true, forces the matching `ComposePolicy` deny on during validation —
+/// even for `compose_policy: unrestricted` users.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UserRestrictions {
+    /// `privileged: true` containers.
+    #[serde(default = "crate::config::bool_true")]
+    pub deny_privileged: bool,
+    /// Host network/pid/ipc/uts/cgroup modes and `service:`/`container:` joins.
+    #[serde(default = "crate::config::bool_true")]
+    pub deny_host_namespaces: bool,
+    /// Bind-mounting the docker socket.
+    #[serde(default = "crate::config::bool_true")]
+    pub deny_docker_socket: bool,
+    /// `devices:` and `device_cgroup_rules:`.
+    #[serde(default = "crate::config::bool_true")]
+    pub deny_devices: bool,
+    /// `user: root` / `user: "0"`.
+    #[serde(default = "crate::config::bool_true")]
+    pub deny_root_user: bool,
+    /// `userns_mode`, `cgroup_parent`, `security_opt` overrides.
+    #[serde(default = "crate::config::bool_true")]
+    pub deny_isolation_overrides: bool,
+    /// Any `cap_add` at all (forced empty allowlist).
+    #[serde(default = "crate::config::bool_true")]
+    pub deny_cap_add: bool,
+    /// Any `sysctls` at all (forced empty allowlist).
+    #[serde(default = "crate::config::bool_true")]
+    pub deny_sysctls: bool,
+}
+
+impl Default for UserRestrictions {
+    fn default() -> Self {
+        Self {
+            deny_privileged: true,
+            deny_host_namespaces: true,
+            deny_docker_socket: true,
+            deny_devices: true,
+            deny_root_user: true,
+            deny_isolation_overrides: true,
+            deny_cap_add: true,
+            deny_sysctls: true,
+        }
+    }
+}
+
+impl UserRestrictions {
+    /// True when at least one restriction is active — i.e. the effective
+    /// policy can never be fully unrestricted.
+    pub fn has_restrictions(&self) -> bool {
+        self.deny_privileged
+            || self.deny_host_namespaces
+            || self.deny_docker_socket
+            || self.deny_devices
+            || self.deny_root_user
+            || self.deny_isolation_overrides
+            || self.deny_cap_add
+            || self.deny_sysctls
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,6 +438,7 @@ pub fn cli_add_user(
         features: UserFeatures::default(),
         compose_policy: None,
         token_version: 0,
+        restrictions: crate::users::UserRestrictions::default(),
     });
     Ok(())
 }
@@ -477,6 +548,7 @@ mod security_tests {
             features: UserFeatures::default(),
             compose_policy: None,
             token_version: 0,
+            restrictions: crate::users::UserRestrictions::default(),
         });
         write_users_atomic(&path, &f).unwrap();
         let store = UserStore::load(&path).unwrap();

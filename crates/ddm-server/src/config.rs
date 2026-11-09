@@ -437,7 +437,7 @@ pub struct ComposePolicy {
     pub deny_isolation_overrides: bool,
 }
 
-fn bool_true() -> bool {
+pub(crate) fn bool_true() -> bool {
     true
 }
 fn default_port_range() -> (u16, u16) {
@@ -477,6 +477,65 @@ impl ComposePolicy {
 impl Default for ComposePolicy {
     fn default() -> Self {
         Self::strict_defaults()
+    }
+}
+
+impl ComposePolicy {
+    /// A policy that permits everything — the baseline a restricted user
+    /// gets when their compose_policy is `unrestricted` but their
+    /// `UserRestrictions` still force specific denies on.
+    pub fn unrestricted_baseline() -> Self {
+        Self {
+            deny_privileged: false,
+            deny_host_namespaces: false,
+            deny_docker_socket: false,
+            deny_devices: false,
+            cap_add: ListRule {
+                mode: ListRuleMode::Denylist,
+                list: vec![],
+            },
+            sysctls: ListRule {
+                mode: ListRuleMode::Denylist,
+                list: vec![],
+            },
+            allowed_bind_sources: vec!["**".to_string()],
+            deny_bind_targets: vec![],
+            allowed_port_range: (0, 65535),
+            allowed_registries: vec![],
+            max_services_per_compose: usize::MAX,
+            deny_root_user: false,
+            deny_isolation_overrides: false,
+        }
+    }
+
+    /// Force a user's runtime restrictions on top of this policy. Only
+    /// ever adds denies — a restriction can tighten but never loosen.
+    pub fn with_user_restrictions(mut self, r: &crate::users::UserRestrictions) -> Self {
+        if r.deny_privileged {
+            self.deny_privileged = true;
+        }
+        if r.deny_host_namespaces {
+            self.deny_host_namespaces = true;
+        }
+        if r.deny_docker_socket {
+            self.deny_docker_socket = true;
+        }
+        if r.deny_devices {
+            self.deny_devices = true;
+        }
+        if r.deny_root_user {
+            self.deny_root_user = true;
+        }
+        if r.deny_isolation_overrides {
+            self.deny_isolation_overrides = true;
+        }
+        if r.deny_cap_add {
+            self.cap_add = ListRule::allowlist(vec![]);
+        }
+        if r.deny_sysctls {
+            self.sysctls = ListRule::allowlist(vec![]);
+        }
+        self
     }
 }
 
@@ -1545,6 +1604,76 @@ mod tests {
             })
             .await;
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn user_restrictions_force_denies_on_unrestricted_baseline() {
+        use crate::users::UserRestrictions;
+        let p = ComposePolicy::unrestricted_baseline()
+            .with_user_restrictions(&UserRestrictions::default());
+        assert!(p.deny_privileged);
+        assert!(p.deny_host_namespaces);
+        assert!(p.deny_docker_socket);
+        assert!(p.deny_devices);
+        assert!(p.deny_root_user);
+        assert!(p.deny_isolation_overrides);
+        // empty allowlist = nothing permitted
+        assert!(matches!(p.cap_add.mode, ListRuleMode::Allowlist));
+        assert!(p.cap_add.list.is_empty());
+        assert!(matches!(p.sysctls.mode, ListRuleMode::Allowlist));
+        assert!(p.sysctls.list.is_empty());
+        // but the baseline stays otherwise permissive
+        assert_eq!(p.allowed_port_range, (0, 65535));
+        assert_eq!(p.max_services_per_compose, usize::MAX);
+    }
+
+    #[test]
+    fn user_restrictions_only_tighten_never_loosen() {
+        use crate::users::UserRestrictions;
+        // a named policy that allows privileged gets it re-denied by the
+        // restriction; a restriction that is off does not force anything
+        let mut named = ComposePolicy::unrestricted_baseline();
+        named.deny_privileged = false;
+        named.allowed_port_range = (8080, 8080);
+        let mut r = UserRestrictions::default();
+        r.deny_privileged = false; // admin explicitly allows privileged
+        let p = named.with_user_restrictions(&r);
+        assert!(!p.deny_privileged); // stays allowed
+        assert_eq!(p.allowed_port_range, (8080, 8080)); // untouched
+        assert!(p.deny_host_namespaces); // still denied by default
+    }
+
+    #[test]
+    fn unrestricted_user_without_restrictions_stays_unrestricted() {
+        use crate::users::{User, UserRestrictions};
+        // effective_policy_for_user returns None → no validation at all
+        let cfg = AppConfig::default();
+        let user = User {
+            name: "u".into(),
+            password_hash: String::new(),
+            roles: vec![],
+            access: vec![],
+            features: Default::default(),
+            compose_policy: Some("unrestricted".into()),
+            token_version: 0,
+            restrictions: UserRestrictions {
+                deny_privileged: false,
+                deny_host_namespaces: false,
+                deny_docker_socket: false,
+                deny_devices: false,
+                deny_root_user: false,
+                deny_isolation_overrides: false,
+                deny_cap_add: false,
+                deny_sysctls: false,
+            },
+        };
+        assert!(crate::api::services::effective_policy_for_user(&cfg, &user).is_none());
+        // same user with default restrictions → enforced policy exists
+        let mut restricted = user.clone();
+        restricted.restrictions = UserRestrictions::default();
+        let p = crate::api::services::effective_policy_for_user(&cfg, &restricted)
+            .expect("restrictions must produce an enforced policy");
+        assert!(p.deny_privileged && p.deny_host_namespaces);
     }
 }
 

@@ -1,10 +1,69 @@
 # Deployment
 
-ddm runs **inside docker** but manages the **host**'s systemd and other
-containers. That works because it runs privileged with the host PID
-namespace.
+ddm is a **single static-ish binary** (`ddm-server`) with the web UI,
+REST API, MCP server, and CLI compiled in. The standard install is
+**bare-metal**: binary + config files + a systemd unit. It runs with
+effective host root by design — it manages host systemd units, docker
+containers, and the service root — so there is no sandbox to speak of
+either way; running it in a privileged container adds complexity without
+adding isolation.
 
-## docker-compose.yml (self-deployment)
+## Bare-metal install (standard)
+
+Release tarballs (`ddm-<ver>-linux-<arch>.tar.gz`) are attached to every
+`v*` GitHub release and contain `ddm-server`, `config.yaml`,
+`ddm.service`, and `install.sh`.
+
+```bash
+tar xzf ddm-<ver>-linux-x86_64.tar.gz
+cd ddm-<ver>-linux-x86_64
+sudo ./install.sh
+```
+
+The installer:
+
+- installs the binary to `/opt/ddm/bin/ddm-server`
+- writes `/etc/ddm/config.yaml` (bare-metal variant: `host_exec: local`,
+  `host_systemd_dir: /etc/systemd/system`), `/etc/ddm/ddm.env` (generated
+  `DDM_JWT_SECRET`, mode 0600), and an empty `/etc/ddm/users.yaml`
+- installs and enables `ddm.service`
+
+Then create the first admin:
+
+```bash
+/opt/ddm/bin/ddm-server --config /etc/ddm/config.yaml \
+    user add admin --role admin --generate
+```
+
+Manual equivalent (if you build from source):
+
+```bash
+cargo build --release -p ddm-server   # web/dist is embedded automatically
+install -m755 target/release/ddm-server /opt/ddm/bin/ddm-server
+cp deploy/bare-metal/config.yaml /etc/ddm/config.yaml
+cp deploy/bare-metal/ddm.service /etc/systemd/system/ddm.service
+# …then the env/users steps from install.sh
+systemctl daemon-reload && systemctl enable --now ddm
+```
+
+### host paths (bare metal)
+
+| path | purpose |
+|---|---|
+| `/opt/services` | service root — compose projects ddm manages |
+| `/etc/ddm/config.yaml` | hot-reloaded config |
+| `/etc/ddm/users.yaml` | users (argon2 hashes), mode 0600 |
+| `/etc/ddm/ddm.env` | `DDM_JWT_SECRET` etc., mode 0600 |
+| `/var/lib/ddm` | monitor/exec state |
+
+`paths.host_exec: local` makes ddm run `systemctl`, `docker compose`,
+`restic`, `git` etc. directly — they are host binaries, no nsenter.
+
+## Docker image (optional)
+
+For hosts where you prefer `docker compose up`, an image
+`ulikoehler/ddm` is published to Docker Hub on every push to `main`
+(amd64+arm64) and can also be built locally with `docker build .`.
 
 ```yaml
 services:
@@ -44,28 +103,22 @@ If the service dir must have different paths inside/outside, set
 - `nsenter` (default): host commands run as
   `nsenter --target 1 --mount --uts --ipc --net -- <cmd>` — host binaries,
   host systemd. Requires `pid: host` + `privileged: true`.
-- `local`: commands run inside the container. For development/bare-metal
-  installs only.
-
-## Bootstrap
-
-```bash
-mkdir -p data data-state /opt/services
-cp config.example.yaml data/config.yaml
-cp -r examples/templates data/templates
-# users.yaml can start empty — bootstrap in-container:
-docker compose pull && docker compose up -d
-docker compose exec ddm ddm-server user add admin --role admin --generate
-```
+- `local`: commands run directly. Used by bare-metal installs and for
+  development.
 
 ## Requirements on the host
 
 - docker + compose (v2 plugin or `docker-compose`)
 - systemd (for unit management, backup timers, group commands)
 - `restic` (only if `backup.enabled` — resolved via `which` on the host)
+- git (for git clone/pull features)
 
 ## Upgrades
 
-The image embeds `/opt/ddm/web` (the UI) and `/etc/ddm/config.yaml`
-(example). Your real config lives in the `./data` volume and is never
-overwritten by image updates.
+**Bare metal:** download the new tarball, `systemctl stop ddm`, replace
+`/opt/ddm/bin/ddm-server`, `systemctl start ddm`. Config and users live
+in `/etc/ddm` and are untouched; new config keys fall back to defaults.
+
+**Docker:** `docker compose pull && docker compose up -d`. The image's
+embedded example config is shadowed by the `./data` volume and never
+overwritten.

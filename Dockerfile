@@ -11,7 +11,13 @@ FROM rust:1-bookworm AS backend
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+# web UI is embedded into the binary — dist must exist before cargo build
+COPY --from=web /app/dist /app/web/dist
 RUN cargo build --release -p ddm-server
+
+# ---- bare binary (for release tarballs / bare-metal installs) ----
+FROM scratch AS binary
+COPY --from=backend /app/target/release/ddm-server /ddm-server
 
 # ---- runtime ----
 FROM debian:trixie-slim

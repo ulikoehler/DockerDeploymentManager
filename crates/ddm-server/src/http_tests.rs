@@ -2235,6 +2235,7 @@ async fn users_file_written_private() {
                 access: vec![],
                 features: None,
                 compose_policy: None,
+                restrictions: None,
             },
         })
         .await

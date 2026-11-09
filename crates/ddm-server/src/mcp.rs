@@ -362,6 +362,11 @@ pub struct UserCreateArgs {
     pub features: Option<Value>,
     #[serde(default)]
     pub compose_policy: Option<String>,
+    /// Hard denies for dangerous runtime modes (privileged, host
+    /// namespaces, docker socket, devices, root user, isolation
+    /// overrides, cap_add, sysctls). Default: all denied.
+    #[serde(default)]
+    pub restrictions: Option<crate::users::UserRestrictions>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -374,6 +379,8 @@ pub struct UserUpdateArgs {
     /// Outer null = leave unchanged; inner null = clear the override.
     #[serde(default)]
     pub compose_policy: Option<Option<String>>,
+    #[serde(default)]
+    pub restrictions: Option<crate::users::UserRestrictions>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -487,6 +494,7 @@ impl DdmMcp {
             access: parse(Value::Array(p.access))?,
             features: p.features.map(parse).transpose()?,
             compose_policy: p.compose_policy,
+            restrictions: p.restrictions,
         };
         finish(api::users::create(user, self.st(), Json(req)).await).await
     }
@@ -501,6 +509,7 @@ impl DdmMcp {
             roles: p.roles,
             features: p.features.map(parse).transpose()?,
             compose_policy: p.compose_policy,
+            restrictions: p.restrictions,
         };
         finish(api::users::update(user, self.st(), Path(p.name), Json(req)).await).await
     }

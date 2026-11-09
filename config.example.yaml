@@ -3,7 +3,7 @@ server:
   listen: 0.0.0.0:8080
   jwt_secret_env: DDM_JWT_SECRET
   token_ttl_minutes: 720
-  web_dir: /opt/ddm/web          # bundled UI; omit to disable
+  web_dir: null                     # UI is embedded in the binary; set a dir to override (dev)
 
 paths:
   services_root: /opt/services          # same path in-container and on host

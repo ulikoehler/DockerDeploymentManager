@@ -1,0 +1,30 @@
+# Bare-metal install assets. The standard install path is the single
+# `ddm-server` binary (web UI embedded) + this systemd unit.
+# See docs/DEPLOYMENT.md.
+
+[Unit]
+Description=Docker Deployment Manager
+Documentation=https://github.com/ulikoehler/DockerDeploymentManager
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+# Runs with effective host root by design: manages host systemd units,
+# docker containers, and the service root. NOT sandboxed.
+ExecStart=/opt/ddm/bin/ddm-server --config /etc/ddm/config.yaml serve
+EnvironmentFile=-/etc/ddm/ddm.env
+Restart=always
+RestartSec=3
+# Hardening that does not conflict with the tool's purpose:
+# NOTE: no PrivateTmp — backup restores and other host paths may
+# legitimately target /tmp, which a private tmp would hide.
+NoNewPrivileges=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

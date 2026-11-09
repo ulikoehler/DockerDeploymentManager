@@ -11,6 +11,7 @@ pub struct UserView {
     pub access: Vec<AccessRule>,
     pub features: UserFeatures,
     pub compose_policy: Option<String>,
+    pub restrictions: crate::users::UserRestrictions,
 }
 
 fn view(u: &User) -> UserView {
@@ -20,6 +21,7 @@ fn view(u: &User) -> UserView {
         access: u.access.clone(),
         features: u.features.clone(),
         compose_policy: u.compose_policy.clone(),
+        restrictions: u.restrictions.clone(),
     }
 }
 
@@ -77,6 +79,8 @@ pub struct CreateUser {
     pub features: Option<UserFeatures>,
     #[serde(default)]
     pub compose_policy: Option<String>,
+    #[serde(default)]
+    pub restrictions: Option<crate::users::UserRestrictions>,
 }
 
 pub async fn create(
@@ -103,6 +107,7 @@ pub async fn create(
                 access: req.access.clone(),
                 features: req.features.clone(),
                 compose_policy: req.compose_policy.clone(),
+                restrictions: req.restrictions.clone(),
             },
         })
         .await
@@ -120,6 +125,7 @@ pub struct UpdateUser {
     pub roles: Option<Vec<String>>,
     pub features: Option<UserFeatures>,
     pub compose_policy: Option<Option<String>>,
+    pub restrictions: Option<crate::users::UserRestrictions>,
 }
 
 pub async fn update(
@@ -138,6 +144,7 @@ pub async fn update(
                 roles: req.roles.clone(),
                 features: req.features.clone(),
                 compose_policy: req.compose_policy.clone(),
+                restrictions: req.restrictions.clone(),
             },
         })
         .await

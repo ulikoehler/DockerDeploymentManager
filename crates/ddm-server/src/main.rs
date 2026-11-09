@@ -23,6 +23,7 @@ mod services;
 mod systemd;
 mod users;
 mod webdav;
+mod webui;
 
 #[cfg(test)]
 mod http_tests;
@@ -152,18 +153,20 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
         );
     }
 
-    // optional static web UI (SPA fallback → index.html)
-    if let Some(dir) = web_dir {
-        let dir = PathBuf::from(dir);
-        if dir.is_dir() {
-            info!("serving web UI from {}", dir.display());
-            app =
-                app.fallback_service(tower_http::services::ServeDir::new(&dir).not_found_service(
-                    tower_http::services::ServeFile::new(dir.join("index.html")),
-                ));
-        } else {
-            warn!("web_dir {} not found — UI disabled", dir.display());
-        }
+    // static web UI: embedded assets by default; `web_dir` overrides with
+    // a directory on disk (dev). SPA fallback → index.html.
+    let dir_override = web_dir.map(PathBuf::from).filter(|d| d.is_dir());
+    if let Some(dir) = &dir_override {
+        info!("serving web UI from {}", dir.display());
+        app = app.fallback_service(
+            tower_http::services::ServeDir::new(dir)
+                .not_found_service(tower_http::services::ServeFile::new(dir.join("index.html"))),
+        );
+    } else if webui::has_assets() {
+        info!("serving embedded web UI");
+        app = app.fallback(webui::fallback);
+    } else {
+        warn!("no web UI assets — build web/dist or set server.web_dir");
     }
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;

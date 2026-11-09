@@ -48,7 +48,7 @@ pub(crate) async fn require_service_access(
 /// configured default policy (and ultimately to a deny-all default).
 async fn caller_policy(state: &AppState, user: &AuthUser) -> Option<crate::config::ComposePolicy> {
     let cfg = state.config.get().await;
-    resolve_policy(&cfg, user.user.compose_policy.as_deref())
+    crate::api::services::effective_policy_for_user(&cfg, &user.user)
 }
 
 /// Shared resolution used by `caller_policy` and `effective_policy`.
@@ -72,6 +72,32 @@ pub(crate) fn resolve_policy(
         })
         // last resort: built-in strict policy — never fail open
         .or_else(|| Some(crate::config::ComposePolicy::strict_defaults()))
+}
+
+/// The policy actually enforced for `user`: their resolved compose policy
+/// with `user.restrictions` forced on top. `unrestricted` users with
+/// active restrictions get the allow-everything baseline minus the
+/// restricted denies — restrictions can tighten, never loosen.
+/// Returns `None` only for a fully unrestricted, unrestricted-restriction
+/// user (no validation at all).
+///
+/// Restrictions do not apply to `admin` users: an admin is already
+/// root-equivalent and could simply clear the flags, so enforcing them
+/// would be friction without security value. Scoped tokens that drop the
+/// admin role are restricted again.
+pub(crate) fn effective_policy_for_user(
+    cfg: &crate::config::AppConfig,
+    user: &crate::users::User,
+) -> Option<crate::config::ComposePolicy> {
+    let resolved = resolve_policy(cfg, user.compose_policy.as_deref());
+    if user.is_admin() || !user.restrictions.has_restrictions() {
+        return resolved;
+    }
+    Some(
+        resolved
+            .unwrap_or_else(crate::config::ComposePolicy::unrestricted_baseline)
+            .with_user_restrictions(&user.restrictions),
+    )
 }
 
 fn policy_error(violations: &[PolicyViolation]) -> Response {

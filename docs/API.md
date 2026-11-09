@@ -175,8 +175,8 @@ bind-mounted so host-side units see the same files. Refs/URLs are validated
 
 | Method | Path | Notes |
 |---|---|---|
-| GET/POST   | `/api/users` | list / create `{name, password, roles?, access?, features?, compose_policy?}` |
-| GET/PUT/DELETE | `/api/users/{name}` | self may GET itself |
+| GET/POST   | `/api/users` | list / create `{name, password, roles?, access?, features?, compose_policy?, restrictions?}` |
+| GET/PUT/DELETE | `/api/users/{name}` | self may GET itself; PUT body may include `restrictions` |
 | PUT | `/api/users/{name}/password` | `{password}` — self or admin |
 | PUT | `/api/users/{name}/access` | `[{type: exact|glob|regex, pattern, effect: allow|deny}]` |
 

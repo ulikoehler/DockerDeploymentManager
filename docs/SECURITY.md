@@ -154,6 +154,23 @@ the login that produced it.
    host namespaces, docker-socket mounts, devices, `cap_add`, `sysctls`,
    bind mounts, isolation overrides, low ports, path escapes,
    `.restic_password` mounts, out-of-dir `extends`/`include`.
+   Independently of the named policy, every non-admin user carries a
+   **`restrictions` ceiling** (`users.yaml` / `user_create` /
+   `user_update`): `deny_privileged`, `deny_host_namespaces`,
+   `deny_docker_socket`, `deny_devices`, `deny_root_user`,
+   `deny_isolation_overrides`, `deny_cap_add`, `deny_sysctls` — **all
+   default to denied**, including for `compose_policy: unrestricted`
+   users and for compose files arriving via `service_create`, compose
+   writes, file-API compose edits and in-service `git clone`. The ceiling
+   only ever *adds* denies on top of the resolved policy (an
+   `unrestricted`-policy user with active restrictions is validated
+   against an allow-everything baseline minus the restricted denies), so
+   it cannot be escaped by picking a permissive policy or minting a
+   scoped token. `admin` users are exempt — they are root-equivalent and
+   could clear the flags anyway; a service-scoped admin token loses the
+   admin role and is restricted again. Grant an exception by setting the
+   relevant flag to `false` via `PUT /api/users/{name}` or
+   `user_update`.
 5. **Unit editing** — `security.unit_edit_requires` (default `admin`);
    the `edit_units` feature cannot bypass an `admin` gate.
 6. **Token scopes** — `POST /api/auth/token` mints time-limited JWTs with
@@ -297,11 +314,113 @@ security:
   lock to every reader but reveals the token only to its holder (or an
   admin).
 
-## Operational guidance
+## Operational guidance — admin access is host root
 
-Treat ddm like `root SSH`: TLS via reverse proxy or VPN,
-`security.default_access: deny`, sparing use of `unrestricted`, set
-`DDM_JWT_SECRET` explicitly on the **agent** process, run the agent
-socket `0660 root:ddm`, and prefer `POST /api/auth/ws-ticket` +
-`?ticket=` (single-use, 60 s) over `?token=` for WebSocket clients so
-session JWTs stay out of URLs.
+**An `admin` user on ddm is equivalent to SSH root on the host. Treat it
+exactly like root SSH: do not hand it to agents, scripts, or third parties
+lightly.** Concretely, an admin token can:
+
+- `exec` into any container and read all env vars / mounted secrets
+- write or delete files in every service dir, including generated
+  systemd units → trivial persistence (`ExecStartPost=` a shell)
+- run `docker run --privileged -v /:/host …` via compose/exec paths →
+  arbitrary host command execution as real root
+- trigger backup `restore` to an arbitrary absolute `target_dir` →
+  arbitrary file write as root
+- read every container's logs and every service's `.env` files, which
+  hold DB passwords, API keys, and other app secrets (the JSON config
+  view is redacted even for admin, but file/exec paths are not)
+- configure monitoring `exec_command` auto-actions — admin-only and run
+  with no caller identity, i.e. arbitrary command execution as root
+- mint further tokens, rotate the JWT secret, and manage users
+
+There is no meaningful difference between "ddm admin" and "root on the
+box". If you would not give someone your SSH private key, do not give
+them an admin JWT.
+
+### Access for agents, scripts, and automation
+
+Never distribute admin (or `unrestricted`-policy) tokens to automation.
+The supported pattern:
+
+1. Create a dedicated user with the **narrowest role that works**
+   (`viewer` for read-only dashboards, `operator` for lifecycle actions)
+   and explicit `access` rules limited to the services it needs
+   (`default_access: deny` does the rest).
+2. Mint a **scoped token** via `POST /api/auth/token` with
+   `services: [...]` and `actions: [...]` and the shortest practical
+   `ttl_minutes`. Scoped tokens:
+   - intersect with the user's *current* access rules — they can only
+     narrow, never widen (verified by test: a service scope cannot grant
+     a service the user cannot already reach);
+   - always drop the `admin` role;
+   - cannot mint unscoped children, change passwords, or reach
+     trust-root operations (user management, JWT rotation, notifiers);
+   - die with the parent — password change bumps the user's
+     `token_version` and revokes the token *and* all tokens minted from
+     it; deleting or demoting the user kills them at the fresh-record
+     check immediately, before expiry.
+3. Re-mint per job/run rather than reusing long-lived tokens. The TTL is
+   capped server-side; a leaked scoped token has a bounded lifetime and
+   bounded blast radius.
+4. For MCP clients specifically: prefer `POST /api/auth/ws-ticket` +
+   `?ticket=` (single-use, 60 s) or a short-TTL scoped token over a
+   session JWT.
+
+### Verified invariants (tested against a live deployment)
+
+The following were exercised end-to-end and confirmed — treat them as
+design guarantees, and re-test after major auth changes:
+
+- JWT signature, `alg=none`, forged signatures, and tampered payloads
+  are all rejected; generation bumps (`logout_all`, secret rotation)
+  invalidate every outstanding token.
+- A deleted or demoted user's token fails at the agent boundary on the
+  next call — claims are never trusted over the fresh `users.yaml`
+  record.
+- Self-service privilege escalation is denied: users cannot update their
+  own roles/access, create users, or reset their own password without
+  the current password.
+- Compose policy is enforced agent-side on every write; the configured
+  `security.policy_floor` bounds even `unrestricted` users.
+
+### Deployment realities
+
+- **The Docker image is packaging, not isolation.** The container runs
+  `privileged: true` + `pid: host` + docker.sock and reaches the host via
+  `nsenter` — a compromised ddm process gets host root regardless of the
+  container boundary. Bare-metal (`host_exec: local`) has the identical
+  real-world posture with a smaller code path; prefer it unless you
+  specifically want `docker compose up` lifecycle management.
+- **Never expose the API port directly.** Bearer JWTs over plain HTTP
+  are sniffable. Put ddm behind a TLS reverse proxy, a VPN, or a
+  firewall allowlist — the same rule as for SSH.
+- **Privilege-separated mode matters.** With `security.agent_socket`
+  set, the network-facing process holds no secrets and cannot execute
+  privileged verbs on its own; the root agent re-checks every verb
+  against the fresh user record. Single-process mode (no
+  `agent_socket`) is for development/tests only — a compromised HTTP
+  process then owns everything.
+- **Watch the logs.** The server audit ring/tracing lines and the
+  agent's root-owned append-only justification log are the intrusion
+  signal; discrepancies between them mean the server was compromised.
+  Rotate `DDM_JWT_SECRET` (admin → logout-all or restart with a new
+  secret) if you suspect token theft.
+
+### Operational checklist
+
+- TLS via reverse proxy or VPN; `security.default_access: deny`
+- sparing use of `unrestricted` compose policies; prefer named policies
+  and `security.policy_floor` for infrastructure stacks
+- keep per-user `restrictions` at their denied defaults for every
+  non-admin user; grant `deny_*: false` exceptions only where a service
+  genuinely needs privileged/host-mode/docker-socket access
+- `DDM_JWT_SECRET` set explicitly on the **agent** process, unique per
+  host, never committed
+- agent socket `0660 root:ddm`, `agent_peer_uid` set
+- `webdav.enabled: false` unless actively needed — it is a second write
+  path into service dirs
+- `security.allow_local_git_clone: false` (default) — local clone URLs
+  run as root in the agent
+- review the audit + justification logs periodically; alert on
+  `token_issue`, `mint`, `rotate`, and user mutations

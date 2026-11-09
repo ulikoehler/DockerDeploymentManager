@@ -643,6 +643,69 @@ services:
     }
 
     #[test]
+    fn user_restrictions_baseline_blocks_dangerous_modes() {
+        use crate::users::UserRestrictions;
+        // the policy an `unrestricted` user with default restrictions gets:
+        // everything allowed except the hard-denied runtime modes
+        let p = ComposePolicy::unrestricted_baseline()
+            .with_user_restrictions(&UserRestrictions::default());
+        let check = |y: &str| validate_compose(y, &p);
+
+        // plain compose passes — restrictions don't break normal services
+        let ok = "services:\n  x:\n    image: nginx:alpine\n    ports:\n      - \"8080:80\"\n";
+        assert!(check(ok).is_empty(), "{:?}", check(ok));
+
+        for (name, y, rule) in [
+            (
+                "privileged",
+                "services:\n  x:\n    image: a\n    privileged: true\n",
+                "deny_privileged",
+            ),
+            (
+                "host net",
+                "services:\n  x:\n    image: a\n    network_mode: host\n",
+                "deny_host_namespaces",
+            ),
+            (
+                "host pid",
+                "services:\n  x:\n    image: a\n    pid: host\n",
+                "deny_host_namespaces",
+            ),
+            (
+                "docker sock",
+                "services:\n  x:\n    image: a\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n",
+                "deny_docker_socket",
+            ),
+            (
+                "devices",
+                "services:\n  x:\n    image: a\n    devices: [/dev/kvm]\n",
+                "deny_devices",
+            ),
+            (
+                "root user",
+                "services:\n  x:\n    image: a\n    user: root\n",
+                "deny_root_user",
+            ),
+            (
+                "cap_add",
+                "services:\n  x:\n    image: a\n    cap_add: [NET_ADMIN]\n",
+                "cap_add",
+            ),
+            (
+                "sysctls",
+                "services:\n  x:\n    image: a\n    sysctls: {net.ipv4.ip_forward: \"1\"}\n",
+                "sysctls",
+            ),
+        ] {
+            let v = check(y);
+            assert!(
+                v.iter().any(|v| v.rule == rule),
+                "{name}: expected rule {rule}, got {v:?}"
+            );
+        }
+    }
+
+    #[test]
     fn restic_password_mount_denied() {
         let y = "services:\n  x:\n    image: a\n    volumes:\n      - /services/x/.restic_password:/pw\n";
         assert!(violations(y).iter().any(|v| v.rule == "deny_secret_mount"));

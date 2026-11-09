@@ -958,6 +958,7 @@ impl AgentCore {
                 access,
                 features,
                 compose_policy,
+                restrictions,
             } => {
                 if file.users.iter().any(|u| u.name == name) {
                     bail!("user exists");
@@ -973,6 +974,7 @@ impl AgentCore {
                     features: features.unwrap_or_default(),
                     compose_policy,
                     token_version: 0,
+                    restrictions: restrictions.unwrap_or_default(),
                 });
                 let mut u = file.users.iter().find(|u| u.name == name).unwrap().clone();
                 self.write_users(&file)?;
@@ -984,6 +986,7 @@ impl AgentCore {
                 roles,
                 features,
                 compose_policy,
+                restrictions,
             } => {
                 let u = file
                     .users
@@ -998,6 +1001,9 @@ impl AgentCore {
                 }
                 if let Some(cp) = compose_policy {
                     u.compose_policy = cp;
+                }
+                if let Some(r) = restrictions {
+                    u.restrictions = r;
                 }
                 let mut u = u.clone();
                 self.write_users(&file)?;
@@ -1325,9 +1331,7 @@ impl AgentCore {
                 // caller's own policy (put_compose applies this server-side)
                 // in addition to the configured floor.
                 if let Some(u) = &pre {
-                    if let Some(p) =
-                        crate::api::services::resolve_policy(&cfg, u.compose_policy.as_deref())
-                    {
+                    if let Some(p) = crate::api::services::effective_policy_for_user(&cfg, u) {
                         let violations =
                             crate::policy::validate_compose_in(&content, &p, base.as_deref());
                         if !violations.is_empty() {
@@ -1555,7 +1559,7 @@ impl AgentCore {
         user: &User,
     ) -> Result<()> {
         Self::require_feature(user, user.features.edit_compose, "edit_compose")?;
-        if let Some(p) = crate::api::services::resolve_policy(cfg, user.compose_policy.as_deref()) {
+        if let Some(p) = crate::api::services::effective_policy_for_user(cfg, user) {
             let violations = crate::policy::validate_compose_in(content, &p, Some(base_dir));
             if !violations.is_empty() {
                 let msg = violations
@@ -1715,7 +1719,7 @@ impl AgentCore {
         let cfg = self.cfg.get().await;
         // Defense in depth: re-check the verb's authorization against the
         // fresh, scope-applied user before any command is assembled.
-        let _authorized = self.precheck_exec(&cfg, &verb, token).await?;
+        let authorized = self.precheck_exec(&cfg, &verb, token).await?;
         let (tx, rx) = mpsc::channel::<ServerMessage>(256);
         let core = Arc::clone(self);
         tokio::spawn(async move {
@@ -1725,7 +1729,7 @@ impl AgentCore {
                     title: title.clone(),
                 })
                 .await;
-            let ok = match core.exec_inner(&verb, &cfg, &eid, &tx).await {
+            let ok = match core.exec_inner(&verb, &cfg, &eid, &tx, &authorized).await {
                 Ok(ok) => ok,
                 Err(e) => {
                     let _ = tx
@@ -1754,6 +1758,7 @@ impl AgentCore {
         cfg: &AppConfig,
         eid: &str,
         tx: &mpsc::Sender<ServerMessage>,
+        user: &User,
     ) -> Result<bool> {
         match verb {
             ExecVerb::Compose { service, op } => {
@@ -1884,9 +1889,23 @@ impl AgentCore {
                         crate::files::sanitize_clone(&svc.dir, &target);
                     }
                     // A clone into the service root may deliver a compose
-                    // file — enforce the policy floor on it.
+                    // file — enforce the caller's policy+restrictions and
+                    // the global floor on it.
                     if let Ok(compose) = std::fs::read_to_string(&svc.compose_path) {
                         let base = svc.compose_path.parent().map(|p| p.to_path_buf());
+                        if let Some(p) = crate::api::services::effective_policy_for_user(cfg, user)
+                        {
+                            let violations =
+                                crate::policy::validate_compose_in(&compose, &p, base.as_deref());
+                            if !violations.is_empty() {
+                                let msg = violations
+                                    .iter()
+                                    .map(|v| format!("{}: {}", v.path, v.message))
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                bail!("compose policy violations: {msg}");
+                            }
+                        }
                         self.enforce_policy_floor(cfg, &compose, base.as_deref())?;
                     }
                 }
@@ -1972,6 +1991,19 @@ impl AgentCore {
                 start,
             } => {
                 crate::compose::parse_check(compose)?;
+                // caller's per-user policy + restrictions, then the floor
+                if let Some(p) = crate::api::services::effective_policy_for_user(cfg, user) {
+                    let base = Path::new(&cfg.paths.services_root).join(name);
+                    let violations = crate::policy::validate_compose_in(compose, &p, Some(&base));
+                    if !violations.is_empty() {
+                        let msg = violations
+                            .iter()
+                            .map(|v| format!("{}: {}", v.path, v.message))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        bail!("compose policy violations: {msg}");
+                    }
+                }
                 // prospective service dir — relative binds resolve there
                 let base = Path::new(&cfg.paths.services_root).join(name);
                 self.enforce_policy_floor(cfg, compose, Some(&base))?;

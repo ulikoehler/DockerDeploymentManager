@@ -199,7 +199,21 @@ users:
       exec_containers: false   # docker exec inside the user's services' containers
       mount_files: false       # WebDAV (/dav) access to the service dirs
     compose_policy: strict
+    restrictions:                # hard ceiling, all denied by default;
+      deny_privileged: true      # set a flag to false to grant that
+      deny_host_namespaces: true # exception for this user only
+      deny_docker_socket: true
+      deny_devices: true
+      deny_root_user: true
+      deny_isolation_overrides: true
+      deny_cap_add: true
+      deny_sysctls: true
 ```
+
+`restrictions` applies to every non-admin user on top of `compose_policy`
+— even `unrestricted`. Omit the block to get the secure defaults shown
+above; set individual flags to `false` to allow that capability. Admins
+are exempt (see docs/SECURITY.md §4).
 
 Access rules are evaluated in order; first match wins. No match →
 `security.default_access`. Admins bypass access rules and feature flags.
