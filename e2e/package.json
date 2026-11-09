@@ -1,0 +1,12 @@
+{
+  "name": "ddm-e2e",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end UI tests for DDM (requires puppeteer-core + a Chrome/Chromium binary)",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^24.0.0"
+  }
+}

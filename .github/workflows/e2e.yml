@@ -1,0 +1,119 @@
+name: e2e
+
+# Full UI end-to-end suite (e2e/): boots a real ddm-server on the runner,
+# drives the embedded web UI with headless Chrome through every panel,
+# and verifies results via the API. Requires Docker (service lifecycle
+# tests create real containers) and restic (backup tests).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'web/**'
+      - 'e2e/**'
+      - '.github/workflows/e2e.yml'
+  workflow_dispatch:
+
+jobs:
+  ui-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DDM_PORT: '18090'
+      DDM_JWT_SECRET: ci-e2e-secret-not-for-production
+      DDM_URL: http://localhost:18090
+      DDM_USER: admin
+      DDM_PASS: ci-admin-pass
+      E2E_SVC: e2e-svc
+      CHROME_PATH: /usr/bin/google-chrome
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # embedded UI must be built before the backend compiles it in
+      - name: Build web UI
+        working-directory: web
+        run: npm ci && npm run build
+
+      - name: Build ddm-server
+        run: cargo build -p ddm-server
+
+      - name: Install restic (backup tests need it)
+        run: |
+          RESTIC_VER=0.18.0
+          curl -fsSL "https://github.com/restic/restic/releases/download/v${RESTIC_VER}/restic_${RESTIC_VER}_linux_amd64.bz2" \
+            | bunzip2 > /tmp/restic
+          sudo install -m755 /tmp/restic /usr/local/bin/restic
+          restic version
+
+      - name: Prepare test config
+        run: |
+          mkdir -p /tmp/ddm-e2e/services /tmp/ddm-e2e/systemd /tmp/ddm-e2e/backups
+          cat > /tmp/ddm-e2e/config.yaml <<'EOF'
+          server:
+            listen: 127.0.0.1:18090
+            jwt_secret_env: DDM_JWT_SECRET
+            token_ttl_minutes: 60
+          paths:
+            services_root: /tmp/ddm-e2e/services
+            compose_file: docker-compose.yml
+            host_systemd_dir: /tmp/ddm-e2e/systemd
+            host_exec: local
+          docker:
+            socket: /var/run/docker.sock
+            compose_command: [docker, compose]
+          logging:
+            default_tail: 200
+            max_tail: 5000
+          backup:
+            enabled: true
+            repository_base: /tmp/ddm-e2e/backups
+          users_file: users.yaml
+          sections:
+            - title: e2e
+              items:
+                - title: hello
+                  command_sequence:
+                    - program: echo
+                      args:
+                        - type: value
+                          value: e2e-command-ok
+          EOF
+          ./target/debug/ddm-server --config /tmp/ddm-e2e/config.yaml user add admin --role admin --password "$DDM_PASS"
+
+      - name: Start ddm-server
+        run: |
+          ./target/debug/ddm-server --config /tmp/ddm-e2e/config.yaml > /tmp/ddm-e2e/server.log 2>&1 &
+          echo $! > /tmp/ddm-e2e/pid
+          for i in $(seq 1 60); do
+            curl -fsS "http://localhost:${DDM_PORT}/api/health" && exit 0
+            sleep 1
+          done
+          echo "ddm-server did not become healthy"; cat /tmp/ddm-e2e/server.log; exit 1
+
+      - name: Install e2e deps
+        working-directory: e2e
+        run: npm ci
+
+      - name: Run UI e2e suite
+        working-directory: e2e
+        run: node run.mjs
+
+      - name: Dump server log on failure
+        if: failure()
+        run: tail -200 /tmp/ddm-e2e/server.log || true
+
+      - name: Cleanup scratch resources
+        if: always()
+        run: |
+          docker ps -a --filter 'name=e2e-' -q | xargs -r docker rm -f || true
+          rm -rf /tmp/ddm-e2e/services/e2e-svc /tmp/ddm-e2e/services/e2e-tmp-svc || true
