@@ -1,0 +1,31 @@
+# ddm config — bare-metal install. Copy to /etc/ddm/config.yaml.
+# Unlike the container deploy, host paths are used directly and
+# host_exec is `local` (no nsenter needed).
+server:
+  listen: 0.0.0.0:8080
+  jwt_secret_env: DDM_JWT_SECRET   # set in /etc/ddm/ddm.env
+  token_ttl_minutes: 720
+  # web_dir omitted: the UI is embedded in the binary
+
+paths:
+  services_root: /opt/services
+  compose_file: docker-compose.yml
+  host_systemd_dir: /etc/systemd/system   # bare metal: write units directly
+  host_exec: local                        # no container → no nsenter
+  # nsenter_target: 1                     # only for host_exec: nsenter
+
+docker:
+  socket: /var/run/docker.sock
+  compose_command: [docker, compose]
+
+webdav:                          # file surface at /dav (see docs/API.md)
+  enabled: false                 # off by default: a second write path into the service dirs
+  max_upload_bytes: 536870912    # largest single PUT
+  lock_timeout_secs: 3600        # ceiling for LOCK timeouts (advisory locks)
+
+logging:
+  default_tail: 200
+  max_tail: 5000
+  history_executions: 200
+
+users_file: users.yaml           # relative to this file's directory → /etc/ddm/users.yaml
