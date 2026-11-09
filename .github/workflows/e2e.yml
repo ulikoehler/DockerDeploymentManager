@@ -92,7 +92,7 @@ jobs:
 
       - name: Start ddm-server
         run: |
-          ./target/debug/ddm-server --config /tmp/ddm-e2e/config.yaml > /tmp/ddm-e2e/server.log 2>&1 &
+          ./target/debug/ddm-server --config /tmp/ddm-e2e/config.yaml serve > /tmp/ddm-e2e/server.log 2>&1 &
           echo $! > /tmp/ddm-e2e/pid
           for i in $(seq 1 60); do
             curl -fsS "http://localhost:${DDM_PORT}/api/health" && exit 0
