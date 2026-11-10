@@ -84,6 +84,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/api/services/:name/git/status", get(files::git_status))
         .route("/api/services/:name/git/log", get(files::git_log))
         .route("/api/services/:name/git/branches", get(files::git_branches))
+        .route("/api/services/:name/git/diff", get(files::git_diff))
         .route("/api/services/:name/git/clone", post(files::git_clone))
         .route("/api/services/:name/git/action", post(files::git_action))
         // backup

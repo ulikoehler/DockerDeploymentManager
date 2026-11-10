@@ -177,6 +177,11 @@ pub enum SyncVerb {
         service: String,
         path: String,
     },
+    /// Working-tree diff vs HEAD (bounded unified diff text).
+    GitDiff {
+        service: String,
+        path: String,
+    },
     ProjectContainers {
         service: String,
     },
@@ -529,6 +534,11 @@ pub struct TokenRecord {
     pub actions: Option<Vec<String>>,
     #[serde(default)]
     pub revoked: bool,
+    /// "session" (login JWT) or "token" (minted for agents/scopes).
+    /// Records written before this field existed deserialize as "" —
+    /// treat empty as "token".
+    #[serde(default)]
+    pub kind: String,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

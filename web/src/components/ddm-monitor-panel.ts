@@ -9,6 +9,7 @@ import {
   apiDeleteNotifier,
 } from '../api';
 import { sharedStyles } from '../styles';
+import { ddmConfirm } from '../dialog';
 
 const NOTIFIER_TYPES = ['slack_webhook', 'telegram', 'email', 'webhook'] as const;
 type NotifierType = (typeof NOTIFIER_TYPES)[number];
@@ -143,7 +144,7 @@ export class DdmMonitorPanel extends LitElement {
   }
 
   private async removeNotifier(id: string) {
-    if (!confirm(`Delete notifier '${id}'?`)) return;
+    if (!(await ddmConfirm(`Delete notifier '${id}'?`, { danger: true }))) return;
     try {
       await apiDeleteNotifier(id);
       this.msg = 'deleted';

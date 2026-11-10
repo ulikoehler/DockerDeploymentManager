@@ -147,9 +147,8 @@ export default async function (h) {
         return true;
       }, secTitle);
       if (del) {
-        ctx.expectDialog(true);
         await sleep(400);
-        // confirm() may have already fired on click — dialog handler accepts
+        await h.answerDialog(); // styled confirm dialog
       }
       await sleep(1200);
       const after = await h.api('/api/commands/sections');

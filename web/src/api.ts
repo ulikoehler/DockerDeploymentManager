@@ -158,6 +158,8 @@ export const apiGitLog = (name: string, path = '', n = 30) =>
   api(`/api/services/${name}/git/log`, { query: { path, n } });
 export const apiGitBranches = (name: string, path = '') =>
   api(`/api/services/${name}/git/branches`, { query: { path } });
+export const apiGitDiff = (name: string, path = '') =>
+  api(`/api/services/${name}/git/diff`, { query: { path } });
 export const apiGitClone = (name: string, url: string, path = '', branch?: string) =>
   api(`/api/services/${name}/git/clone`, { method: 'POST', body: { url, path, branch } });
 export const apiGitAction = (name: string, path: string, op: string, gitRef?: string) =>

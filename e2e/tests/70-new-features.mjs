@@ -58,8 +58,8 @@ export default async function (h) {
   ) || (tokList.data || []).find((t) => !t.revoked && t.exp * 1000 > Date.now());
   ctx.check('tokens: minted token listed', !!rec, `count=${(tokList.data || []).length}`);
   const tokTxt = await h.compText('ddm-token');
-  ctx.check('tokens: issued-tokens table rendered',
-    /issued tokens/i.test(tokTxt || '') && /active|expired|revoked/i.test(tokTxt || ''), '');
+  ctx.check('tokens: sessions & tokens table rendered',
+    /sessions & tokens/i.test(tokTxt || '') && /active|expired|revoked/i.test(tokTxt || ''), '');
   if (rec) {
     // revoke through the UI button on the row scoped to our scratch service
     const clicked = await page.evaluate(() => {

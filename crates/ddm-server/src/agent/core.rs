@@ -149,6 +149,18 @@ impl TokenBook {
         self.records.iter().any(|r| r.jti == jti && r.revoked)
     }
 
+    /// Drop records that can never be useful again: expired and not
+    /// revoked, or revoked longer than the display retention window.
+    fn prune(&mut self, now: chrono::DateTime<chrono::Utc>) {
+        self.records.retain(|r| {
+            r.exp.with_timezone(&chrono::Utc) > now
+                || (r.revoked
+                    && r.revoked_at
+                        .map(|t| now - t.with_timezone(&chrono::Utc) < chrono::Duration::days(30))
+                        .unwrap_or(false))
+        });
+    }
+
     fn save(&self) -> Result<()> {
         if self.path.as_os_str().is_empty() {
             return Ok(());
@@ -516,6 +528,7 @@ impl AgentCore {
             | SyncVerb::GitStatus { service, .. }
             | SyncVerb::GitLog { service, .. }
             | SyncVerb::GitBranches { service, .. }
+            | SyncVerb::GitDiff { service, .. }
             | SyncVerb::ProjectContainers { service }
             | SyncVerb::UnitFileRead { service }
             | SyncVerb::UnitCheck { service }
@@ -957,8 +970,38 @@ impl AgentCore {
         let mut user = user.unwrap().clone();
         let cfg = self.cfg.get().await;
         let ttl = cfg.server.token_ttl_minutes.max(1) * 60;
-        let token = self.jwt.issue(&user, ttl, None)?;
+        let jti = uuid::Uuid::new_v4().to_string();
+        let token = self.jwt.issue_claims(
+            &user.name,
+            user.roles.clone(),
+            ttl,
+            None,
+            user.token_version,
+            Some(jti.clone()),
+        )?;
         let claims = self.jwt.verify(&token).unwrap();
+        // Register the session so it appears in the token list and can be
+        // revoked individually (sign-out) — revocation is enforced in
+        // token_user on every subsequent request.
+        {
+            let mut book = self.tokens.lock().unwrap();
+            let now = chrono::Utc::now();
+            book.prune(now);
+            book.records.push(TokenRecord {
+                jti,
+                user: user.name.clone(),
+                iat: chrono::DateTime::from_timestamp(claims.iat, 0).unwrap_or(now),
+                exp: chrono::DateTime::from_timestamp(claims.exp, 0).unwrap_or(now),
+                services: None,
+                actions: None,
+                revoked: false,
+                kind: "session".into(),
+                revoked_at: None,
+            });
+            if let Err(e) = book.save() {
+                tracing::error!("token registry write failed: {e}");
+            }
+        }
         self.justify(&claims, "authenticate", name);
         // Never let the hash cross into the unprivileged process.
         user.password_hash.clear();
@@ -1031,18 +1074,17 @@ impl AgentCore {
         // Register the minted token so it can be listed and revoked.
         {
             let mut book = self.tokens.lock().unwrap();
-            book.records
-                .retain(|r| r.exp > chrono::Utc::now() || !r.revoked);
+            let now = chrono::Utc::now();
+            book.prune(now);
             book.records.push(TokenRecord {
                 jti: jti.clone(),
                 user: parent_claims.sub.clone(),
-                iat: chrono::DateTime::from_timestamp(claims.iat, 0)
-                    .unwrap_or_else(chrono::Utc::now),
-                exp: chrono::DateTime::from_timestamp(claims.exp, 0)
-                    .unwrap_or_else(chrono::Utc::now),
+                iat: chrono::DateTime::from_timestamp(claims.iat, 0).unwrap_or(now),
+                exp: chrono::DateTime::from_timestamp(claims.exp, 0).unwrap_or(now),
                 services: scope.as_ref().and_then(|s| s.services.clone()),
                 actions: scope.as_ref().and_then(|s| s.actions.clone()),
                 revoked: false,
+                kind: "token".into(),
                 revoked_at: None,
             });
             if let Err(e) = book.save() {
@@ -1313,6 +1355,12 @@ impl AgentCore {
                 let svc = svc_ops::get_service(&cfg, &service)?;
                 let repo = crate::gitops::resolve_repo(&svc.dir, &path)?;
                 Ok(serde_json::to_value(crate::gitops::branches(&repo).await?)?)
+            }
+            SyncVerb::GitDiff { service, path } => {
+                self.justify_token(token, "git_diff", &format!("{service}:{path}"))?;
+                let svc = svc_ops::get_service(&cfg, &service)?;
+                let repo = crate::gitops::resolve_repo(&svc.dir, &path)?;
+                Ok(serde_json::json!({ "diff": crate::gitops::diff(&repo).await? }))
             }
             SyncVerb::ProjectContainers { service } => {
                 self.justify_token(token, "project_containers", &service)?;

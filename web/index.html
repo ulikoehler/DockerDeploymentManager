@@ -4,6 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DDM — Docker Deployment Manager</title>
+  <script>
+    // Apply the persisted theme before first paint to avoid a flash.
+    if (localStorage.getItem('ddm:theme') === 'light') {
+      document.documentElement.dataset.theme = 'light';
+    }
+  </script>
   <script type="module" src="/bundle.js"></script>
   <style>
     html, body { margin: 0; padding: 0; min-height: 100%; }
@@ -19,16 +25,24 @@
         linear-gradient(180deg, #090d13 0%, #0c1118 100%);
       background-attachment: fixed;
     }
+    html[data-theme="light"] body {
+      color: #1f2733;
+      background:
+        radial-gradient(1200px 800px at 12% -10%, rgba(59, 100, 246, 0.14), transparent 60%),
+        radial-gradient(900px 700px at 88% 8%, rgba(148, 80, 246, 0.12), transparent 60%),
+        radial-gradient(1100px 900px at 50% 115%, rgba(23, 162, 200, 0.12), transparent 60%),
+        linear-gradient(180deg, #eef1f7 0%, #e3e8f2 100%);
+    }
     ::selection { background: rgba(124, 156, 255, 0.35); }
     /* slim glass-adjacent scrollbars */
     *::-webkit-scrollbar { width: 10px; height: 10px; }
     *::-webkit-scrollbar-thumb {
-      background: rgba(255, 255, 255, 0.12);
+      background: rgba(120, 130, 150, 0.35);
       border-radius: 999px;
       border: 2px solid transparent;
       background-clip: padding-box;
     }
-    *::-webkit-scrollbar-thumb:hover { background-color: rgba(255,255,255,0.22); }
+    *::-webkit-scrollbar-thumb:hover { background-color: rgba(120, 130, 150, 0.55); }
     *::-webkit-scrollbar-corner, *::-webkit-scrollbar-track { background: transparent; }
   </style>
 </head>

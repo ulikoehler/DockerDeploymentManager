@@ -391,6 +391,27 @@ pub async fn git_branches(
     Ok(ok(br))
 }
 
+pub async fn git_diff(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<PathQuery>,
+) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
+    let svc = require_service_access(&state, &user, &name).await?;
+    let v: serde_json::Value = state
+        .agent
+        .call_as(
+            crate::agent::proto::SyncVerb::GitDiff {
+                service: svc.name.clone(),
+                path: q.path.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(ok(v))
+}
+
 #[derive(Deserialize)]
 pub struct CloneRequest {
     pub url: String,

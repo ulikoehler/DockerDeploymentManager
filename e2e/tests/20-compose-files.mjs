@@ -109,8 +109,7 @@ export default async function (h) {
   f = await h.api(`/api/services/${svc}/files?path=e2e_dir`);
   ctx.check('files: mkdir', r.ok === true && f.status === 200 && f.data?.kind === 'Dir', `kind=${f.data?.kind}`);
 
-  // rename e2e_ui.txt -> e2e_renamed.txt (prompt dialog)
-  h.ctx.expectDialog('e2e_renamed.txt');
+  // rename e2e_ui.txt -> e2e_renamed.txt (styled prompt dialog)
   r = await page.evaluate(async () => {
     const ff = window.__deep('ddm-files');
     const rows = [...ff.shadowRoot.querySelectorAll('tr')];
@@ -121,13 +120,13 @@ export default async function (h) {
     await new Promise(r => setTimeout(r, 1500));
     return { ok: true };
   });
-  await sleep(600);
+  await h.answerDialog('e2e_renamed.txt');
+  await sleep(800);
   const fNew = await h.api(`/api/services/${svc}/files?path=e2e_renamed.txt`);
   const fOld = await h.api(`/api/services/${svc}/files?path=e2e_ui.txt`);
   ctx.check('files: rename via prompt', r.ok === true && fNew.status === 200 && fOld.status !== 200, `new=${fNew.status} old=${fOld.status}`);
 
-  // delete e2e_renamed.txt (confirm dialog)
-  h.ctx.expectDialog();
+  // delete e2e_renamed.txt (styled confirm dialog)
   r = await page.evaluate(async () => {
     const ff = window.__deep('ddm-files');
     const rows = [...ff.shadowRoot.querySelectorAll('tr')];
@@ -138,7 +137,8 @@ export default async function (h) {
     await new Promise(r => setTimeout(r, 1500));
     return { ok: true };
   });
-  await sleep(600);
+  await h.answerDialog();
+  await sleep(800);
   const fDel = await h.api(`/api/services/${svc}/files?path=e2e_renamed.txt`);
   ctx.check('files: delete via confirm', r.ok === true && fDel.status !== 200, `status=${fDel.status}`);
 

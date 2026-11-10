@@ -95,6 +95,20 @@ export async function launch() {
     async clickText(txt) { return page.evaluate((t) => window.__clickText(t), txt); },
     async clickIn(comp, txt) { return page.evaluate((c, t) => window.__clickIn(c, t), comp, txt); },
     async compText(comp) { return page.evaluate((c) => window.__compText(c), comp); },
+    /** Answer the app's styled dialog (ddm-dialog-root). Pass a string to
+     *  fill the prompt input; omit for a plain confirm. */
+    async answerDialog(value) {
+      return page.evaluate((v) => {
+        const root = document.getElementById('ddm-dialog-root');
+        if (!root) return 'no-dialog';
+        const input = root.querySelector('input');
+        if (input && v !== undefined && v !== null) input.value = v;
+        const ok = [...root.querySelectorAll('button')].find(b => !/cancel/i.test(b.textContent));
+        if (!ok) return 'no-ok';
+        ok.click();
+        return 'answered';
+      }, value);
+    },
     async api(path, opts = {}) {
       return page.evaluate(async (p, o) => {
         const tok = sessionStorage.getItem('ddm_token');

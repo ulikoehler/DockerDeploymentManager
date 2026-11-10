@@ -74,7 +74,6 @@ export default async function (h) {
     ctx.check('monitor: test button runs (graceful on unreachable)', r.ok === true, (r.msg || '').slice(0, 100));
 
     // delete
-    h.ctx.expectDialog();
     r = await page.evaluate(async () => {
       const mp = window.__deep('ddm-monitor-panel');
       const rows = [...mp.shadowRoot.querySelectorAll('tr')];
@@ -82,9 +81,10 @@ export default async function (h) {
       const del = row && [...row.querySelectorAll('button')].find(b => b.textContent.trim() === 'delete');
       if (!del) return { err: 'no delete btn' };
       del.click();
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 800));
       return { ok: true };
     });
+    await h.answerDialog();
     await sleep(800);
     nots = await h.api('/api/monitoring/notifiers');
     ctx.check('monitor: delete notifier', r.ok === true && !JSON.stringify(nots.data).includes('e2e-hook'), '');
@@ -236,8 +236,7 @@ export default async function (h) {
     users = await h.api('/api/users');
     ctx.check('users: access rules save', r.ok === true && JSON.stringify(users.data).includes('deny'), '');
 
-    // password change via prompt
-    h.ctx.expectDialog('E2eNewPass456!');
+    // password change via styled prompt
     r = await page.evaluate(async (n) => {
       const uu = window.__deep('ddm-users');
       const rows = [...uu.shadowRoot.querySelectorAll('tr')];
@@ -245,17 +244,18 @@ export default async function (h) {
       const btn = row && [...row.querySelectorAll('button')].find(b => b.textContent.trim() === 'pw');
       if (!btn) return { err: 'no pw btn' };
       btn.click();
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 800));
       return { ok: true, msg: uu.shadowRoot.textContent.slice(0, 200) };
     }, uname);
+    await h.answerDialog('E2eNewPass456!');
+    await sleep(800);
     const loginNew = await page.evaluate(async (n) => {
       const resp = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: n, password: 'E2eNewPass456!' }) });
       return resp.status;
     }, uname);
     ctx.check('users: password change via prompt', r.ok === true && loginNew === 200, `login=${loginNew}`);
 
-    // delete via × (confirm dialog)
-    h.ctx.expectDialog();
+    // delete via × (styled confirm dialog)
     r = await page.evaluate(async (n) => {
       const uu = window.__deep('ddm-users');
       const rows = [...uu.shadowRoot.querySelectorAll('tr')];
@@ -263,9 +263,10 @@ export default async function (h) {
       const btn = row && [...row.querySelectorAll('button')].find(b => b.textContent.trim() === '×');
       if (!btn) return { err: 'no delete btn' };
       btn.click();
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 800));
       return { ok: true };
     }, uname);
+    await h.answerDialog();
     await sleep(800);
     users = await h.api('/api/users');
     ctx.check('users: delete via ×', r.ok === true && !JSON.stringify(users.data).includes(uname), '');

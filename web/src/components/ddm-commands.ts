@@ -4,6 +4,7 @@ import {
   apiCommands, apiRunCommand, apiSectionsRaw, apiSectionsMut, apiMe, wsUrl,
 } from '../api';
 import { sharedStyles } from '../styles';
+import { ddmConfirm } from '../dialog';
 
 const ARG_TYPES = ['value', 'variable', 'optional', 'conditional'];
 const PARAM_TYPES = ['string', 'boolean', 'number'];
@@ -84,7 +85,7 @@ export class DdmCommands extends LitElement {
   }
 
   private async deleteSection(i: number) {
-    if (!confirm(`delete section "${this.drafts?.[i]?.title}" and all its items?`)) return;
+    if (!(await ddmConfirm(`delete section "${this.drafts?.[i]?.title}" and all its items?`, { danger: true }))) return;
     try {
       await apiSectionsMut({ op: 'delete', index: i });
       await this.reload();
@@ -176,9 +177,9 @@ export class DdmCommands extends LitElement {
     this.output = `item "${item.title}" staged — save the section to persist`;
   }
 
-  private deleteItem(si: number, ii: number) {
+  private async deleteItem(si: number, ii: number) {
     const it = this.drafts![si].items[ii];
-    if (!confirm(`delete item "${it.title}"?`)) return;
+    if (!(await ddmConfirm(`delete item "${it.title}"?`, { danger: true }))) return;
     this.drafts![si].items.splice(ii, 1);
     this.output = `item "${it.title}" removed — save the section to persist`;
   }

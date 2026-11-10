@@ -49,15 +49,16 @@ export default async function (h) {
 
   // restore first snapshot to /tmp (prompt for target)
   if (Array.isArray(snaps.data) && snaps.data.length > 0) {
-    h.ctx.expectDialog('/tmp/e2e-restore');
     r = await page.evaluate(async () => {
       const bp = window.__deep('ddm-backup-panel');
       const btn = [...bp.shadowRoot.querySelectorAll('button')].find(b => b.textContent.trim() === 'restore');
       if (!btn) return { err: 'no restore btn' };
       btn.click();
-      await new Promise(r => setTimeout(r, 4000));
+      await new Promise(r => setTimeout(r, 1500));
       return { ok: true, msg: bp.shadowRoot.textContent.slice(0, 300) };
     });
+    await h.answerDialog('/tmp/e2e-restore');
+    await sleep(1500);
     ctx.check('backup: restore button', r.ok === true, (r.msg || r.err || '').slice(0, 100));
   }
 
@@ -65,7 +66,9 @@ export default async function (h) {
   const fg = await page.evaluate(async () => {
     const bp = window.__deep('ddm-backup-panel');
     const b = [...bp.shadowRoot.querySelectorAll('button')].find(x => x.textContent.includes('forget'));
-    if (b) { b.click(); await new Promise(r => setTimeout(r, 5000)); return true; } return false;
+    if (b) { b.click(); await new Promise(r => setTimeout(r, 800)); return true; } return false;
   });
+  await h.answerDialog(); // styled confirm for forget --prune
+  await sleep(4200);
   ctx.check('backup: forget --prune button', fg === true);
 }

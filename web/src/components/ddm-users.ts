@@ -5,6 +5,7 @@ import {
   apiUpdateUser, apiUserEffective, apiLogoutAll, apiMe, UserView,
 } from '../api';
 import { sharedStyles } from '../styles';
+import { ddmConfirm, ddmPrompt } from '../dialog';
 
 const FEATURE_LABELS: Record<string, string> = {
   create_services: 'create services',
@@ -51,7 +52,7 @@ export class DdmUsers extends LitElement {
   }
 
   private async logoutAll() {
-    if (!confirm('invalidate ALL sessions and minted tokens? everyone must log in again')) return;
+    if (!(await ddmConfirm('invalidate ALL sessions and minted tokens? everyone must log in again', { danger: true, title: 'Logout everywhere' }))) return;
     try {
       await apiLogoutAll();
       this.msg = 'all sessions invalidated';
@@ -77,7 +78,7 @@ export class DdmUsers extends LitElement {
   }
 
   private async removeUser(name: string) {
-    if (!confirm(`delete user ${name}?`)) return;
+    if (!(await ddmConfirm(`delete user ${name}?`, { danger: true }))) return;
     await apiDeleteUser(name).catch((e) => (this.msg = e.message));
     if (this.selected === name) this.selected = '';
     this.refresh();
@@ -90,11 +91,11 @@ export class DdmUsers extends LitElement {
     const isSelf = me?.name === name;
     const needsCurrent = isSelf && !(me?.roles ?? []).includes('admin');
     const current = needsCurrent
-      ? prompt(`current password for ${name}`)
+      ? await ddmPrompt(`current password for ${name}`, '', { title: 'Confirm identity' })
       : null;
-    if (needsCurrent && !current) return;
-    const password = prompt(`new password for ${name} (min 8 chars)`);
-    if (!password) return;
+    if (needsCurrent && (current === null || !current)) return;
+    const password = await ddmPrompt(`new password for ${name} (min 8 chars)`, '', { title: 'Set password' });
+    if (password === null || !password) return;
     try {
       await apiSetPassword(name, password, current ?? undefined);
       this.msg = 'password updated';

@@ -5,6 +5,7 @@ import {
   apiPutMonitoring,
   apiNotifiers,
   apiMonitoringTest,
+  apiMonitorEvents,
 } from '../api';
 import { sharedStyles } from '../styles';
 import './ddm-code-editor';
@@ -45,13 +46,23 @@ export class DdmServiceMonitoring extends LitElement {
   @state() private fActionsJson = '';
   // log alerts stay JSON (advanced) — validated on save
   @state() private fLogAlertsJson = '[]';
+  @state() private events: any[] = [];
 
   connectedCallback() {
     super.connectedCallback();
     this.load();
+    this.loadEvents();
     apiNotifiers()
       .then((n: any) => (this.notifiers = n ?? []))
       .catch(() => {});
+  }
+
+  private async loadEvents() {
+    try {
+      this.events = await apiMonitorEvents(this.name, 10);
+    } catch {
+      this.events = [];
+    }
   }
 
   private async load() {
@@ -168,6 +179,19 @@ export class DdmServiceMonitoring extends LitElement {
                 </tr>`,
               )}</tbody></table>`
           : html`<p class="muted">no active checks</p>`}
+        <h3 style="margin-top:.8em">Recent events</h3>
+        ${this.events.length
+          ? html`<table><thead><tr><th>time</th><th>kind</th><th>rule</th><th>state</th><th>message</th></tr></thead>
+              <tbody>${this.events.map(
+                (e: any) => html`<tr>
+                  <td class="muted">${new Date(e.at).toLocaleString()}</td>
+                  <td class="muted">${e.kind}</td>
+                  <td class="muted">${e.rule}</td>
+                  <td><span class="badge ${e.state === 'resolved' ? 'ok' : 'err'}">${e.state}</span></td>
+                  <td>${e.message}</td>
+                </tr>`,
+              )}</tbody></table>`
+          : html`<p class="muted">no events for this service</p>`}
         ${this.msg ? html`<p class="muted">${this.msg}</p>` : ''}
       </div>
 
@@ -216,10 +240,9 @@ export class DdmServiceMonitoring extends LitElement {
           </div>
           <details style="margin-top:.5em">
             <summary class="muted">advanced: auto-actions (JSON)</summary>
-            <textarea rows="3" style="width:100%;font-family:ui-monospace,monospace"
+            <ddm-code-editor .value=${this.fActionsJson} lang="json" height="8rem"
               placeholder='[{"type":"restart"}] or [{"type":"stop"}]'
-              .value=${this.fActionsJson}
-              @input=${(e: any) => (this.fActionsJson = e.target.value)}></textarea>
+              @change=${(e: any) => (this.fActionsJson = e.detail.value)}></ddm-code-editor>
           </details>
         </div>
 

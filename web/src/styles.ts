@@ -187,4 +187,59 @@ export const sharedStyles = css`
   .log-stderr { color: #fca5a5; }
 
   hr { border: 0; border-top: 1px solid rgba(255, 255, 255, 0.07); margin: 1em 0; }
+
+  /* — light theme (html[data-theme="light"]) — */
+  :host-context([data-theme="light"]) {
+    color: #1f2733;
+    --glass-bg: rgba(255, 255, 255, 0.62);
+    --glass-bg-deep: rgba(255, 255, 255, 0.78);
+    --glass-border: rgba(15, 23, 42, 0.12);
+    --glass-hi: rgba(255, 255, 255, 0.7);
+    --ring: rgba(37, 99, 235, 0.25);
+    --link: #1d4ed8;
+    --text-dim: #5b6472;
+  }
+  :host-context([data-theme="light"]) input,
+  :host-context([data-theme="light"]) select,
+  :host-context([data-theme="light"]) textarea {
+    background: rgba(255, 255, 255, 0.8);
+    color: #1f2733;
+    border-color: rgba(15, 23, 42, 0.16);
+    box-shadow: inset 0 1px 3px rgba(15, 23, 42, 0.06);
+  }
+  :host-context([data-theme="light"]) input:focus,
+  :host-context([data-theme="light"]) select:focus,
+  :host-context([data-theme="light"]) textarea:focus {
+    background: #fff;
+  }
+  :host-context([data-theme="light"]) input::placeholder,
+  :host-context([data-theme="light"]) textarea::placeholder { color: #8a93a3; }
+  :host-context([data-theme="light"]) option { background: #fff; color: #1f2733; }
+  :host-context([data-theme="light"]) button.secondary {
+    background: rgba(15, 23, 42, 0.06);
+    border-color: rgba(15, 23, 42, 0.14);
+    color: #1f2733;
+    box-shadow: none;
+  }
+  :host-context([data-theme="light"]) button.secondary:hover { background: rgba(15, 23, 42, 0.1); }
+  :host-context([data-theme="light"]) th, :host-context([data-theme="light"]) td {
+    border-bottom-color: rgba(15, 23, 42, 0.08);
+  }
+  :host-context([data-theme="light"]) tbody tr:hover { background: rgba(15, 23, 42, 0.04); }
+  :host-context([data-theme="light"]) .badge.ok   { color: #15803d; }
+  :host-context([data-theme="light"]) .badge.warn { color: #b45309; }
+  :host-context([data-theme="light"]) .badge.err  { color: #b91c1c; }
+  :host-context([data-theme="light"]) .badge.muted{ color: #5b6472; }
+  :host-context([data-theme="light"]) .error { color: #b91c1c; }
+  :host-context([data-theme="light"]) .ok-text { color: #15803d; }
+  :host-context([data-theme="light"]) .log-stderr { color: #b91c1c; }
+  :host-context([data-theme="light"]) code {
+    background: rgba(15, 23, 42, 0.07);
+    border-color: rgba(15, 23, 42, 0.1);
+  }
+  :host-context([data-theme="light"]) pre {
+    border-color: rgba(15, 23, 42, 0.1);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  }
+  :host-context([data-theme="light"]) hr { border-top-color: rgba(15, 23, 42, 0.1); }
 `;

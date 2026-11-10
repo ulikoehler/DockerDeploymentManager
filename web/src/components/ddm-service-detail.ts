@@ -2,6 +2,7 @@ import { LitElement, html, css, PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiService, apiAction, apiCheckUnit, apiDeleteService, apiExecContainer, apiExecutions, apiBackupCheck, wsUrl } from '../api';
 import { sharedStyles } from '../styles';
+import { ddmConfirm } from '../dialog';
 import './ddm-log-viewer';
 import './ddm-compose-editor';
 import './ddm-unit-editor';
@@ -164,7 +165,7 @@ export class DdmServiceDetail extends LitElement {
   }
 
   private async removeService() {
-    if (!confirm(`Delete service ${this.name}? (containers will be stopped)`)) return;
+    if (!(await ddmConfirm(`Delete service ${this.name}? (containers will be stopped)`, { danger: true, title: 'Delete service' }))) return;
     try {
       await apiDeleteService(this.name, true);
       location.hash = '#/';

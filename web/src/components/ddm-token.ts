@@ -1,7 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import {
-  apiIssueToken, apiMe, apiServices, apiTokens, apiRevokeToken, ServiceSummary,
+  apiIssueToken, apiMe, apiServices, apiTokens, apiRevokeToken, getToken, ServiceSummary,
 } from '../api';
 import { sharedStyles } from '../styles';
 
@@ -46,6 +46,18 @@ export class DdmToken extends LitElement {
     this.loadTokens();
   }
 
+  /** jti of the current login session, decoded client-side — used only
+   *  to label "(this session)"; revocation stays server-enforced. */
+  private get myJti(): string {
+    try {
+      const t = getToken();
+      const payload = JSON.parse(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      return payload.jti ?? '';
+    } catch {
+      return '';
+    }
+  }
+
   private async loadTokens() {
     try {
       this.tokens = await apiTokens();
@@ -57,7 +69,7 @@ export class DdmToken extends LitElement {
   private async revoke(jti: string) {
     try {
       await apiRevokeToken(jti);
-      this.msg = 'token revoked';
+      this.msg = 'revoked';
       this.loadTokens();
     } catch (e: any) {
       this.msg = e.message;
@@ -210,19 +222,22 @@ export class DdmToken extends LitElement {
         : ''}
 
       <div class="card">
-        <h3>issued tokens</h3>
+        <h3>sessions &amp; tokens</h3>
         ${this.tokens.length
           ? html`<table><thead><tr>
-              <th>user</th><th>scope</th><th>issued</th><th>expires</th><th>state</th><th></th>
+              <th>kind</th><th>user</th><th>scope</th><th>issued</th><th>expires</th><th>state</th><th></th>
             </tr></thead>
-            <tbody>${this.tokens.map(
+            <tbody>${[...this.tokens]
+              .sort((a, b) => (a.kind === 'session' ? 0 : 1) - (b.kind === 'session' ? 0 : 1))
+              .map(
               (t) => html`<tr>
-                <td>${t.user}</td>
+                <td><span class="badge ${t.kind === 'session' ? 'muted' : ''}">${t.kind || 'token'}</span></td>
+                <td>${t.user}${t.jti === this.myJti ? html` <span class="muted">(this session)</span>` : ''}</td>
                 <td class="muted">${
                   [
                     t.services ? `svc: ${t.services.join(',')}` : '',
                     t.actions ? `act: ${t.actions.join(',')}` : '',
-                  ].filter(Boolean).join(' · ') || 'full'
+                  ].filter(Boolean).join(' · ') || (t.kind === 'session' ? 'login' : 'full')
                 }</td>
                 <td class="muted">${new Date(t.iat * 1000).toLocaleString()}</td>
                 <td class="muted">${new Date(t.exp * 1000).toLocaleString()}</td>
@@ -232,12 +247,12 @@ export class DdmToken extends LitElement {
                     ? html`<span class="badge">expired</span>`
                     : html`<span class="badge ok">active</span>`}</td>
                 <td>${!t.revoked && t.exp * 1000 > Date.now()
-                  ? html`<button class="small danger" @click=${() => this.revoke(t.jti)}>revoke</button>`
+                  ? html`<button class="small danger" @click=${() => this.revoke(t.jti)}>${t.kind === 'session' ? 'sign out' : 'revoke'}</button>`
                   : ''}</td>
               </tr>`,
             )}</tbody></table>`
-          : html`<p class="muted">no minted tokens — tokens you generate above appear here and can be revoked</p>`}
-        <p class="muted">your login session is not listed here; use "logout all" on the Users page to invalidate sessions</p>
+          : html`<p class="muted">nothing yet — login sessions and tokens you generate above appear here</p>`}
+        <p class="muted">admins see all users' sessions and tokens; other users see only their own. Revoking a session signs that browser out on its next request.</p>
       </div>
     `;
   }

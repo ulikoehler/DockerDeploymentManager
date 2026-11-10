@@ -169,6 +169,25 @@ pub async fn log(repo: &Path, n: usize) -> Result<Vec<String>> {
     Ok(out.lines().map(|l| l.to_string()).collect())
 }
 
+/// Unified diff of the working tree vs HEAD (tracked changes only —
+/// untracked files are listed by `status` but have no diff). Capped so a
+/// huge accidental diff can't produce an unbounded response.
+pub async fn diff(repo: &Path) -> Result<String> {
+    let out = git(repo, &["diff", "HEAD", "--no-color", "--no-ext-diff"]).await?;
+    const MAX: usize = 256 * 1024;
+    if out.len() <= MAX {
+        return Ok(out);
+    }
+    let mut end = MAX;
+    while !out.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(format!(
+        "{}\n… (diff truncated at {MAX} bytes)\n",
+        &out[..end]
+    ))
+}
+
 pub async fn branches(repo: &Path) -> Result<RepoBranches> {
     let out = git(repo, &["branch", "-a", "--format=%(refname:short)"]).await?;
     let mut local = vec![];

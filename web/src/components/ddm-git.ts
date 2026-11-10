@@ -1,13 +1,16 @@
 import { LitElement, html } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import {
   apiGitRepos,
   apiGitStatus,
   apiGitLog,
   apiGitBranches,
+  apiGitDiff,
   apiGitClone,
   apiGitAction,
 } from '../api';
+import { diffToHtml } from '../ansi';
 import { sharedStyles } from '../styles';
 
 @customElement('ddm-git')
@@ -22,6 +25,8 @@ export class DdmGit extends LitElement {
   @state() private clonePath = '';
   @state() private cloneBranch = '';
   @state() private showClone = false;
+  @state() private diff: string | null = null;
+  @state() private diffLoading = false;
 
   connectedCallback() {
     super.connectedCallback();
@@ -34,6 +39,7 @@ export class DdmGit extends LitElement {
   }
 
   private async select(path: string) {
+    this.diff = null;
     try {
       const [status, branches, log] = await Promise.all([
         apiGitStatus(this.name, path),
@@ -60,6 +66,18 @@ export class DdmGit extends LitElement {
     } catch (e: any) {
       this.msg = e.message;
     }
+  }
+
+  private async showDiff() {
+    this.diffLoading = true;
+    this.diff = null;
+    try {
+      const r: any = await apiGitDiff(this.name, this.selected.path);
+      this.diff = r?.diff ?? '';
+    } catch (e: any) {
+      this.msg = e.message;
+    }
+    this.diffLoading = false;
   }
 
   private async action(op: string, ref?: string) {
@@ -114,6 +132,8 @@ export class DdmGit extends LitElement {
               <span class="badge muted">${s.status.branch}</span>
               <button class="small" @click=${() => this.action('pull')}>pull</button>
               <button class="small secondary" @click=${() => this.action('fetch')}>fetch</button>
+              <button class="small secondary" ?disabled=${this.diffLoading}
+                @click=${this.showDiff}>${this.diffLoading ? 'loading…' : 'diff'}</button>
               <select @change=${(e: any) => e.target.value && this.action('checkout', e.target.value)}>
                 <option value="">switch branch…</option>
                 ${s.branches.local.map(
@@ -128,6 +148,12 @@ export class DdmGit extends LitElement {
             ${s.status.changes.length
               ? html`<pre>${s.status.changes.join('\n')}</pre>`
               : html`<p class="muted">working tree clean</p>`}
+            ${this.diff !== null
+              ? html`<h3>Diff <span class="muted">vs HEAD</span></h3>
+                  ${this.diff
+                    ? html`<pre class="log-view" style="max-height:30em">${unsafeHTML(diffToHtml(this.diff))}</pre>`
+                    : html`<p class="muted">no tracked changes</p>`}`
+              : ''}
             <h3>Log</h3>
             <pre>${s.log.join('\n')}</pre>
           </div>`

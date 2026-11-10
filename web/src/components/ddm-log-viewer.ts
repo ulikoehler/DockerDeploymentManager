@@ -1,6 +1,8 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { wsUrl, apiLogs } from '../api';
+import { ansiToHtml } from '../ansi';
 import { sharedStyles } from '../styles';
 
 interface Line { container: string; service: string; stream: string; text: string }
@@ -97,7 +99,7 @@ export class DdmLogViewer extends LitElement {
       </div>
       <pre class="log-view">${this.lines.map(
         (l) => html`<span class="${l.stream === 'stderr' ? 'log-stderr' : ''}"
-          ><span class="muted">[${l.service}]</span> ${l.text}</span>`,
+          ><span class="muted">[${l.service}]</span> ${unsafeHTML(ansiToHtml(l.text))}</span>`,
       )}</pre>
     `;
   }

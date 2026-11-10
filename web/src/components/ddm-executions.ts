@@ -1,6 +1,8 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { apiExecutions, apiExecution, wsUrl } from '../api';
+import { ansiToHtml } from '../ansi';
 import { sharedStyles } from '../styles';
 
 /** Execution history — every async action (service ops, backups, commands,
@@ -154,7 +156,9 @@ export class DdmExecutions extends LitElement {
             <h3>${this.selected.title}
               <span class="muted">${this.selected.id.slice(0, 8)} — ${this.fmt(this.selected.started_at)}
               ${this.selected.finished_at ? `→ ${this.fmt(this.selected.finished_at)}` : '→ running'}</span></h3>
-            <pre class="output log-view">${this.output || '(no output captured yet)'}</pre>
+            <pre class="output log-view">${this.output
+              ? unsafeHTML(ansiToHtml(this.output))
+              : '(no output captured yet)'}</pre>
           </div>`
         : ''}
     `;

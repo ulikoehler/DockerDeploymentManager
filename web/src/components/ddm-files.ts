@@ -12,6 +12,7 @@ import {
   apiWebdavStatus,
 } from '../api';
 import { sharedStyles } from '../styles';
+import { ddmConfirm, ddmPrompt } from '../dialog';
 import './ddm-code-editor';
 
 interface Entry {
@@ -107,7 +108,7 @@ export class DdmFiles extends LitElement {
   }
 
   private async del(path: string) {
-    if (!confirm(`Delete ${path}?`)) return;
+    if (!(await ddmConfirm(`Delete ${path}?`, { danger: true }))) return;
     try {
       await apiDeleteFile(this.name, path);
       this.browse(this.path);
@@ -117,8 +118,8 @@ export class DdmFiles extends LitElement {
   }
 
   private async mv(path: string) {
-    const to = prompt('Rename/move to (relative to service dir):', path);
-    if (!to || to === path) return;
+    const to = await ddmPrompt('Rename/move to (relative to service dir):', path);
+    if (to === null || !to || to === path) return;
     try {
       await apiRename(this.name, path, to);
       this.browse(this.path);

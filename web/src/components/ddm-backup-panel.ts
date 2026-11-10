@@ -6,6 +6,7 @@ import {
   apiBackupGlobalGet, apiBackupGlobalPut, apiMe,
 } from '../api';
 import { sharedStyles } from '../styles';
+import { ddmConfirm, ddmPrompt } from '../dialog';
 import './ddm-code-editor';
 
 @customElement('ddm-backup-panel')
@@ -79,7 +80,7 @@ export class DdmBackupPanel extends LitElement {
   }
 
   private async forget() {
-    if (!confirm('run restic forget --prune?')) return;
+    if (!(await ddmConfirm('run restic forget --prune?', { danger: true, title: 'Forget backups' }))) return;
     try {
       const r: any = await apiBackupForget(this.name);
       this.msg = r?.execution_id
@@ -92,8 +93,8 @@ export class DdmBackupPanel extends LitElement {
   }
 
   private async restore(snapshot: string) {
-    const target = prompt('restore target dir (absolute path on host):', '/tmp/restore-' + this.name);
-    if (!target) return;
+    const target = await ddmPrompt('restore target dir (absolute path on host):', '/tmp/restore-' + this.name, { title: 'Restore snapshot' });
+    if (target === null || !target) return;
     try {
       const r: any = await apiBackupRestore(this.name, snapshot, target);
       this.msg = r?.execution_id

@@ -11,7 +11,25 @@ export class DdmServiceList extends LitElement {
   @state() private error = '';
   @state() private query = '';
   @state() private filter = 'all';
+  @state() private favs = new Set<string>(this.loadFavs());
   private timer?: number;
+
+  private loadFavs(): Set<string> {
+    try {
+      return new Set(JSON.parse(localStorage.getItem('ddm:favs') ?? '[]'));
+    } catch {
+      return new Set();
+    }
+  }
+
+  private toggleFav(name: string, e: Event) {
+    e.preventDefault();
+    e.stopPropagation();
+    const s = new Set(this.favs);
+    if (s.has(name)) s.delete(name); else s.add(name);
+    this.favs = s;
+    localStorage.setItem('ddm:favs', JSON.stringify([...s]));
+  }
 
   connectedCallback() {
     super.connectedCallback();
@@ -43,7 +61,8 @@ export class DdmServiceList extends LitElement {
 
   private filtered(): ServiceSummary[] {
     const q = this.query.trim().toLowerCase();
-    return this.services.filter((s) => {
+    const rows = this.services.filter((s) => {
+      if (this.filter === 'favorites' && !this.favs.has(s.name)) return false;
       if (this.filter === 'running' && s.running === 0) return false;
       if (this.filter === 'down' && s.running >= s.total && s.total > 0) return false;
       if (this.filter === 'alerting' && s.monitor_state !== 'alerting') return false;
@@ -55,6 +74,10 @@ export class DdmServiceList extends LitElement {
         s.containers.some((c) => c.service.toLowerCase().includes(q))
       );
     });
+    // favorites pinned to the top, stable within each group
+    return [...rows].sort(
+      (a, b) => Number(this.favs.has(b.name)) - Number(this.favs.has(a.name)),
+    );
   }
 
   private unitBadge(s: ServiceSummary) {
@@ -88,6 +111,7 @@ export class DdmServiceList extends LitElement {
         <select .value=${this.filter}
           @change=${(e: any) => (this.filter = e.target.value)}>
           <option value="all">all</option>
+          <option value="favorites">★ favorites</option>
           <option value="running">with running containers</option>
           <option value="down">with stopped containers</option>
           <option value="alerting">alerting</option>
@@ -119,6 +143,9 @@ export class DdmServiceList extends LitElement {
               <tr>
                 <td>
                   <a href="#/service/${s.name}" style="color:var(--link)">${s.name}</a>
+                  <button class="small secondary" style="padding:.1em .4em;margin-left:.3em"
+                    title=${this.favs.has(s.name) ? 'remove from favorites' : 'add to favorites'}
+                    @click=${(e: Event) => this.toggleFav(s.name, e)}>${this.favs.has(s.name) ? '★' : '☆'}</button>
                   <div class="muted">${s.description}</div>
                 </td>
                 <td>

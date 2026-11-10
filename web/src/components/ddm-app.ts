@@ -75,6 +75,16 @@ export class DdmApp extends LitElement {
         width: 7px; height: 7px; border-radius: 999px;
         background: #6ee7a0; box-shadow: 0 0 8px #6ee7a0aa;
       }
+      :host-context([data-theme="light"]) header {
+        background: rgba(255, 255, 255, 0.65);
+        box-shadow: 0 10px 32px rgba(30, 41, 59, 0.14), inset 0 1px 0 var(--glass-hi);
+      }
+      :host-context([data-theme="light"]) nav a:hover { color: #1f2733; background: rgba(15, 23, 42, 0.07); }
+      :host-context([data-theme="light"]) nav a.active { color: #fff; }
+      :host-context([data-theme="light"]) .user-chip {
+        background: rgba(15, 23, 42, 0.05);
+        border-color: rgba(15, 23, 42, 0.1);
+      }
     `,
   ];
 
@@ -83,8 +93,17 @@ export class DdmApp extends LitElement {
   @state() private userName = '';
   @state() private isAdmin = false;
   @state() private lastFailure: any = null;
+  @state() private theme: 'dark' | 'light' =
+    document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
   private seenFailures = new Set<string>();
   private pollTimer?: number;
+
+  private toggleTheme() {
+    this.theme = this.theme === 'light' ? 'dark' : 'light';
+    if (this.theme === 'light') document.documentElement.dataset.theme = 'light';
+    else delete document.documentElement.dataset.theme;
+    localStorage.setItem('ddm:theme', this.theme);
+  }
 
   private onNav = () => { this.view = parseHash(); };
 
@@ -175,6 +194,8 @@ export class DdmApp extends LitElement {
           href="https://github.com/ulikoehler/DockerDeploymentManager"
           target="_blank" rel="noopener" title="documentation">docs</a>
         <span class="user-chip"><span class="dot"></span>${this.userName}</span>
+        <button class="secondary small" title="toggle light/dark theme"
+          @click=${this.toggleTheme}>${this.theme === 'light' ? '☾' : '☀'}</button>
         <button class="secondary small" @click=${this.logout}>logout</button>
       </header>
       <main>
