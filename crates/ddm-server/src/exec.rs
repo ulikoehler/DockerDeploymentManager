@@ -1,11 +1,11 @@
 use crate::config::{CommandArg, CommandDefinition, CommandItem};
 use crate::protocol::{ExecutionInfo, ServerMessage};
 use anyhow::Result;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
@@ -28,6 +28,64 @@ struct ExecChannel {
 }
 
 const REPLAY_CAP: usize = 1000;
+
+/// Process-global execution registry: cancellation flags + live child
+/// pids. Keyed by execution id (UUIDs are unique across the server/agent
+/// pair, so one static per process is correct — server and agent are
+/// separate processes and each cancels its own children).
+struct ExecRegistry {
+    cancelled: HashSet<String>,
+    children: HashMap<String, u32>,
+}
+
+static REGISTRY: OnceLock<Mutex<ExecRegistry>> = OnceLock::new();
+
+fn registry() -> &'static Mutex<ExecRegistry> {
+    REGISTRY.get_or_init(|| {
+        Mutex::new(ExecRegistry {
+            cancelled: HashSet::new(),
+            children: HashMap::new(),
+        })
+    })
+}
+
+/// Request cancellation of a running execution: sets the flag (checked
+/// between steps) and SIGKILLs the current child process if one is
+/// registered. Returns true when a live child was found.
+pub fn request_cancel(id: &str) -> bool {
+    let pid = {
+        let mut r = registry().lock().unwrap();
+        r.cancelled.insert(id.to_string());
+        r.children.get(id).copied()
+    };
+    if let Some(pid) = pid {
+        // `kill` is always present on the linux targets we ship for.
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+        return true;
+    }
+    false
+}
+
+/// True once `request_cancel` has been called for this id. Stays true
+/// for the process lifetime — ids are unique so stale flags are harmless
+/// (bounded by execution count; entries are tiny).
+pub fn is_cancelled(id: &str) -> bool {
+    registry().lock().unwrap().cancelled.contains(id)
+}
+
+fn register_child(id: &str, pid: u32) {
+    registry()
+        .lock()
+        .unwrap()
+        .children
+        .insert(id.to_string(), pid);
+}
+
+fn unregister_child(id: &str) {
+    registry().lock().unwrap().children.remove(id);
+}
 
 impl ExecutionManager {
     pub fn new(max_history: usize) -> Self {
@@ -316,6 +374,16 @@ pub async fn run_steps(
     let mut overall_success = true;
 
     for cmd_def in &item.command_sequence {
+        if is_cancelled(&execution_id) {
+            let _ = tx
+                .send(ServerMessage::LogOutput {
+                    id: execution_id.clone(),
+                    text: "execution cancelled\n".to_string(),
+                    stream: "stderr".to_string(),
+                })
+                .await;
+            return false;
+        }
         let final_args = build_args(&cmd_def.args, &params);
         let _ = tx
             .send(ServerMessage::LogOutput {
@@ -364,6 +432,9 @@ async fn spawn_and_stream(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
+    if let Some(pid) = child.id() {
+        register_child(execution_id, pid);
+    }
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
 
@@ -397,8 +468,19 @@ async fn spawn_and_stream(
     });
 
     let status = child.wait().await?;
+    unregister_child(execution_id);
     let _ = h1.await;
     let _ = h2.await;
+    if is_cancelled(execution_id) {
+        let _ = tx
+            .send(ServerMessage::LogOutput {
+                id: execution_id.to_string(),
+                text: "execution cancelled\n".to_string(),
+                stream: "stderr".to_string(),
+            })
+            .await;
+        return Ok(false);
+    }
     if !status.success() {
         let _ = tx
             .send(ServerMessage::LogOutput {

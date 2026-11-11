@@ -25,6 +25,9 @@ export class DdmLogViewer extends LitElement {
   @state() private stream = '';
   @state() private tail = 200;
   private ws?: WebSocket;
+  private wantStream = true;
+  private retryDelay = 1000;
+  private retryTimer?: number;
 
   connectedCallback() {
     super.connectedCallback();
@@ -32,6 +35,8 @@ export class DdmLogViewer extends LitElement {
   }
 
   disconnectedCallback() {
+    this.wantStream = false;
+    clearTimeout(this.retryTimer);
     this.ws?.close();
     super.disconnectedCallback();
   }
@@ -45,9 +50,33 @@ export class DdmLogViewer extends LitElement {
     });
   }
 
+  private async download() {
+    try {
+      const lines: any[] = await apiLogs(this.name, {
+        tail: 10000,
+        grep: this.grep || undefined,
+        regex: this.regex || undefined,
+        stream: this.stream || undefined,
+      });
+      const text = lines.map((l) => l.text ?? '').join('');
+      const blob = new Blob([text], { type: 'text/plain' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${this.name}-logs.txt`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch { /* surfaced via msg-less UI; download is best-effort */ }
+  }
+
   private startFollow() {
-    this.ws?.close();
+    this.wantStream = true;
+    this.retryDelay = 1000;
     this.lines = [];
+    this.connect();
+  }
+
+  private connect() {
+    this.ws?.close();
     const url = wsUrl(`/ws/services/${this.name}/logs`, {
       follow: true,
       tail: this.tail,
@@ -56,6 +85,7 @@ export class DdmLogViewer extends LitElement {
       stream: this.stream || undefined,
     });
     this.ws = new WebSocket(url);
+    this.ws.onopen = () => { this.retryDelay = 1000; };
     this.ws.onmessage = (ev) => {
       try {
         const l = JSON.parse(ev.data);
@@ -65,7 +95,15 @@ export class DdmLogViewer extends LitElement {
         }
       } catch { /* ignore */ }
     };
-    this.ws.onclose = () => { this.follow = false; };
+    this.ws.onclose = () => {
+      // auto-reconnect with backoff unless the user hit "stop" or the
+      // component was unmounted — transient drops shouldn't kill follow
+      if (!this.wantStream || !this.isConnected) return;
+      this.retryTimer = setTimeout(() => {
+        this.retryDelay = Math.min(this.retryDelay * 2, 30000);
+        this.connect();
+      }, this.retryDelay) as unknown as number;
+    };
   }
 
   private scrollBottom() {
@@ -90,10 +128,11 @@ export class DdmLogViewer extends LitElement {
         <input type="number" style="width:5em" .value=${String(this.tail)}
           @input=${(e: any) => (this.tail = +e.target.value)}>
         <button class="small" @click=${this.loadSnapshot}>snapshot</button>
+        <button class="small secondary" @click=${this.download}>download</button>
         <button class="small secondary" @click=${() => { this.follow = true; this.startFollow(); }}>
           follow
         </button>
-        <button class="small secondary" @click=${() => { this.follow = false; this.ws?.close(); }}>
+        <button class="small secondary" @click=${() => { this.follow = false; this.wantStream = false; clearTimeout(this.retryTimer); this.ws?.close(); }}>
           stop
         </button>
       </div>

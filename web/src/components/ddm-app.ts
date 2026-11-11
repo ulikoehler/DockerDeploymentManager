@@ -1,7 +1,10 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { getToken, clearToken, apiMe, apiExecutions } from '../api';
+import { getToken, clearToken, apiMe, apiExecutions, apiHealth, apiMonitorStatus } from '../api';
 import { sharedStyles } from '../styles';
+import { dirtyCount } from '../dirty';
+import { timeAgo } from '../time';
+import { ddmConfirm } from '../dialog';
 import './ddm-login';
 import './ddm-service-list';
 import './ddm-service-detail';
@@ -85,6 +88,16 @@ export class DdmApp extends LitElement {
         background: rgba(15, 23, 42, 0.05);
         border-color: rgba(15, 23, 42, 0.1);
       }
+      nav a { position: relative; }
+      .alert-dot {
+        display: inline-block; width: 8px; height: 8px; border-radius: 999px;
+        background: #ff6b6b; margin-left: 0.35em; vertical-align: middle;
+        box-shadow: 0 0 6px #ff6b6baa;
+      }
+      footer {
+        text-align: center; color: var(--text-dim); font-size: 0.78em;
+        padding: 0 0 1.4em; opacity: 0.7;
+      }
     `,
   ];
 
@@ -93,10 +106,14 @@ export class DdmApp extends LitElement {
   @state() private userName = '';
   @state() private isAdmin = false;
   @state() private lastFailure: any = null;
+  @state() private monitorAlerts = 0;
+  @state() private version = '';
   @state() private theme: 'dark' | 'light' =
     document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
   private seenFailures = new Set<string>();
   private pollTimer?: number;
+  private statusTimer?: number;
+  private navGuardBypass = false;
 
   private toggleTheme() {
     this.theme = this.theme === 'light' ? 'dark' : 'light';
@@ -105,7 +122,34 @@ export class DdmApp extends LitElement {
     localStorage.setItem('ddm:theme', this.theme);
   }
 
-  private onNav = () => { this.view = parseHash(); };
+  // In-app navigation goes through the dirty guard: editors that hold
+  // unsaved changes acquire a slot in dirty.ts; cancelling restores the
+  // previous hash once (guardBypass) so the confirm can't loop.
+  private onNav = () => { void this.guardedNav(); };
+
+  private async guardedNav() {
+    const v = parseHash();
+    if (this.navGuardBypass) {
+      this.navGuardBypass = false;
+      this.view = v;
+      return;
+    }
+    const same =
+      this.view.name === v.name && (v.name !== 'service' || this.view.service === v.service);
+    if (same || dirtyCount() === 0) {
+      this.view = v;
+      return;
+    }
+    const leave = await ddmConfirm(
+      'You have unsaved changes — leave this page anyway?',
+      { title: 'Unsaved changes', danger: true, confirmLabel: 'discard & leave' },
+    );
+    if (leave) this.view = v;
+    else {
+      this.navGuardBypass = true;
+      history.back();
+    }
+  }
 
   connectedCallback() {
     super.connectedCallback();
@@ -116,15 +160,27 @@ export class DdmApp extends LitElement {
           this.authed = true;
           this.userName = me.name;
           this.isAdmin = me.roles?.includes('admin');
-          this.startFailurePoll();
+          this.postAuth();
         })
         .catch(() => clearToken());
     }
   }
 
+  // Runs once authentication is known — covers both the apiMe path
+  // (page load with existing token) and onLogin (fresh login).
+  private postAuth() {
+    if (this.pollTimer) return;
+    this.startFailurePoll();
+    this.startStatusPoll();
+    apiHealth()
+      .then((h: any) => (this.version = h?.version ?? ''))
+      .catch(() => {});
+  }
+
   disconnectedCallback() {
     window.removeEventListener('hashchange', this.onNav);
     clearInterval(this.pollTimer);
+    clearInterval(this.statusTimer);
     super.disconnectedCallback();
   }
 
@@ -154,10 +210,27 @@ export class DdmApp extends LitElement {
     this.pollTimer = setInterval(tick, 15000) as unknown as number;
   }
 
+  // Monitoring alert count drives the header indicator — same cadence as
+  // the failure poll, failures are non-fatal here.
+  private startStatusPoll() {
+    const tick = async () => {
+      try {
+        const st: any = await apiMonitorStatus();
+        this.monitorAlerts = Object.values(st ?? {}).filter((v: any) => {
+          const s = String(v?.state ?? v?.status ?? (typeof v === 'string' ? v : ''));
+          return ['alerting', 'firing', 'down', 'error'].includes(s);
+        }).length;
+      } catch { /* transient */ }
+    };
+    tick();
+    this.statusTimer = setInterval(tick, 30000) as unknown as number;
+  }
+
   private onLogin(e: CustomEvent) {
     this.authed = true;
     this.userName = e.detail.name;
     this.isAdmin = e.detail.roles?.includes('admin');
+    this.postAuth();
   }
 
   private logout() {
@@ -167,7 +240,11 @@ export class DdmApp extends LitElement {
 
   private navLink(v: string, label: string) {
     const active = this.view.name === v || (v === 'services' && this.view.name === 'service');
-    return html`<a class="${active ? 'active' : ''}" href="#/${v === 'services' ? '' : v}">${label}</a>`;
+    const dot =
+      v === 'monitor' && this.monitorAlerts > 0
+        ? html`<span class="alert-dot" title="${this.monitorAlerts} service(s) alerting"></span>`
+        : '';
+    return html`<a class="${active ? 'active' : ''}" href="#/${v === 'services' ? '' : v}">${label}${dot}</a>`;
   }
 
   render() {
@@ -203,13 +280,14 @@ export class DdmApp extends LitElement {
           ? html`<div class="card" style="border-left:3px solid #e5534b;display:flex;gap:.8em;align-items:center">
               <span class="error">✗</span>
               <span style="flex:1">execution failed: <b>${this.lastFailure.title}</b>
-                <span class="muted">— ${this.lastFailure.service ?? 'global'} · ${this.lastFailure.user} · ${new Date(this.lastFailure.finished_at).toLocaleString()}</span></span>
+                <span class="muted">— ${this.lastFailure.service ?? 'global'} · ${this.lastFailure.user} · ${timeAgo(this.lastFailure.finished_at)}</span></span>
               <a href="#/executions">view executions</a>
               <button class="small secondary" @click=${() => (this.lastFailure = null)}>dismiss</button>
             </div>`
           : ''}
         ${this.renderView()}
       </main>
+      ${this.version ? html`<footer>DDM v${this.version}</footer>` : ''}
     `;
   }
 

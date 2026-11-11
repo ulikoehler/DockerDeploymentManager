@@ -1,8 +1,8 @@
 import { LitElement, html, css, PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { apiService, apiAction, apiCheckUnit, apiDeleteService, apiExecContainer, apiExecutions, apiBackupCheck, wsUrl } from '../api';
+import { apiService, apiAction, apiCheckUnit, apiDeleteService, apiExecContainer, apiExecutions, apiBackupCheck, apiPutMeta, wsUrl } from '../api';
 import { sharedStyles } from '../styles';
-import { ddmConfirm } from '../dialog';
+import { ddmConfirm, ddmPrompt } from '../dialog';
 import './ddm-log-viewer';
 import './ddm-compose-editor';
 import './ddm-unit-editor';
@@ -72,6 +72,21 @@ export class DdmServiceDetail extends LitElement {
   disconnectedCallback() {
     this.execWs?.close();
     super.disconnectedCallback();
+  }
+
+  private async editDescription() {
+    const cur = this.detail?.meta?.description ?? '';
+    const v = await ddmPrompt('service description', cur, {
+      title: 'Edit description',
+      placeholder: 'what is this service for?',
+    });
+    if (v === null || v === cur) return;
+    try {
+      await apiPutMeta(this.name, { ...(this.detail?.meta ?? {}), description: v });
+      await this.refresh();
+    } catch (e: any) {
+      this.error = e.message;
+    }
   }
 
   private openExec(c: any) {
@@ -187,6 +202,8 @@ export class DdmServiceDetail extends LitElement {
       <div class="row">
         <h2><a href="#/" style="color:var(--link);text-decoration:none">←</a> ${d.name}</h2>
         <span class="muted">${d.meta?.description || ''}</span>
+        <button class="small secondary" title="edit description"
+          @click=${() => this.editDescription()}>✎</button>
         <span style="flex:1"></span>
         <button class="danger small" @click=${this.removeService}>delete</button>
       </div>

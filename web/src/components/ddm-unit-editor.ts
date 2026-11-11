@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiGetUnit, apiPutUnit, apiCheckUnit, apiRegenUnit } from '../api';
 import { sharedStyles } from '../styles';
+import { acquireDirty } from '../dirty';
 import './ddm-code-editor';
 
 @customElement('ddm-unit-editor')
@@ -14,8 +15,28 @@ export class DdmUnitEditor extends LitElement {
   @property() name = '';
   @property({ attribute: false }) report: any = null;
   @state() private content = '';
+  @state() private dirty = false;
   @state() private exists = false;
   @state() private msg = '';
+  private dirtyRelease: (() => void) | null = null;
+
+  private syncDirty() {
+    if (this.dirty && !this.dirtyRelease) this.dirtyRelease = acquireDirty();
+    else if (!this.dirty && this.dirtyRelease) {
+      this.dirtyRelease();
+      this.dirtyRelease = null;
+    }
+  }
+
+  updated() {
+    this.syncDirty();
+  }
+
+  disconnectedCallback() {
+    this.dirtyRelease?.();
+    this.dirtyRelease = null;
+    super.disconnectedCallback();
+  }
   @state() private check: any = null;
 
   connectedCallback() {
@@ -27,6 +48,7 @@ export class DdmUnitEditor extends LitElement {
     try {
       const r: any = await apiGetUnit(this.name);
       this.content = r.content || r.rendered_template || '';
+      this.dirty = false;
       this.exists = r.exists;
       this.msg = '';
     } catch (e: any) {
@@ -45,6 +67,7 @@ export class DdmUnitEditor extends LitElement {
   private async save(restart: boolean) {
     try {
       await apiPutUnit(this.name, this.content, restart);
+      this.dirty = false;
       this.msg = 'saved';
       this.exists = true;
     } catch (e: any) {
@@ -77,7 +100,7 @@ export class DdmUnitEditor extends LitElement {
           ? html`<p class="ok-text">unit ok</p>`
           : ''}
       <ddm-code-editor .value=${this.content} lang="text" height="40vh"
-        @change=${(e: any) => (this.content = e.detail.value)}></ddm-code-editor>
+        @change=${(e: any) => { this.content = e.detail.value; this.dirty = true; }}></ddm-code-editor>
       <div class="toolbar">
         <button @click=${() => this.save(false)}>save</button>
         <button class="secondary" @click=${() => this.save(true)}>save &amp; restart</button>

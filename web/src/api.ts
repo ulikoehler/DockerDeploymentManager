@@ -247,3 +247,8 @@ export async function apiUploadFile(name: string, path: string, data: Blob | Arr
   }
   return json.data ?? json;
 }
+export const apiExecutionCancel = (id: string) =>
+  api(`/api/executions/${id}/cancel`, { method: 'POST' });
+export const apiPutMeta = (name: string, meta: unknown) =>
+  api(`/api/services/${name}/meta`, { method: 'PUT', body: meta });
+export const apiHealth = () => api<any>('/api/health');

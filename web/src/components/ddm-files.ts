@@ -12,6 +12,7 @@ import {
   apiWebdavStatus,
 } from '../api';
 import { sharedStyles } from '../styles';
+import { acquireDirty } from '../dirty';
 import { ddmConfirm, ddmPrompt } from '../dialog';
 import './ddm-code-editor';
 
@@ -34,6 +35,25 @@ export class DdmFiles extends LitElement {
   @state() private newName = '';
   @state() private webdavEnabled = false;
   @state() private imgUrl: string | null = null;
+  private dirtyRelease: (() => void) | null = null;
+
+  private syncDirty() {
+    if (this.dirty && !this.dirtyRelease) this.dirtyRelease = acquireDirty();
+    else if (!this.dirty && this.dirtyRelease) {
+      this.dirtyRelease();
+      this.dirtyRelease = null;
+    }
+  }
+
+  updated() {
+    this.syncDirty();
+  }
+
+  disconnectedCallback() {
+    this.dirtyRelease?.();
+    this.dirtyRelease = null;
+    super.disconnectedCallback();
+  }
 
   connectedCallback() {
     super.connectedCallback();

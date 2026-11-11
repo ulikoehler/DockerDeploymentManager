@@ -182,6 +182,12 @@ pub enum SyncVerb {
         service: String,
         path: String,
     },
+    /// Request cancellation of a running execution hosted by this agent
+    /// (fire-and-forget; the run loop checks the flag between steps and
+    /// SIGKILLs the current child).
+    ExecCancel {
+        execution_id: String,
+    },
     ProjectContainers {
         service: String,
     },

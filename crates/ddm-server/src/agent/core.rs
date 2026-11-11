@@ -571,6 +571,16 @@ impl AgentCore {
                 }
                 bail!("operator role required")
             }
+            // ---- execution cancel: same gate as running command items ----
+            SyncVerb::ExecCancel { .. } => {
+                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                Self::require_feature(
+                    &u,
+                    u.features.run_commands || u.has_role("operator"),
+                    "run_commands",
+                )?;
+                Ok(Some(u))
+            }
             // ---- gitops surface is admin-only server-side ----
             SyncVerb::GitSyncRun | SyncVerb::GitSyncPush | SyncVerb::GitSyncStatus => {
                 let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
@@ -1355,6 +1365,11 @@ impl AgentCore {
                 let svc = svc_ops::get_service(&cfg, &service)?;
                 let repo = crate::gitops::resolve_repo(&svc.dir, &path)?;
                 Ok(serde_json::to_value(crate::gitops::branches(&repo).await?)?)
+            }
+            SyncVerb::ExecCancel { execution_id } => {
+                self.justify_token(token, "exec_cancel", &execution_id)?;
+                crate::exec::request_cancel(&execution_id);
+                Ok(serde_json::json!({ "cancelled": true }))
             }
             SyncVerb::GitDiff { service, path } => {
                 self.justify_token(token, "git_diff", &format!("{service}:{path}"))?;

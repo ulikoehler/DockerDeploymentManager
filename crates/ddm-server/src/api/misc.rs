@@ -101,7 +101,10 @@ pub async fn config_status(
 }
 
 pub async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+    Json(serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 /// WebDAV surface status — lets the UI tell users the /dav mount exists
@@ -207,6 +210,56 @@ pub async fn execution(
         .filter(|i| user.user.is_admin() || i.user == user.user.name)
         .ok_or_else(|| not_found("execution not found"))?;
     Ok(ok(info))
+}
+
+/// Cancel a running execution. Allowed for admins and for the execution's
+/// owner; service-scoped tokens may only cancel executions bound to an
+/// in-scope service. Local executions are killed here; agent-hosted ones
+/// are forwarded via `SyncVerb::ExecCancel` (the other side is a no-op).
+pub async fn execution_cancel(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
+    let info = state
+        .exec
+        .get(&id)
+        .ok_or_else(|| not_found("execution not found"))?;
+    let allowed = if user.user.is_admin() {
+        true
+    } else if info.user == user.user.name {
+        match &user.claims.scope {
+            None => true,
+            Some(s) => match (&info.service, &s.services) {
+                (Some(svc), Some(services)) => services.iter().any(|x| x == svc),
+                _ => false,
+            },
+        }
+    } else {
+        false
+    };
+    if !allowed {
+        return Err(forbidden());
+    }
+    if info.finished_at.is_some() {
+        return Err(bad_request("execution already finished"));
+    }
+    let local = crate::exec::request_cancel(&id);
+    let agent = state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::ExecCancel {
+                execution_id: id.clone(),
+            },
+            &user.token,
+        )
+        .await;
+    state
+        .audit
+        .record(&user.user.name, "execution_cancel", &id, "");
+    Ok(ok(serde_json::json!({
+        "cancelled": local || agent.is_ok(),
+    })))
 }
 
 // ---------------------------------------------------------------------------

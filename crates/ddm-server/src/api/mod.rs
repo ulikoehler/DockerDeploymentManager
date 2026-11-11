@@ -56,6 +56,7 @@ pub fn api_router() -> Router<AppState> {
             "/api/services/:name/unit",
             get(services::get_unit).put(services::put_unit),
         )
+        .route("/api/services/:name/meta", put(services::put_meta))
         .route("/api/services/:name/unit/check", get(services::check_unit))
         .route(
             "/api/services/:name/unit/regenerate",
@@ -192,6 +193,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/api/audit", get(misc::audit_entries))
         .route("/api/executions", get(misc::executions))
         .route("/api/executions/:id", get(misc::execution))
+        .route("/api/executions/:id/cancel", post(misc::execution_cancel))
         .route("/api/health", get(misc::health))
         // websockets
         .route("/ws/execute", get(ws::execute_ws_root))

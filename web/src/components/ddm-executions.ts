@@ -1,8 +1,9 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
-import { apiExecutions, apiExecution, wsUrl } from '../api';
+import { apiExecutions, apiExecution, apiExecutionCancel, wsUrl } from '../api';
 import { ansiToHtml } from '../ansi';
+import { timeAgo } from '../time';
 import { sharedStyles } from '../styles';
 
 /** Execution history — every async action (service ops, backups, commands,
@@ -88,6 +89,24 @@ export class DdmExecutions extends LitElement {
     return ts ? new Date(ts).toLocaleString() : '—';
   }
 
+  private running(e: any) {
+    return e && !e.finished_at && e.success === null;
+  }
+
+  private async cancel(id: string) {
+    try {
+      await apiExecutionCancel(id);
+      this.output += '\n— cancel requested\n';
+      await this.refresh();
+    } catch (e: any) {
+      this.error = e.message;
+    }
+  }
+
+  private copyOutput() {
+    navigator.clipboard?.writeText(this.output).catch(() => {});
+  }
+
   private badge(e: any) {
     if (e.success === true) return html`<span class="badge ok">ok</span>`;
     if (e.success === false) return html`<span class="badge err">failed</span>`;
@@ -138,7 +157,7 @@ export class DdmExecutions extends LitElement {
         <tbody>
           ${rows.map(
             (e) => html`<tr style="cursor:pointer" @click=${() => this.select(e.id)}>
-              <td class="muted">${this.fmt(e.started_at)}</td>
+              <td class="muted" title=${this.fmt(e.started_at)}>${timeAgo(e.started_at)}</td>
               <td>${e.title}</td>
               <td class="muted">${e.service ?? '—'}</td>
               <td class="muted">${e.user}</td>
@@ -155,7 +174,15 @@ export class DdmExecutions extends LitElement {
         ? html`<div class="card" style="margin-top:1em">
             <h3>${this.selected.title}
               <span class="muted">${this.selected.id.slice(0, 8)} — ${this.fmt(this.selected.started_at)}
-              ${this.selected.finished_at ? `→ ${this.fmt(this.selected.finished_at)}` : '→ running'}</span></h3>
+              ${this.selected.finished_at ? `→ ${this.fmt(this.selected.finished_at)}` : '→ running'}</span>
+              <span style="flex:1"></span>
+              ${this.running(this.selected)
+                ? html`<button class="small danger" @click=${() => this.cancel(this.selected.id)}>cancel</button>`
+                : ''}
+              <button class="small secondary" @click=${this.copyOutput}>copy output</button>
+              <button class="small secondary"
+                @click=${() => { this.output = ''; this.ws?.close(); this.selected = null; }}>close</button>
+            </h3>
             <pre class="output log-view">${this.output
               ? unsafeHTML(ansiToHtml(this.output))
               : '(no output captured yet)'}</pre>

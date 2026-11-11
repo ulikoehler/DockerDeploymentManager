@@ -11,6 +11,7 @@ export class DdmServiceList extends LitElement {
   @state() private error = '';
   @state() private query = '';
   @state() private filter = 'all';
+  @state() private sort = 'name';
   @state() private favs = new Set<string>(this.loadFavs());
   private timer?: number;
 
@@ -74,10 +75,16 @@ export class DdmServiceList extends LitElement {
         s.containers.some((c) => c.service.toLowerCase().includes(q))
       );
     });
-    // favorites pinned to the top, stable within each group
-    return [...rows].sort(
-      (a, b) => Number(this.favs.has(b.name)) - Number(this.favs.has(a.name)),
-    );
+    // favorites pinned to the top, then the chosen ordering
+    return [...rows].sort((a, b) => {
+      const fav = Number(this.favs.has(b.name)) - Number(this.favs.has(a.name));
+      if (fav) return fav;
+      if (this.sort === 'containers')
+        return b.running - a.running || a.name.localeCompare(b.name);
+      if (this.sort === 'state')
+        return Number(b.running > 0) - Number(a.running > 0) || a.name.localeCompare(b.name);
+      return a.name.localeCompare(b.name);
+    });
   }
 
   private unitBadge(s: ServiceSummary) {
@@ -116,6 +123,13 @@ export class DdmServiceList extends LitElement {
           <option value="down">with stopped containers</option>
           <option value="alerting">alerting</option>
           <option value="unmonitored">unmonitored</option>
+        </select>
+        <select .value=${this.sort}
+          @change=${(e: any) => (this.sort = e.target.value)}
+          title="sort order">
+          <option value="name">sort: name</option>
+          <option value="containers">sort: containers</option>
+          <option value="state">sort: state</option>
         </select>
         <span class="muted">${rows.length}/${this.services.length}</span>
       </div>

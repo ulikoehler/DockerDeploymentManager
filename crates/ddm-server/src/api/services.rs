@@ -515,6 +515,34 @@ pub async fn put_compose(
     ))
 }
 
+/// Update service metadata (meta.yaml). Operator-only server-side; the
+/// agent additionally validates monitoring/backup sub-configs and their
+/// feature gates.
+pub async fn put_meta(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(meta): Json<crate::config::ServiceMeta>,
+) -> Result<Json<crate::auth::SuccessResponse<bool>>, Response> {
+    let _svc = require_service_access(&state, &user, &name).await?;
+    if !user.user.is_admin() && !user.user.has_role("operator") {
+        return Err(forbidden());
+    }
+    state
+        .agent
+        .call(
+            crate::agent::proto::SyncVerb::MetaWrite {
+                service: name.clone(),
+                meta,
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| internal(e.to_string()))?;
+    state.audit.record(&user.user.name, "meta_write", &name, "");
+    Ok(ok(true))
+}
+
 // ---------------------------------------------------------------------------
 // unit file get/put/check/regenerate
 // ---------------------------------------------------------------------------
