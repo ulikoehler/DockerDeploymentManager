@@ -10,7 +10,7 @@ const GROUPS: { title: string; eps: Ep[] }[] = [
     eps: [
       { method: 'POST', path: '/api/auth/login', desc: 'username+password → JWT (also sets nothing; token in body)' },
       { method: 'GET', path: '/api/auth/me', desc: 'current user, roles, features' },
-      { method: 'POST', path: '/api/auth/token', desc: 'mint a scoped, expiring agent token' },
+      { method: 'POST', path: '/api/auth/token', desc: 'mint a scoped, expiring agent token (ttl_minutes, up to 10 years)' },
       { method: 'GET', path: '/api/auth/tokens', desc: 'list minted tokens (user/scope/expiry/state)' },
       { method: 'DELETE', path: '/api/auth/tokens/:jti', desc: 'revoke a minted token' },
       { method: 'POST', path: '/api/auth/logout-all', desc: 'revoke all of the caller\'s tokens' },

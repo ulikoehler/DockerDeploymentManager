@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 const MAX_FILE_WRITE: usize = 4 * 1024 * 1024;
+/// Upper bound for minted-token lifetimes: 10 years in minutes.
+const MAX_MINT_TTL_MINUTES: i64 = 5_256_000;
 
 /// An authorized streaming upload: the target and the caller are resolved
 /// and checked before any payload is accepted.
@@ -1056,8 +1058,14 @@ impl AgentCore {
             bail!("parent token expired");
         }
         let cfg = self.cfg.get().await;
-        let max_min = cfg.server.token_ttl_minutes.max(1);
-        let ttl = (ttl_minutes.unwrap_or(max_min).clamp(1, max_min) * 60).min(remaining);
+        // Minted tokens may outlive the parent session — that is the point
+        // of long-lived agent credentials. Lifetime is capped at 10 years;
+        // revocation stays per-jti via the token book.
+        let default_min = cfg.server.token_ttl_minutes.max(1);
+        let ttl = ttl_minutes
+            .unwrap_or(default_min)
+            .clamp(1, MAX_MINT_TTL_MINUTES)
+            * 60;
         // Intersect with the parent's scope — a child can only narrow.
         let scope = match (&parent_claims.scope, &services, &actions) {
             (None, None, None) => None,

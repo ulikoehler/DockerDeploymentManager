@@ -114,7 +114,7 @@ pub async fn ws_ticket(
 
 #[derive(Deserialize)]
 pub struct TokenRequest {
-    /// Lifetime in minutes. Clamped to [1, server.token_ttl_minutes].
+    /// Lifetime in minutes. Clamped to [1, 10 years].
     #[serde(default)]
     pub ttl_minutes: Option<i64>,
     /// If set, the token can only access these services.
@@ -142,7 +142,7 @@ pub async fn issue_token(
     // The agent verifies the parent token, intersects scopes and caps the
     // lifetime itself — the server cannot widen or extend what it relays.
     let now = chrono::Utc::now().timestamp();
-    let ttl_secs = req.ttl_minutes.unwrap_or(60).clamp(1, 10_000) * 60;
+    let ttl_secs = req.ttl_minutes.unwrap_or(60).clamp(1, 5_256_000) * 60;
     let v = state
         .agent
         .crypto(crate::agent::proto::CryptoOp::Mint {

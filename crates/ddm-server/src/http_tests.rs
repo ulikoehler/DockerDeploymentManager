@@ -1298,7 +1298,7 @@ async fn executions_scoped_to_owner() {
 }
 
 #[tokio::test]
-async fn token_cannot_outlive_parent() {
+async fn minted_token_lifetime() {
     let h = harness().await;
     let (_, admin) = login(&h.app, "admin", PASSWORD).await;
     let (_, _, j) = call(
@@ -1317,7 +1317,8 @@ async fn token_cannot_outlive_parent() {
         .to_string();
     let parent_exp = j.pointer("/data/expires_at").unwrap().as_i64().unwrap();
 
-    // ask for 120 minutes; child must be capped at the parent's exp
+    // minted tokens may outlive the parent session — long-lived agent
+    // credentials are the point; revocation stays per-jti.
     let (st, _, j) = call(
         &h.app,
         "POST",
@@ -1329,8 +1330,25 @@ async fn token_cannot_outlive_parent() {
     assert_eq!(st, StatusCode::OK);
     let child_exp = j.pointer("/data/expires_at").unwrap().as_i64().unwrap();
     assert!(
-        child_exp <= parent_exp,
-        "child outlived parent: {child_exp} > {parent_exp}"
+        child_exp > parent_exp,
+        "child should outlive the 1-minute parent: {child_exp} <= {parent_exp}"
+    );
+
+    // but the lifetime is still capped at 10 years
+    let (st, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/auth/token",
+        Some(&admin),
+        Some(serde_json::json!({"ttl_minutes": i64::MAX})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let exp = j.pointer("/data/expires_at").unwrap().as_i64().unwrap();
+    let delta = exp - chrono::Utc::now().timestamp();
+    assert!(
+        delta <= 5_256_000 * 60 + 60,
+        "ttl not capped at 10y: {delta}s"
     );
 }
 

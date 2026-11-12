@@ -30,7 +30,8 @@ export class DdmToken extends LitElement {
 
   @state() private me: any = null;
   @state() private services: ServiceSummary[] = [];
-  @state() private ttl = 60;
+  @state() private ttlValue = 60;
+  @state() private ttlUnit: 'minutes' | 'hours' | 'days' | 'months' | 'years' = 'minutes';
   @state() private scopeServices = false;
   @state() private scopeActions = false;
   @state() private selServices = new Set<string>();
@@ -95,11 +96,19 @@ export class DdmToken extends LitElement {
     return s;
   }
 
+  /** Convert the value+unit selection to minutes, capped at 10 years. */
+  private ttlMinutes(): number {
+    const per: Record<typeof this.ttlUnit, number> = {
+      minutes: 1, hours: 60, days: 1440, months: 43200, years: 525600,
+    };
+    return Math.min(Math.max(1, this.ttlValue) * per[this.ttlUnit], 5_256_000);
+  }
+
   private async generate() {
     this.msg = '';
     this.issued = null;
     const body: { ttl_minutes: number; services?: string[]; actions?: string[] } = {
-      ttl_minutes: this.ttl,
+      ttl_minutes: this.ttlMinutes(),
     };
     if (this.scopeServices) body.services = [...this.selServices];
     if (this.scopeActions) body.actions = [...this.selActions];
@@ -166,13 +175,21 @@ export class DdmToken extends LitElement {
       <div class="card">
         <div class="row">
           <label>lifetime
-            <input type="number" min="1" style="width:7em" .value=${String(this.ttl)}
-              @input=${(e: Event) => (this.ttl = Math.max(1, +(e.target as HTMLInputElement).value || 60))}>
-            minutes
+            <input type="number" min="1" style="width:6em" .value=${String(this.ttlValue)}
+              @input=${(e: Event) => (this.ttlValue = Math.max(1, +(e.target as HTMLInputElement).value || 60))}>
+            <select .value=${this.ttlUnit}
+              @change=${(e: Event) => (this.ttlUnit = (e.target as HTMLSelectElement).value as typeof this.ttlUnit)}>
+              <option value="minutes">minutes</option>
+              <option value="hours">hours</option>
+              <option value="days">days</option>
+              <option value="months">months</option>
+              <option value="years">years</option>
+            </select>
           </label>
-          ${[60, 480, 1440, 10080].map(
-            (m) => html`<button class="small secondary" @click=${() => (this.ttl = m)}>
-              ${m < 1440 ? `${m / 60}h` : `${m / 1440}d`}</button>`,
+          ${([[1, 'hours'], [12, 'hours'], [1, 'days'], [7, 'days'], [30, 'days'], [90, 'days'], [1, 'years'], [10, 'years']] as const).map(
+            ([v, u]) => html`<button class="small secondary"
+              @click=${() => { this.ttlValue = v; this.ttlUnit = u; }}>
+              ${v}${u === 'hours' ? 'h' : u === 'days' ? 'd' : u === 'years' ? 'y' : 'mo'}</button>`,
           )}
         </div>
 
