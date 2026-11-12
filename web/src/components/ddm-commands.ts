@@ -1,7 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import {
-  apiCommands, apiRunCommand, apiSectionsRaw, apiSectionsMut, apiMe, wsUrl,
+  apiCommands, apiRunCommand, apiSectionsRaw, apiSectionsMut, apiMe, wsTicketUrl,
 } from '../api';
 import { sharedStyles } from '../styles';
 import { ddmConfirm } from '../dialog';
@@ -192,7 +192,7 @@ export class DdmCommands extends LitElement {
     try {
       const r: any = await apiRunCommand(si, item.index, this.params);
       const id = r.execution_id;
-      this.ws = new WebSocket(wsUrl(`/ws/executions/${id}`));
+      this.ws = new WebSocket(await wsTicketUrl(`/ws/executions/${id}`));
       this.ws.onmessage = (ev) => {
         try {
           const m = JSON.parse(ev.data);

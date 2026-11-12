@@ -1,7 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
-import { wsUrl, apiLogs } from '../api';
+import { wsTicketUrl, apiLogs } from '../api';
 import { ansiToHtml } from '../ansi';
 import { sharedStyles } from '../styles';
 
@@ -72,12 +72,12 @@ export class DdmLogViewer extends LitElement {
     this.wantStream = true;
     this.retryDelay = 1000;
     this.lines = [];
-    this.connect();
+    void this.connect();
   }
 
-  private connect() {
+  private async connect() {
     this.ws?.close();
-    const url = wsUrl(`/ws/services/${this.name}/logs`, {
+    const url = await wsTicketUrl(`/ws/services/${this.name}/logs`, {
       follow: true,
       tail: this.tail,
       grep: this.grep || undefined,
@@ -101,7 +101,7 @@ export class DdmLogViewer extends LitElement {
       if (!this.wantStream || !this.isConnected) return;
       this.retryTimer = setTimeout(() => {
         this.retryDelay = Math.min(this.retryDelay * 2, 30000);
-        this.connect();
+        void this.connect();
       }, this.retryDelay) as unknown as number;
     };
   }

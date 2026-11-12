@@ -1,7 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
-import { apiExecutions, apiExecution, apiExecutionCancel, wsUrl } from '../api';
+import { apiExecutions, apiExecution, apiExecutionCancel, wsTicketUrl } from '../api';
 import { ansiToHtml } from '../ansi';
 import { timeAgo } from '../time';
 import { sharedStyles } from '../styles';
@@ -61,7 +61,7 @@ export class DdmExecutions extends LitElement {
     this.loading = false;
     // Replay the captured stream — the WS endpoint replays frames for
     // finished executions, so late viewers see full output.
-    this.ws = new WebSocket(wsUrl(`/ws/executions/${id}`));
+    this.ws = new WebSocket(await wsTicketUrl(`/ws/executions/${id}`));
     this.ws.onmessage = (ev) => {
       try {
         const m = JSON.parse(ev.data);

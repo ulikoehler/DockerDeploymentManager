@@ -1,6 +1,6 @@
 import { LitElement, html, css, PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { apiService, apiAction, apiCheckUnit, apiDeleteService, apiExecContainer, apiExecutions, apiBackupCheck, apiPutMeta, wsUrl } from '../api';
+import { apiService, apiAction, apiCheckUnit, apiDeleteService, apiExecContainer, apiExecutions, apiBackupCheck, apiPutMeta, wsTicketUrl } from '../api';
 import { sharedStyles } from '../styles';
 import { ddmConfirm, ddmPrompt } from '../dialog';
 import './ddm-log-viewer';
@@ -102,7 +102,7 @@ export class DdmServiceDetail extends LitElement {
     try {
       const r: any = await apiExecContainer(this.name, this.execTarget, this.execCmd);
       const id = r.execution_id;
-      this.execWs = new WebSocket(wsUrl(`/ws/executions/${id}`));
+      this.execWs = new WebSocket(await wsTicketUrl(`/ws/executions/${id}`));
       this.execWs.onmessage = (ev) => {
         try {
           const m = JSON.parse(ev.data);
@@ -163,8 +163,8 @@ export class DdmServiceDetail extends LitElement {
     }
   }
 
-  private watchExecution(id: string) {
-    const ws = new WebSocket(wsUrl(`/ws/executions/${id}`));
+  private async watchExecution(id: string) {
+    const ws = new WebSocket(await wsTicketUrl(`/ws/executions/${id}`));
     ws.onmessage = (ev) => {
       try {
         const m = JSON.parse(ev.data);

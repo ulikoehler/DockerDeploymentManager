@@ -172,8 +172,25 @@ pub async fn log(repo: &Path, n: usize) -> Result<Vec<String>> {
 /// Unified diff of the working tree vs HEAD (tracked changes only —
 /// untracked files are listed by `status` but have no diff). Capped so a
 /// huge accidental diff can't produce an unbounded response.
-pub async fn diff(repo: &Path) -> Result<String> {
-    let out = git(repo, &["diff", "HEAD", "--no-color", "--no-ext-diff"]).await?;
+pub async fn diff(repo: &Path, base: Option<&str>) -> Result<String> {
+    let mut args = vec!["diff", "--no-color", "--no-ext-diff"];
+    let range = match base {
+        Some(b) if !b.trim().is_empty() => {
+            let b = b.trim();
+            // Ref names can't start with '-' — rejects option injection.
+            anyhow::ensure!(
+                !b.starts_with('-')
+                    && !b.contains(' ')
+                    && b.chars()
+                        .all(|c| c.is_alphanumeric() || "-_./~^:{}".contains(c)),
+                "invalid git ref"
+            );
+            format!("{b}..HEAD")
+        }
+        _ => "HEAD".to_string(),
+    };
+    args.push(&range);
+    let out = git(repo, &args).await?;
     const MAX: usize = 256 * 1024;
     if out.len() <= MAX {
         return Ok(out);

@@ -27,6 +27,7 @@ export class DdmGit extends LitElement {
   @state() private showClone = false;
   @state() private diff: string | null = null;
   @state() private diffLoading = false;
+  @state() private diffBase = '';
 
   connectedCallback() {
     super.connectedCallback();
@@ -72,7 +73,7 @@ export class DdmGit extends LitElement {
     this.diffLoading = true;
     this.diff = null;
     try {
-      const r: any = await apiGitDiff(this.name, this.selected.path);
+      const r: any = await apiGitDiff(this.name, this.selected.path, this.diffBase);
       this.diff = r?.diff ?? '';
     } catch (e: any) {
       this.msg = e.message;
@@ -132,6 +133,8 @@ export class DdmGit extends LitElement {
               <span class="badge muted">${s.status.branch}</span>
               <button class="small" @click=${() => this.action('pull')}>pull</button>
               <button class="small secondary" @click=${() => this.action('fetch')}>fetch</button>
+              <input placeholder="base ref (e.g. HEAD~3, main)" style="width:10em"
+                .value=${this.diffBase} @input=${(e: any) => (this.diffBase = e.target.value)}>
               <button class="small secondary" ?disabled=${this.diffLoading}
                 @click=${this.showDiff}>${this.diffLoading ? 'loading…' : 'diff'}</button>
               <select @change=${(e: any) => e.target.value && this.action('checkout', e.target.value)}>
@@ -149,7 +152,7 @@ export class DdmGit extends LitElement {
               ? html`<pre>${s.status.changes.join('\n')}</pre>`
               : html`<p class="muted">working tree clean</p>`}
             ${this.diff !== null
-              ? html`<h3>Diff <span class="muted">vs HEAD</span></h3>
+              ? html`<h3>Diff <span class="muted">${this.diffBase.trim() ? `${this.diffBase.trim()}..HEAD` : 'worktree vs HEAD'}</span></h3>
                   ${this.diff
                     ? html`<pre class="log-view" style="max-height:30em">${unsafeHTML(diffToHtml(this.diff))}</pre>`
                     : html`<p class="muted">no tracked changes</p>`}`

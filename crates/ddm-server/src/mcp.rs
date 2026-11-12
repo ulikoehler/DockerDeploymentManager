@@ -709,7 +709,10 @@ impl DdmMcp {
         McpUser(user): McpUser,
         Parameters(p): Parameters<PathArg>,
     ) -> Result<McpJson<Value>, ErrorData> {
-        let q = api::files::PathQuery { path: p.path };
+        let q = api::files::PathQuery {
+            path: p.path,
+            base: None,
+        };
         finish(api::files::list_files(user, self.st(), Path(p.name), Query(q)).await).await
     }
 
@@ -763,7 +766,10 @@ impl DdmMcp {
         McpUser(user): McpUser,
         Parameters(p): Parameters<PathArg>,
     ) -> Result<McpJson<Value>, ErrorData> {
-        let q = api::files::PathQuery { path: p.path };
+        let q = api::files::PathQuery {
+            path: p.path,
+            base: None,
+        };
         finish(api::files::delete_file(user, self.st(), Path(p.name), Query(q)).await).await
     }
 
@@ -784,7 +790,10 @@ impl DdmMcp {
         McpUser(user): McpUser,
         Parameters(p): Parameters<PathArg>,
     ) -> Result<McpJson<Value>, ErrorData> {
-        let q = api::files::PathQuery { path: p.path };
+        let q = api::files::PathQuery {
+            path: p.path,
+            base: None,
+        };
         finish(api::files::git_status(user, self.st(), Path(p.name), Query(q)).await).await
     }
 
@@ -807,7 +816,10 @@ impl DdmMcp {
         McpUser(user): McpUser,
         Parameters(p): Parameters<PathArg>,
     ) -> Result<McpJson<Value>, ErrorData> {
-        let q = api::files::PathQuery { path: p.path };
+        let q = api::files::PathQuery {
+            path: p.path,
+            base: None,
+        };
         finish(api::files::git_branches(user, self.st(), Path(p.name), Query(q)).await).await
     }
 

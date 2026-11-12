@@ -177,10 +177,13 @@ pub enum SyncVerb {
         service: String,
         path: String,
     },
-    /// Working-tree diff vs HEAD (bounded unified diff text).
+    /// Working-tree diff vs HEAD, or a ref range when `base` is given
+    /// (`<base>..HEAD` — e.g. a branch or `HEAD~3` for a commit range).
     GitDiff {
         service: String,
         path: String,
+        #[serde(default)]
+        base: Option<String>,
     },
     /// Request cancellation of a running execution hosted by this agent
     /// (fire-and-forget; the run loop checks the flag between steps and
@@ -324,6 +327,10 @@ pub enum CryptoOp {
         /// Client IP for per-source throttling (added to the per-name limit).
         #[serde(default)]
         ip: Option<String>,
+        /// Client user-agent — recorded on the session record so users can
+        /// tell their sessions apart in the token list.
+        #[serde(default)]
+        ua: Option<String>,
     },
     /// Mint a (possibly scoped) child token. Parent verified here.
     Mint {
@@ -551,6 +558,9 @@ pub struct TokenRecord {
         with = "chrono::serde::ts_seconds_option"
     )]
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Client user-agent recorded at login (sessions only), truncated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ua: Option<String>,
 }
 
 /// Section (command group) mutations applied to `config.sections`.

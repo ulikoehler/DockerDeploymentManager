@@ -49,10 +49,14 @@ export async function api<T = any>(
   return (json.data !== undefined ? json.data : json) as T;
 }
 
-export function wsUrl(path: string, params: Record<string, string | number | boolean | undefined> = {}): string {
+/// Single-use ticket WS URL — the JWT never travels in a query string
+/// (it would end up in proxy logs and browser history). `?ticket=` is
+/// redeemed once server-side and expires in 60s.
+export async function wsTicketUrl(path: string, params: Record<string, string | number | boolean | undefined> = {}): Promise<string> {
+  const r: any = await api('/api/auth/ws-ticket', { method: 'POST' });
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const q = new URLSearchParams();
-  q.set('token', token);
+  q.set('ticket', r.ticket);
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== '') q.set(k, String(v));
   }
@@ -158,8 +162,8 @@ export const apiGitLog = (name: string, path = '', n = 30) =>
   api(`/api/services/${name}/git/log`, { query: { path, n } });
 export const apiGitBranches = (name: string, path = '') =>
   api(`/api/services/${name}/git/branches`, { query: { path } });
-export const apiGitDiff = (name: string, path = '') =>
-  api(`/api/services/${name}/git/diff`, { query: { path } });
+export const apiGitDiff = (name: string, path = '', base = '') =>
+  api(`/api/services/${name}/git/diff`, { query: { path, base: base || undefined } });
 export const apiGitClone = (name: string, url: string, path = '', branch?: string) =>
   api(`/api/services/${name}/git/clone`, { method: 'POST', body: { url, path, branch } });
 export const apiGitAction = (name: string, path: string, op: string, gitRef?: string) =>

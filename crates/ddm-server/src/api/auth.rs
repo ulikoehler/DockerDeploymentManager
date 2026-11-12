@@ -20,6 +20,7 @@ pub struct LoginResponse {
 pub async fn login(
     State(state): State<AppState>,
     addr: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    ua_header: Option<axum_extra::TypedHeader<axum_extra::headers::UserAgent>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<crate::auth::SuccessResponse<LoginResponse>>, Response> {
     // Authentication (argon2 verify + throttle + signing) happens entirely
@@ -30,6 +31,7 @@ pub async fn login(
             name: req.name.clone(),
             password: req.password,
             ip: addr.map(|a| a.0.ip().to_string()),
+            ua: ua_header.map(|h| h.as_str().to_string()),
         })
         .await
     {

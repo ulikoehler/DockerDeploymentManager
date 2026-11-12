@@ -2207,6 +2207,7 @@ async fn authenticate_never_returns_hash() {
             name: "admin".into(),
             password: PASSWORD.into(),
             ip: None,
+            ua: None,
         })
         .await
         .unwrap();

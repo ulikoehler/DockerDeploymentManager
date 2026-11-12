@@ -739,8 +739,14 @@ impl AgentCore {
 
     pub async fn crypto(&self, op: CryptoOp) -> Result<serde_json::Value> {
         match op {
-            CryptoOp::Authenticate { name, password, ip } => {
-                self.do_authenticate(&name, &password, ip.as_deref()).await
+            CryptoOp::Authenticate {
+                name,
+                password,
+                ip,
+                ua,
+            } => {
+                self.do_authenticate(&name, &password, ip.as_deref(), ua.as_deref())
+                    .await
             }
             CryptoOp::Verify { token } => {
                 let claims = self
@@ -944,6 +950,7 @@ impl AgentCore {
         name: &str,
         password: &str,
         ip: Option<&str>,
+        ua: Option<&str>,
     ) -> Result<serde_json::Value> {
         // Throttle first — the agent owns it, a hostile server can't skip
         // it. Per-username and per-IP buckets: the IP bound stops an
@@ -1007,6 +1014,7 @@ impl AgentCore {
                 revoked: false,
                 kind: "session".into(),
                 revoked_at: None,
+                ua: ua.map(|s| s.chars().take(160).collect()),
             });
             if let Err(e) = book.save() {
                 tracing::error!("token registry write failed: {e}");
@@ -1096,6 +1104,7 @@ impl AgentCore {
                 revoked: false,
                 kind: "token".into(),
                 revoked_at: None,
+                ua: None,
             });
             if let Err(e) = book.save() {
                 tracing::error!("token registry write failed: {e}");
@@ -1371,11 +1380,17 @@ impl AgentCore {
                 crate::exec::request_cancel(&execution_id);
                 Ok(serde_json::json!({ "cancelled": true }))
             }
-            SyncVerb::GitDiff { service, path } => {
+            SyncVerb::GitDiff {
+                service,
+                path,
+                base,
+            } => {
                 self.justify_token(token, "git_diff", &format!("{service}:{path}"))?;
                 let svc = svc_ops::get_service(&cfg, &service)?;
                 let repo = crate::gitops::resolve_repo(&svc.dir, &path)?;
-                Ok(serde_json::json!({ "diff": crate::gitops::diff(&repo).await? }))
+                Ok(
+                    serde_json::json!({ "diff": crate::gitops::diff(&repo, base.as_deref()).await? }),
+                )
             }
             SyncVerb::ProjectContainers { service } => {
                 self.justify_token(token, "project_containers", &service)?;

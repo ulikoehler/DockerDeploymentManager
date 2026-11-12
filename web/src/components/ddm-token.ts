@@ -111,6 +111,23 @@ export class DdmToken extends LitElement {
     }
   }
 
+  /** Condense a User-Agent string to something scannable. */
+  private shortUa(ua: string): string {
+    const known: [RegExp, string][] = [
+      [/Firefox\/([\d.]+)/, 'Firefox $1'],
+      [/Edg\/([\d.]+)/, 'Edge $1'],
+      [/Chrome\/([\d.]+)/, 'Chrome $1'],
+      [/Version\/[\d.]+ Safari/, 'Safari'],
+      [/curl\/([\d.]+)/, 'curl $1'],
+      [/python-requests\/([\d.]+)/, 'python $1'],
+    ];
+    for (const [re, name] of known) {
+      const m = ua.match(re);
+      if (m) return name;
+    }
+    return ua.slice(0, 32);
+  }
+
   private copy(text: string) {
     navigator.clipboard?.writeText(text).then(() => (this.msg = 'copied'));
   }
@@ -225,7 +242,7 @@ export class DdmToken extends LitElement {
         <h3>sessions &amp; tokens</h3>
         ${this.tokens.length
           ? html`<table><thead><tr>
-              <th>kind</th><th>user</th><th>scope</th><th>issued</th><th>expires</th><th>state</th><th></th>
+              <th>kind</th><th>user</th><th>client</th><th>scope</th><th>issued</th><th>expires</th><th>state</th><th></th>
             </tr></thead>
             <tbody>${[...this.tokens]
               .sort((a, b) => (a.kind === 'session' ? 0 : 1) - (b.kind === 'session' ? 0 : 1))
@@ -233,6 +250,8 @@ export class DdmToken extends LitElement {
               (t) => html`<tr>
                 <td><span class="badge ${t.kind === 'session' ? 'muted' : ''}">${t.kind || 'token'}</span></td>
                 <td>${t.user}${t.jti === this.myJti ? html` <span class="muted">(this session)</span>` : ''}</td>
+                <td class="muted" style="max-width:14em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                  title=${t.ua ?? ''}>${t.ua ? this.shortUa(t.ua) : '—'}</td>
                 <td class="muted">${
                   [
                     t.services ? `svc: ${t.services.join(',')}` : '',

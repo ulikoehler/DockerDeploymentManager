@@ -52,6 +52,9 @@ fn require_compose_write(user: &AuthUser) -> Result<(), Response> {
 pub struct PathQuery {
     #[serde(default)]
     pub path: String,
+    /// Optional git base ref for `git diff` (`<base>..HEAD`).
+    #[serde(default)]
+    pub base: Option<String>,
 }
 
 pub async fn list_files(
@@ -404,6 +407,7 @@ pub async fn git_diff(
             crate::agent::proto::SyncVerb::GitDiff {
                 service: svc.name.clone(),
                 path: q.path.clone(),
+                base: q.base.clone(),
             },
             &user.token,
         )

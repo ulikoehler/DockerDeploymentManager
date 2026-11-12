@@ -1,6 +1,6 @@
 import { LitElement, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { apiMonitorEvents, wsUrl } from '../api';
+import { apiMonitorEvents, wsTicketUrl } from '../api';
 import { sharedStyles } from '../styles';
 
 @customElement('ddm-events-view')
@@ -16,9 +16,15 @@ export class DdmEventsView extends LitElement {
     super.connectedCallback();
     this.refresh();
     this.timer = window.setInterval(() => this.refresh(), 10000);
-    this.ws = new WebSocket(wsUrl('/ws/events'));
-    this.ws.onmessage = () => this.refresh();
+    void this.connectEvents();
   }
+  private async connectEvents() {
+    try {
+      this.ws = new WebSocket(await wsTicketUrl('/ws/events'));
+      this.ws.onmessage = () => this.refresh();
+    } catch { /* transient — periodic refresh still covers */ }
+  }
+
   disconnectedCallback() {
     this.ws?.close();
     window.clearInterval(this.timer);

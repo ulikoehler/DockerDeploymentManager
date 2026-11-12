@@ -5,8 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DDM — Docker Deployment Manager</title>
   <script>
-    // Apply the persisted theme before first paint to avoid a flash.
-    if (localStorage.getItem('ddm:theme') === 'light') {
+    // Apply the persisted theme before first paint to avoid a flash;
+    // fall back to the OS preference when nothing was chosen yet.
+    const theme = localStorage.getItem('ddm:theme')
+      ?? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    if (theme === 'light') {
       document.documentElement.dataset.theme = 'light';
     }
   </script>
