@@ -128,6 +128,46 @@ pub struct AgentCore {
     /// Registry of minted tokens (`<config_dir>/tokens.json`) — revocation
     /// is checked on every token verification.
     tokens: Mutex<TokenBook>,
+    /// Short opaque agent tokens (`<config_dir>/short-tokens.json`) mapped
+    /// to the JWT they stand in for — long JWTs are error-prone to paste.
+    short_tokens: Mutex<ShortTokenMap>,
+}
+
+/// A minted short token and the JWT it resolves to. `exp` mirrors the
+/// JWT's expiry so dead entries can be pruned without verifying.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct ShortToken {
+    jwt: String,
+    exp: i64,
+}
+
+#[derive(Default)]
+struct ShortTokenMap {
+    path: PathBuf,
+    map: HashMap<String, ShortToken>,
+}
+
+impl ShortTokenMap {
+    fn load(path: PathBuf) -> Self {
+        let map = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<HashMap<String, ShortToken>>(&t).ok())
+            .unwrap_or_default();
+        Self { path, map }
+    }
+
+    fn save(&self) -> Result<()> {
+        if self.path.as_os_str().is_empty() {
+            return Ok(());
+        }
+        if let Some(p) = self.path.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string(&self.map)?)?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
 }
 
 /// Persisted registry of minted tokens. Records carry no secrets — only
@@ -199,6 +239,7 @@ impl AgentCore {
             .open(audit_path)
             .with_context(|| format!("opening justification log {}", audit_path.display()))?;
         let tokens_path = config_dir.join("tokens.json");
+        let short_tokens_path = config_dir.join("short-tokens.json");
         Ok(Self {
             cfg,
             config_dir,
@@ -215,6 +256,7 @@ impl AgentCore {
             webhook_seen: Mutex::new(HashMap::new()),
             last_webhook_sync: Mutex::new(None),
             tokens: Mutex::new(TokenBook::load(tokens_path)),
+            short_tokens: Mutex::new(ShortTokenMap::load(short_tokens_path)),
         })
     }
 
@@ -331,13 +373,33 @@ impl AgentCore {
         Ok((claims, user))
     }
 
+    /// Resolve a presented credential to the JWT it stands for. Minted
+    /// agent tokens are 15-char opaque strings looked up in the short-token
+    /// map; anything containing a `.` is treated as a JWT already.
+    fn resolve_token(&self, token: &str) -> String {
+        if token.contains('.') {
+            return token.to_string();
+        }
+        self.short_tokens
+            .lock()
+            .unwrap()
+            .map
+            .get(token)
+            .map(|s| s.jwt.clone())
+            .unwrap_or_else(|| token.to_string())
+    }
+
+    /// Verify a caller-supplied credential (short token or JWT).
+    fn verify_any(&self, token: &str) -> Option<Claims> {
+        self.jwt.verify(&self.resolve_token(token))
+    }
+
     /// Verify the justification token (signature + generation) and load the
     /// *fresh* user record — without writing a justification entry. Used by
     /// `precheck`/`scoped_user`, where the arm itself logs the op.
     pub(crate) fn token_user(&self, token: &str) -> Result<(Claims, User)> {
         let claims = self
-            .jwt
-            .verify(token)
+            .verify_any(token)
             .ok_or_else(|| anyhow!("invalid justification token"))?;
         let file = self.users_file()?;
         let user = file
@@ -441,6 +503,21 @@ impl AgentCore {
         Ok((claims, user))
     }
 
+    /// Enforce a token scope's `ops` allowlist: when present, the verb's
+    /// operation category must be listed. Unscoped tokens are unaffected.
+    fn enforce_ops(&self, token: &str, op: Option<&'static str>) -> Result<()> {
+        let claims = self
+            .verify_any(token)
+            .ok_or_else(|| anyhow!("invalid token"))?;
+        let Some(ops) = claims.scope.as_ref().and_then(|s| s.ops.as_ref()) else {
+            return Ok(());
+        };
+        match op {
+            Some(o) if ops.iter().any(|x| x == o) => Ok(()),
+            _ => bail!("token scope does not permit this operation"),
+        }
+    }
+
     fn require_feature(user: &User, ok: bool, what: &str) -> Result<()> {
         if user.is_admin() || ok {
             Ok(())
@@ -453,6 +530,17 @@ impl AgentCore {
     /// [`SyncVerb`]s. Runs before the verb body; each arm's `justify_*`
     /// still produces the justification-log entry.
     fn precheck(&self, cfg: &AppConfig, verb: &SyncVerb, token: &str) -> Result<Option<User>> {
+        let out = self.precheck_inner(cfg, verb, token)?;
+        self.enforce_ops(token, sync_verb_op(verb))?;
+        Ok(out)
+    }
+
+    fn precheck_inner(
+        &self,
+        cfg: &AppConfig,
+        verb: &SyncVerb,
+        token: &str,
+    ) -> Result<Option<User>> {
         use crate::users::UserFeatures as F;
         let feat = |f: fn(&F) -> bool, u: &User| f(&u.features);
         match verb {
@@ -595,6 +683,17 @@ impl AgentCore {
 
     /// Same mirror for [`ExecVerb`]s.
     async fn precheck_exec(&self, cfg: &AppConfig, verb: &ExecVerb, token: &str) -> Result<User> {
+        let u = self.precheck_exec_inner(cfg, verb, token).await?;
+        self.enforce_ops(token, exec_verb_op(verb))?;
+        Ok(u)
+    }
+
+    async fn precheck_exec_inner(
+        &self,
+        cfg: &AppConfig,
+        verb: &ExecVerb,
+        token: &str,
+    ) -> Result<User> {
         use crate::users::UserFeatures as F;
         let feat = |f: fn(&F) -> bool, u: &User| f(&u.features);
         match verb {
@@ -752,8 +851,7 @@ impl AgentCore {
             }
             CryptoOp::Verify { token } => {
                 let claims = self
-                    .jwt
-                    .verify(&token)
+                    .verify_any(&token)
                     .ok_or_else(|| anyhow!("invalid token"))?;
                 // The user record is authoritative and read fresh — a
                 // deleted/disabled user's token dies immediately.
@@ -777,7 +875,12 @@ impl AgentCore {
                 ttl_minutes,
                 services,
                 actions,
-            } => self.do_mint(&token, ttl_minutes, services, actions).await,
+                ops,
+                name,
+            } => {
+                self.do_mint(&token, ttl_minutes, services, actions, ops, name)
+                    .await
+            }
             CryptoOp::Rotate { token } => {
                 let (_claims, _user) = self.unscoped_admin(&token)?;
                 self.justify(&_claims, "rotate", "");
@@ -1013,8 +1116,10 @@ impl AgentCore {
                 exp: chrono::DateTime::from_timestamp(claims.exp, 0).unwrap_or(now),
                 services: None,
                 actions: None,
+                ops: None,
                 revoked: false,
                 kind: "session".into(),
+                name: None,
                 revoked_at: None,
                 ua: ua.map(|s| s.chars().take(160).collect()),
             });
@@ -1038,10 +1143,11 @@ impl AgentCore {
         ttl_minutes: Option<i64>,
         services: Option<Vec<String>>,
         actions: Option<Vec<String>>,
+        ops: Option<Vec<String>>,
+        name: Option<String>,
     ) -> Result<serde_json::Value> {
         let parent_claims = self
-            .jwt
-            .verify(parent)
+            .verify_any(parent)
             .ok_or_else(|| anyhow!("invalid parent token"))?;
         // The fresh user record is authoritative: a deleted user cannot
         // mint, and roles are intersected so a demoted user's children
@@ -1067,11 +1173,12 @@ impl AgentCore {
             .clamp(1, MAX_MINT_TTL_MINUTES)
             * 60;
         // Intersect with the parent's scope — a child can only narrow.
-        let scope = match (&parent_claims.scope, &services, &actions) {
-            (None, None, None) => None,
+        let scope = match (&parent_claims.scope, &services, &actions, &ops) {
+            (None, None, None, None) => None,
             _ => Some(TokenScope {
                 services: intersect(&parent_claims.scope, |s| &s.services, &services),
                 actions: intersect(&parent_claims.scope, |s| &s.actions, &actions),
+                ops: intersect(&parent_claims.scope, |s| &s.ops, &ops),
             }),
         };
         let mut roles: Vec<String> = parent_claims
@@ -1097,6 +1204,36 @@ impl AgentCore {
             Some(jti.clone()),
         )?;
         let claims = self.jwt.verify(&token).unwrap();
+        // Hand out a short opaque token instead of the JWT itself — agents
+        // mix up long strings. The mapping lives in short-tokens.json so
+        // it survives restarts; revocation/expiry still ride on the JWT.
+        let short = {
+            use rand::Rng;
+            const ALPHABET: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            let mut rng = rand::thread_rng();
+            let mut book = self.short_tokens.lock().unwrap();
+            let now = chrono::Utc::now().timestamp();
+            book.map.retain(|_, s| s.exp > now);
+            loop {
+                let s: String = (0..15)
+                    .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+                    .collect();
+                if !book.map.contains_key(&s) {
+                    book.map.insert(
+                        s.clone(),
+                        ShortToken {
+                            jwt: token.clone(),
+                            exp: claims.exp,
+                        },
+                    );
+                    break s;
+                }
+            }
+        };
+        if let Err(e) = self.short_tokens.lock().unwrap().save() {
+            tracing::error!("short-token map write failed: {e}");
+        }
         // Register the minted token so it can be listed and revoked.
         {
             let mut book = self.tokens.lock().unwrap();
@@ -1109,8 +1246,12 @@ impl AgentCore {
                 exp: chrono::DateTime::from_timestamp(claims.exp, 0).unwrap_or(now),
                 services: scope.as_ref().and_then(|s| s.services.clone()),
                 actions: scope.as_ref().and_then(|s| s.actions.clone()),
+                ops: scope.as_ref().and_then(|s| s.ops.clone()),
                 revoked: false,
                 kind: "token".into(),
+                name: name
+                    .map(|n| n.trim().chars().take(80).collect::<String>())
+                    .filter(|n| !n.is_empty()),
                 revoked_at: None,
                 ua: None,
             });
@@ -1119,7 +1260,7 @@ impl AgentCore {
             }
         }
         self.justify(&claims, "mint", &parent_claims.sub);
-        Ok(serde_json::json!({ "token": token, "expires_at": claims.exp, "jti": jti }))
+        Ok(serde_json::json!({ "token": short, "expires_at": claims.exp, "jti": jti }))
     }
 
     async fn do_set_password(
@@ -2895,4 +3036,68 @@ fn merge_notifier_secrets(new: &mut serde_json::Value, old: Option<&serde_json::
             }
         }
     }
+}
+
+/// Operation category for a [`SyncVerb`], used by token `ops` scopes.
+/// `None` means the verb is outside the scoped-operation surface.
+fn sync_verb_op(v: &SyncVerb) -> Option<&'static str> {
+    use SyncVerb::*;
+    Some(match v {
+        ServicesList
+        | ServiceGet { .. }
+        | FileNode { .. }
+        | FileStat { .. }
+        | GitRepos { .. }
+        | GitStatus { .. }
+        | GitLog { .. }
+        | GitBranches { .. }
+        | GitDiff { .. }
+        | ProjectContainers { .. }
+        | ContainerHealth { .. }
+        | UnitFileRead { .. }
+        | UnitCheck { .. }
+        | UnitState { .. }
+        | UnitPathExists { .. }
+        | ComposeRead { .. }
+        | MonitoringGet { .. }
+        | BackupGet { .. }
+        | BackupCheck { .. }
+        | BackupSnapshots { .. }
+        | BackupLs { .. }
+        | BackupGlobalGet
+        | GitSyncStatus
+        | UnitRender { .. }
+        | MonitorStatusAll
+        | MonitorEvents
+        | ResolveComposeBin => "read",
+        ContainerLogsCollect { .. } => "logs",
+        FileWrite { .. }
+        | FileMkdir { .. }
+        | FileRename { .. }
+        | FileCopy { .. }
+        | FileDelete { .. } => "files",
+        ComposeWrite { .. } | ComposeSync { .. } => "compose",
+        MetaWrite { .. } => "meta",
+        MonitoringPut { .. } | NotifierMut { .. } | NotifyTest { .. } => "monitoring",
+        BackupPut { .. } | BackupGlobalPut { .. } | BackupProvision { .. } => "backup",
+        GitOpsPut { .. } | GitSyncRun | GitSyncPush => "git",
+        ListUnits { .. } | Journal { .. } => "units",
+        SectionsMut { .. } | ExecCancel { .. } => "exec",
+    })
+}
+
+/// Operation category for an [`ExecVerb`].
+fn exec_verb_op(v: &ExecVerb) -> Option<&'static str> {
+    use ExecVerb::*;
+    Some(match v {
+        Compose { .. } => "compose",
+        SectionItem { .. } | ContainerExec { .. } => "exec",
+        SystemdCommand { .. } | SystemdRestart { .. } | UnitRegen { .. } | UnitWrite { .. } => {
+            "units"
+        }
+        GitClone { .. } | GitOp { .. } => "git",
+        BackupRun { .. } | BackupForget { .. } | BackupRestore { .. } => "backup",
+        ServiceCreate { .. } | ServiceDelete { .. } => "services",
+        ContainerLogs { .. } => "logs",
+    })
 }

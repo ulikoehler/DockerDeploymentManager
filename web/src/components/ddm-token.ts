@@ -5,6 +5,20 @@ import {
 } from '../api';
 import { sharedStyles } from '../styles';
 
+const OPS: { id: string; label: string }[] = [
+  { id: 'read', label: 'read (status, files, configs)' },
+  { id: 'logs', label: 'container logs' },
+  { id: 'files', label: 'write files' },
+  { id: 'compose', label: 'compose files & actions' },
+  { id: 'meta', label: 'edit service metadata' },
+  { id: 'monitoring', label: 'monitoring & notifiers' },
+  { id: 'backup', label: 'backups' },
+  { id: 'git', label: 'git operations' },
+  { id: 'units', label: 'systemd units' },
+  { id: 'services', label: 'create/delete services' },
+  { id: 'exec', label: 'run commands & exec' },
+];
+
 const FEATURE_LABELS: Record<string, string> = {
   create_services: 'create services',
   edit_compose: 'edit compose files',
@@ -34,8 +48,11 @@ export class DdmToken extends LitElement {
   @state() private ttlUnit: 'minutes' | 'hours' | 'days' | 'months' | 'years' = 'minutes';
   @state() private scopeServices = false;
   @state() private scopeActions = false;
+  @state() private scopeOps = false;
+  @state() private tokenName = '';
   @state() private selServices = new Set<string>();
   @state() private selActions = new Set<string>();
+  @state() private selOps = new Set<string>();
   @state() private issued: { token: string; expires_at: number } | null = null;
   @state() private tokens: any[] = [];
   @state() private msg = '';
@@ -107,11 +124,18 @@ export class DdmToken extends LitElement {
   private async generate() {
     this.msg = '';
     this.issued = null;
-    const body: { ttl_minutes: number; services?: string[]; actions?: string[] } = {
-      ttl_minutes: this.ttlMinutes(),
-    };
+    const body: {
+      ttl_minutes: number;
+      services?: string[];
+      actions?: string[];
+      ops?: string[];
+      name?: string;
+    } = { ttl_minutes: this.ttlMinutes() };
+    const name = this.tokenName.trim();
+    if (name) body.name = name;
     if (this.scopeServices) body.services = [...this.selServices];
     if (this.scopeActions) body.actions = [...this.selActions];
+    if (this.scopeOps) body.ops = [...this.selOps];
     try {
       this.issued = await apiIssueToken(body);
       this.loadTokens();
@@ -174,6 +198,9 @@ export class DdmToken extends LitElement {
       ${this.msg ? html`<p class="muted">${this.msg}</p>` : ''}
       <div class="card">
         <div class="row">
+          <label>name <input type="text" maxlength="80" style="width:14em" placeholder="optional label"
+            .value=${this.tokenName}
+            @input=${(e: Event) => (this.tokenName = (e.target as HTMLInputElement).value)}></label>
           <label>lifetime
             <input type="number" min="1" style="width:6em" .value=${String(this.ttlValue)}
               @input=${(e: Event) => (this.ttlValue = Math.max(1, +(e.target as HTMLInputElement).value || 60))}>
@@ -234,6 +261,27 @@ export class DdmToken extends LitElement {
             : html`<p class="muted">token has your full capabilities</p>`}
         </fieldset>
 
+        <fieldset>
+          <legend>
+            <label><input type="checkbox" .checked=${this.scopeOps}
+              @change=${(e: Event) => (this.scopeOps = (e.target as HTMLInputElement).checked)}>
+              limit to operations</label>
+          </legend>
+          ${this.scopeOps
+            ? html`<div class="checks">
+                ${OPS.map(
+                  (o) => html`<label><input type="checkbox"
+                      .checked=${this.selOps.has(o.id)}
+                      @change=${(e: Event) =>
+                        (this.selOps = this.toggleSet(
+                          this.selOps, o.id, (e.target as HTMLInputElement).checked))}>
+                    ${o.label}</label>`,
+                )}
+              </div>
+              <p class="muted">unchecked categories are denied entirely — e.g. only "read" gives a view-only token</p>`
+            : html`<p class="muted">token may perform all operations your capabilities allow</p>`}
+        </fieldset>
+
         <button @click=${this.generate}>generate token</button>
       </div>
 
@@ -259,13 +307,17 @@ export class DdmToken extends LitElement {
         <h3>sessions &amp; tokens</h3>
         ${this.tokens.length
           ? html`<table><thead><tr>
-              <th>kind</th><th>user</th><th>client</th><th>scope</th><th>issued</th><th>expires</th><th>state</th><th></th>
+              <th></th><th>kind</th><th>name</th><th>user</th><th>client</th><th>scope</th><th>issued</th><th>expires</th><th>state</th>
             </tr></thead>
             <tbody>${[...this.tokens]
               .sort((a, b) => (a.kind === 'session' ? 0 : 1) - (b.kind === 'session' ? 0 : 1))
               .map(
               (t) => html`<tr>
+                <td>${!t.revoked && t.exp * 1000 > Date.now()
+                  ? html`<button class="small danger" @click=${() => this.revoke(t.jti)}>${t.kind === 'session' ? 'sign out' : 'revoke'}</button>`
+                  : ''}</td>
                 <td><span class="badge ${t.kind === 'session' ? 'muted' : ''}">${t.kind || 'token'}</span></td>
+                <td>${t.name ?? html`<span class="muted">—</span>`}</td>
                 <td>${t.user}${t.jti === this.myJti ? html` <span class="muted">(this session)</span>` : ''}</td>
                 <td class="muted" style="max-width:14em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
                   title=${t.ua ?? ''}>${t.ua ? this.shortUa(t.ua) : '—'}</td>
@@ -273,6 +325,7 @@ export class DdmToken extends LitElement {
                   [
                     t.services ? `svc: ${t.services.join(',')}` : '',
                     t.actions ? `act: ${t.actions.join(',')}` : '',
+                    t.ops ? `ops: ${t.ops.join(',')}` : '',
                   ].filter(Boolean).join(' · ') || (t.kind === 'session' ? 'login' : 'full')
                 }</td>
                 <td class="muted">${new Date(t.iat * 1000).toLocaleString()}</td>
@@ -282,9 +335,6 @@ export class DdmToken extends LitElement {
                   : t.exp * 1000 < Date.now()
                     ? html`<span class="badge">expired</span>`
                     : html`<span class="badge ok">active</span>`}</td>
-                <td>${!t.revoked && t.exp * 1000 > Date.now()
-                  ? html`<button class="small danger" @click=${() => this.revoke(t.jti)}>${t.kind === 'session' ? 'sign out' : 'revoke'}</button>`
-                  : ''}</td>
               </tr>`,
             )}</tbody></table>`
           : html`<p class="muted">nothing yet — login sessions and tokens you generate above appear here</p>`}

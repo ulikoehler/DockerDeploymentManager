@@ -2196,6 +2196,8 @@ async fn demoted_admin_loses_agent_admin() {
             ttl_minutes: Some(5),
             services: None,
             actions: None,
+            ops: None,
+            name: None,
         })
         .await;
     assert!(v.is_ok(), "mint should still work (roles narrowed)");

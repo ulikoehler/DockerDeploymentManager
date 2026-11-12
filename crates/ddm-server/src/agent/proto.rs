@@ -338,6 +338,8 @@ pub enum CryptoOp {
         ttl_minutes: Option<i64>,
         services: Option<Vec<String>>,
         actions: Option<Vec<String>>,
+        ops: Option<Vec<String>>,
+        name: Option<String>,
     },
     Verify {
         token: String,
@@ -545,6 +547,10 @@ pub struct TokenRecord {
     pub services: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actions: Option<Vec<String>>,
+    /// Operation-category allowlist (read/files/compose/...) — same
+    /// narrowing semantics as `actions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ops: Option<Vec<String>>,
     #[serde(default)]
     pub revoked: bool,
     /// "session" (login JWT) or "token" (minted for agents/scopes).
@@ -552,6 +558,9 @@ pub struct TokenRecord {
     /// treat empty as "token".
     #[serde(default)]
     pub kind: String,
+    /// Optional human label so tokens are identifiable in the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

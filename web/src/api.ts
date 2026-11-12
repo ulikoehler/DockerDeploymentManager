@@ -109,6 +109,8 @@ export const apiIssueToken = (body: {
   ttl_minutes?: number;
   services?: string[];
   actions?: string[];
+  ops?: string[];
+  name?: string;
 }) => api<{ token: string; expires_at: number }>('/api/auth/token', { method: 'POST', body });
 export const apiServices = () => api<ServiceSummary[]>('/api/services');
 export const apiService = (name: string) => api(`/api/services/${name}`);

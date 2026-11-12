@@ -124,6 +124,14 @@ pub struct TokenRequest {
     /// feature flags + "unrestricted"). Can only narrow, never widen.
     #[serde(default)]
     pub actions: Option<Vec<String>>,
+    /// Optional operation categories the token may perform: read, logs,
+    /// files, compose, meta, monitoring, backup, git, units, services,
+    /// exec. Can only narrow, never widen.
+    #[serde(default)]
+    pub ops: Option<Vec<String>>,
+    /// Optional human label shown in the token list (max 80 chars).
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -150,6 +158,8 @@ pub async fn issue_token(
             ttl_minutes: req.ttl_minutes,
             services: req.services.clone(),
             actions: req.actions.clone(),
+            ops: req.ops.clone(),
+            name: req.name.clone(),
         })
         .await
         .map_err(|e| crate::auth::error_response(StatusCode::UNAUTHORIZED, format!("{e:#}")))?;
@@ -161,9 +171,11 @@ pub async fn issue_token(
         None => "*".into(),
     };
     let detail = format!(
-        "ttl={ttl_secs}s services={} actions={}",
+        "ttl={ttl_secs}s services={} actions={} ops={} name={}",
         fmt(&req.services),
-        fmt(&req.actions)
+        fmt(&req.actions),
+        fmt(&req.ops),
+        req.name.as_deref().unwrap_or("-")
     );
     state
         .audit

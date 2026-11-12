@@ -49,6 +49,11 @@ pub struct TokenScope {
     /// "run_commands") and "unrestricted" (compose policy bypass).
     #[serde(default)]
     pub actions: Option<Vec<String>>,
+    /// If set, the token may only perform these operation categories:
+    /// read, logs, files, compose, meta, monitoring, backup, git, units,
+    /// services, exec. Enforced agent-side per verb; can only narrow.
+    #[serde(default)]
+    pub ops: Option<Vec<String>>,
 }
 
 /// Apply a token scope to a user, narrowing their effective permissions.
@@ -537,6 +542,7 @@ mod security_tests {
         let scope = TokenScope {
             services: Some(vec!["web1".into()]),
             actions: Some(vec!["edit_compose".into()]),
+            ops: None,
         };
         apply_token_scope(&mut user, &scope, DefaultAccess::Allow);
         assert!(!user.roles.iter().any(|r| r == "operator"));
@@ -566,6 +572,7 @@ mod security_tests {
         let scope3 = TokenScope {
             services: Some(vec!["web".into(), "db".into()]),
             actions: None,
+            ops: None,
         };
         apply_token_scope(&mut user, &scope3, DefaultAccess::Deny);
         assert!(can_access_service(&user, "web", DefaultAccess::Deny));
@@ -584,6 +591,7 @@ mod security_tests {
         let scope2 = TokenScope {
             services: None,
             actions: Some(vec!["operator".into()]),
+            ops: None,
         };
         apply_token_scope(&mut user, &scope2, DefaultAccess::Deny);
         assert!(!user.is_admin());
@@ -596,6 +604,7 @@ mod security_tests {
             &TokenScope {
                 services: None,
                 actions: None,
+                ops: None,
             },
             DefaultAccess::Deny,
         );

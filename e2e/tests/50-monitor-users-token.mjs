@@ -279,11 +279,11 @@ export default async function (h) {
     const ok = window.__clickText('generate token');
     await new Promise(r => setTimeout(r, 3000));
     const tt = window.__deep('ddm-token');
-    const txt = tt ? tt.shadowRoot.textContent : '';
-    const m = txt.match(/eyJ[A-Za-z0-9_\-\.]+/);
+    const ta = tt && tt.shadowRoot.querySelector('textarea.token-out');
+    const tok = ta ? ta.value.trim() : '';
     const copyBtn = [...tt.shadowRoot.querySelectorAll('button')].find(b => /copy/i.test(b.textContent));
     if (copyBtn) copyBtn.click();
-    return { clicked: ok, hasToken: !!m, token: m ? m[0] : null, copyBtn: !!copyBtn };
+    return { clicked: ok, hasToken: tok.length > 0, token: tok || null, copyBtn: !!copyBtn };
   });
   ctx.check('token: generate + display + copy', r.clicked === true && r.hasToken === true && r.copyBtn === true, '');
   // the page must explain the token works on the REST API too, not only MCP
@@ -316,9 +316,8 @@ export default async function (h) {
     await new Promise(r => setTimeout(r, 400));
     window.__clickText('generate token');
     await new Promise(r => setTimeout(r, 3000));
-    const txt = tt.shadowRoot.textContent;
-    const m = txt.match(/eyJ[A-Za-z0-9_\-\.]+/g);
-    return { tokens: m ? m.slice(-1)[0] : null };
+    const ta = tt.shadowRoot.querySelector('textarea.token-out');
+    return { tokens: ta ? ta.value.trim() : null };
   }, svc);
   if (r.tokens) {
     const scoped = await page.evaluate(async (tok) => {
