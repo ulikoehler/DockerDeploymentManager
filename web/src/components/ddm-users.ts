@@ -17,6 +17,7 @@ const FEATURE_LABELS: Record<string, string> = {
   edit_files: 'edit files & git',
   exec_containers: 'exec in containers',
   mount_files: 'mount files (WebDAV)',
+  push_images: 'push docker images (registry)',
 };
 
 @customElement('ddm-users')

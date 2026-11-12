@@ -123,6 +123,9 @@ pub enum ExecVerb {
         container: String,
         command: Vec<String>,
     },
+    /// `docker load -i <path>` — used by the OCI registry endpoint to
+    /// import a pushed image tar into the local daemon.
+    ImageLoad { path: String },
 }
 
 /// Operations with a single JSON response. All privileged filesystem,

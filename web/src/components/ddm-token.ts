@@ -17,6 +17,7 @@ const OPS: { id: string; label: string }[] = [
   { id: 'units', label: 'systemd units' },
   { id: 'services', label: 'create/delete services' },
   { id: 'exec', label: 'run commands & exec' },
+  { id: 'registry', label: 'image registry (docker load)' },
 ];
 
 const FEATURE_LABELS: Record<string, string> = {
@@ -29,6 +30,7 @@ const FEATURE_LABELS: Record<string, string> = {
   edit_files: 'edit files & git',
   exec_containers: 'exec in containers',
   mount_files: 'mount files (WebDAV)',
+  push_images: 'push docker images (registry)',
 };
 
 @customElement('ddm-token')

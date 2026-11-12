@@ -831,6 +831,11 @@ impl AgentCore {
                 );
                 Ok(u)
             }
+            ExecVerb::ImageLoad { .. } => {
+                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                Self::require_feature(&u, feat(|f| f.push_images, &u), "push_images")?;
+                Ok(u)
+            }
         }
     }
 
@@ -2634,6 +2639,14 @@ impl AgentCore {
                 }
                 Ok(code == 0)
             }
+            ExecVerb::ImageLoad { path } => {
+                // Authorization ran in precheck_exec (push_images feature).
+                let item = host_shell_item_for(
+                    cfg,
+                    shell_item("docker load", &format!("docker load -i {}", sq(path)), "."),
+                );
+                Ok(exec::run_steps(item, HashMap::new(), tx.clone(), eid.to_string()).await)
+            }
         }
     }
 
@@ -3099,5 +3112,6 @@ fn exec_verb_op(v: &ExecVerb) -> Option<&'static str> {
         BackupRun { .. } | BackupForget { .. } | BackupRestore { .. } => "backup",
         ServiceCreate { .. } | ServiceDelete { .. } => "services",
         ContainerLogs { .. } => "logs",
+        ImageLoad { .. } => "registry",
     })
 }

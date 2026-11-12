@@ -45,6 +45,7 @@ const GROUPS: { title: string; eps: Ep[] }[] = [
       { method: 'POST', path: '/api/services/:name/files/rename', desc: '{from, to}' },
       { method: 'DELETE', path: '/api/services/:name/files?path=', desc: 'delete file/dir' },
       { method: 'ANY', path: '/dav/:service/*', desc: 'WebDAV — Bearer JWT or Basic user:token; needs mount_files feature' },
+      { method: 'ANY', path: '/v2/*', desc: 'OCI registry — docker push/pull straight to DDM (GET /v2/token takes Basic auth; writes need push_images)' },
     ],
   },
   {

@@ -3,6 +3,7 @@ pub mod commands_api;
 pub mod containers;
 pub mod files;
 pub mod misc;
+pub mod registry;
 pub mod services;
 pub mod systemd_api;
 pub mod users;
@@ -21,6 +22,8 @@ pub fn api_router() -> Router<AppState> {
         .route("/dav", any(crate::webdav::handle_root))
         .route("/dav/", any(crate::webdav::handle_root))
         .route("/dav/*path", any(crate::webdav::handle))
+        // OCI registry — docker push/pull straight to DDM
+        .merge(registry::router())
         // auth
         .route("/api/auth/login", post(auth::login))
         .route(

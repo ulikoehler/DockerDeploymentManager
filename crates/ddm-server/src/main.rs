@@ -19,6 +19,7 @@ mod notify;
 mod permissions;
 mod policy;
 mod protocol;
+mod registry;
 mod services;
 mod systemd;
 mod users;
@@ -47,6 +48,8 @@ pub struct AppState {
     pub locks: Arc<webdav::LockStore>,
     /// Single-use WebSocket tickets (in-memory).
     pub ws_tickets: Arc<auth::TicketStore>,
+    /// OCI registry store root (`<config dir>/registry`).
+    pub registry_root: PathBuf,
 }
 
 #[tokio::main]
@@ -142,6 +145,10 @@ async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
         audit,
         locks: Arc::new(webdav::LockStore::new()),
         ws_tickets: Arc::new(auth::TicketStore::new()),
+        registry_root: config_path
+            .parent()
+            .map(|d| d.join("registry"))
+            .unwrap_or_else(|| PathBuf::from("registry")),
     };
 
     let mut app = api::api_router()

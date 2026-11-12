@@ -90,6 +90,7 @@ pub fn apply_token_scope(
         f.edit_files &= has("edit_files");
         f.exec_containers &= has("exec_containers");
         f.mount_files &= has("mount_files");
+        f.push_images &= has("push_images");
         if !has("unrestricted") && user.compose_policy.as_deref() == Some("unrestricted") {
             user.compose_policy = None; // fall back to the default policy
         }

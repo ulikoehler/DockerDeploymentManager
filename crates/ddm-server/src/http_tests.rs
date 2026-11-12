@@ -161,6 +161,7 @@ async fn harness_opts(webdav: bool) -> Harness {
         audit,
         locks: Arc::new(crate::webdav::LockStore::new()),
         ws_tickets: Arc::new(crate::auth::TicketStore::new()),
+        registry_root: root.join("registry"),
     };
     let app = api::api_router()
         .merge(mcp::router(state.clone()))
@@ -203,6 +204,7 @@ async fn harness_remote() -> Harness {
         audit: h.state.audit.clone(),
         locks: Arc::new(crate::webdav::LockStore::new()),
         ws_tickets: Arc::new(crate::auth::TicketStore::new()),
+        registry_root: h._dir.path().join("registry"),
     };
     let app = api::api_router()
         .merge(mcp::router(state.clone()))

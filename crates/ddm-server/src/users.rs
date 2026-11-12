@@ -159,6 +159,10 @@ pub struct UserFeatures {
     /// service access; writes additionally need `edit_files`.
     #[serde(default)]
     pub mount_files: bool,
+    /// Push images to the built-in OCI registry (`/v2/`) and have them
+    /// loaded into the local docker daemon.
+    #[serde(default)]
+    pub push_images: bool,
 }
 
 fn bool_true() -> bool {
@@ -177,6 +181,7 @@ impl Default for UserFeatures {
             edit_files: false,
             exec_containers: false,
             mount_files: false,
+            push_images: false,
         }
     }
 }
