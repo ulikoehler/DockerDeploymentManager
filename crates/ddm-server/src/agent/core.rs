@@ -34,6 +34,26 @@ pub struct PendingPut {
     pub len: u64,
 }
 
+/// Resolved destination of a container/volume upload.
+pub enum TarDest {
+    /// `path` is a directory for tar formats, a file path for raw.
+    Container { id: String, path: String },
+    /// tar formats extract into this directory (inside the volume
+    /// mountpoint, already traversal-checked).
+    VolumeDir { dir: PathBuf },
+    /// raw format writes exactly one file at this path.
+    VolumeFile { file: PathBuf },
+}
+
+/// An authorized container/volume upload: destination resolved and
+/// checked before any payload is accepted.
+pub struct PendingTarPut {
+    pub format: TarFormat,
+    /// Declared payload length — a short body aborts the transfer.
+    pub len: u64,
+    pub dest: TarDest,
+}
+
 fn arg(v: &str) -> CommandArg {
     CommandArg::Value {
         value: v.to_string(),
@@ -620,6 +640,7 @@ impl AgentCore {
             | SyncVerb::GitBranches { service, .. }
             | SyncVerb::GitDiff { service, .. }
             | SyncVerb::ProjectContainers { service }
+            | SyncVerb::ProjectVolumes { service }
             | SyncVerb::UnitFileRead { service }
             | SyncVerb::UnitCheck { service }
             | SyncVerb::UnitRender { service }
@@ -1552,6 +1573,12 @@ impl AgentCore {
                     self.docker.project_containers(&service).await?,
                 )?)
             }
+            SyncVerb::ProjectVolumes { service } => {
+                self.justify_token(token, "project_volumes", &service)?;
+                Ok(serde_json::to_value(
+                    self.docker.project_volumes(&service).await?,
+                )?)
+            }
             SyncVerb::ContainerHealth { id } => {
                 self.justify_token(token, "container_health", &id)?;
                 // Container ids are arbitrary input here — re-resolve the
@@ -2070,6 +2097,7 @@ impl AgentCore {
     ) -> Result<PendingPut> {
         let cfg = self.cfg.get().await;
         let (claims, user) = self.scoped_user(token, cfg.security.default_access)?;
+        self.enforce_ops(token, Some("files"))?;
         if !crate::permissions::can_access_service(&user, service, cfg.security.default_access) {
             bail!("service access denied: {service}");
         }
@@ -2162,6 +2190,7 @@ impl AgentCore {
     ) -> Result<(crate::agent::proto::FileMeta, u64, tokio::fs::File)> {
         let cfg = self.cfg.get().await;
         let (claims, _user) = self.justify_service(&cfg, token, service)?;
+        self.enforce_ops(token, Some("read"))?;
         let svc = svc_ops::get_service(&cfg, service)?;
         let meta = crate::files::stat(&svc.dir, path)?;
         if meta.kind != "file" {
@@ -2185,6 +2214,252 @@ impl AgentCore {
             &format!("{service}:{path} [{offset}+{sent}]"),
         );
         Ok((meta, sent, f))
+    }
+
+    // ------------------------------------------------------------------
+    // Container / volume file transfers
+    // ------------------------------------------------------------------
+
+    /// Volume counterpart of [`Self::authorize_container`]: a volume
+    /// carrying a compose-project label is authorized like that service;
+    /// anything else is admin-only.
+    async fn authorize_volume(
+        &self,
+        cfg: &AppConfig,
+        u: &User,
+        name: &str,
+    ) -> Result<crate::docker::VolumeInfo> {
+        if name.is_empty()
+            || name.len() > 255
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+            || !name.chars().next().unwrap().is_ascii_alphanumeric()
+        {
+            bail!("invalid volume name: {name}");
+        }
+        let info = self
+            .docker
+            .volume_info(name)
+            .await?
+            .with_context(|| format!("volume {name} not found"))?;
+        match info.project.as_deref() {
+            Some(p) if svc_ops::get_service(cfg, p).is_ok() => {
+                if crate::permissions::can_access_service(u, p, cfg.security.default_access) {
+                    Ok(info)
+                } else {
+                    bail!("service access denied: {p}")
+                }
+            }
+            _ => {
+                Self::require_admin(u)?;
+                Ok(info)
+            }
+        }
+    }
+
+    /// Materialize a container/volume path into a payload file and return
+    /// it for streaming — same contract as [`Self::file_get_begin`], plus
+    /// the temp dir that owns the payload.
+    pub async fn tar_get_begin(
+        &self,
+        service: &str,
+        source: &TarSource,
+        format: TarFormat,
+        token: &str,
+    ) -> Result<(
+        crate::agent::proto::FileMeta,
+        u64,
+        tokio::fs::File,
+        tempfile::TempDir,
+    )> {
+        let cfg = self.cfg.get().await;
+        let (claims, user) = self.justify_service(&cfg, token, service)?;
+        self.enforce_ops(token, Some("read"))?;
+        let cap = cfg.webdav.max_upload_bytes;
+        let tmp = tempfile::tempdir()?;
+        let tar_path = tmp.path().join("payload.tar");
+        match source {
+            TarSource::Container { id, path } => {
+                if !path.starts_with('/') {
+                    bail!("container path must be absolute");
+                }
+                self.authorize_container(&cfg, &user, id).await?;
+                let stream = self.docker.container_archive(id, path).await?;
+                crate::tarops::spool_stream(stream, &tar_path, cap).await?;
+                crate::tarops::ensure_plain_tar(&tar_path)?;
+            }
+            TarSource::Volume { name, path } => {
+                let info = self.authorize_volume(&cfg, &user, name).await?;
+                let rel = path.trim_start_matches('/');
+                let abs = crate::files::resolve(Path::new(&info.mountpoint), rel)?;
+                let md =
+                    std::fs::metadata(&abs).with_context(|| format!("{name}:{path} not found"))?;
+                let is_root = rel.is_empty();
+                if md.is_dir() {
+                    crate::tarops::tar_host_path(&abs, &tar_path, is_root)?;
+                } else if md.is_file() {
+                    crate::tarops::tar_host_path(&abs, &tar_path, false)?;
+                } else {
+                    bail!("not a regular file or directory");
+                }
+            }
+        }
+        // materialize the requested encoding
+        let payload_path = match format {
+            TarFormat::Tar => tar_path,
+            TarFormat::Targz => crate::tarops::gzip_file(&tar_path)?,
+            TarFormat::Raw => {
+                let p = tmp.path().join("payload.bin");
+                crate::tarops::extract_single_file(&tar_path, &p)?;
+                p
+            }
+        };
+        let size = std::fs::metadata(&payload_path)?.len();
+        let f = tokio::fs::File::open(&payload_path).await?;
+        self.justify(
+            &claims,
+            "tar_get",
+            &format!("{service}:{source:?} {format:?} ({size} bytes)"),
+        );
+        Ok((
+            crate::agent::proto::FileMeta {
+                kind: "file".into(),
+                size,
+                mtime: chrono::Utc::now().timestamp(),
+            },
+            size,
+            f,
+            tmp,
+        ))
+    }
+
+    /// Authorize a container/volume upload and resolve its destination —
+    /// no payload is read until this returns.
+    pub async fn tar_put_begin(
+        &self,
+        service: &str,
+        source: &TarSource,
+        format: TarFormat,
+        len: u64,
+        token: &str,
+    ) -> Result<PendingTarPut> {
+        let cfg = self.cfg.get().await;
+        let (claims, user) = self.scoped_user(token, cfg.security.default_access)?;
+        self.enforce_ops(token, Some("files"))?;
+        if !crate::permissions::can_access_service(&user, service, cfg.security.default_access) {
+            bail!("service access denied: {service}");
+        }
+        Self::require_feature(&user, user.features.edit_files, "edit_files")?;
+        if len > cfg.webdav.max_upload_bytes {
+            bail!("upload exceeds {} bytes", cfg.webdav.max_upload_bytes);
+        }
+        let dest = match source {
+            TarSource::Container { id, path } => {
+                if !path.starts_with('/') || path == "/" {
+                    bail!("container destination must be an absolute path below /");
+                }
+                self.authorize_container(&cfg, &user, id).await?;
+                TarDest::Container {
+                    id: id.clone(),
+                    path: path.clone(),
+                }
+            }
+            TarSource::Volume { name, path } => {
+                let info = self.authorize_volume(&cfg, &user, name).await?;
+                let rel = path.trim_start_matches('/');
+                let abs = crate::files::resolve(Path::new(&info.mountpoint), rel)?;
+                match format {
+                    // tar formats extract into a directory
+                    TarFormat::Tar | TarFormat::Targz => TarDest::VolumeDir { dir: abs },
+                    // raw writes exactly one file at the resolved path
+                    TarFormat::Raw => TarDest::VolumeFile { file: abs },
+                }
+            }
+        };
+        self.justify(
+            &claims,
+            "tar_put",
+            &format!("{service}:{source:?} {format:?} ({len} bytes)"),
+        );
+        Ok(PendingTarPut { format, len, dest })
+    }
+
+    /// Consume the upload body and deliver it to the resolved destination.
+    pub async fn tar_put_stream(
+        &self,
+        cfg: &AppConfig,
+        pending: PendingTarPut,
+        reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> Result<crate::agent::proto::FileMeta> {
+        let tmp = tempfile::tempdir()?;
+        let upload = tmp.path().join("upload.bin");
+        let written = crate::tarops::spool_reader(reader, &upload, pending.len).await?;
+        if written != pending.len {
+            bail!("incomplete upload: got {written} of {} bytes", pending.len);
+        }
+        // normalize to a plain tar (or keep the raw file for Raw)
+        let (tar_file, is_raw) = match pending.format {
+            TarFormat::Raw => (upload, true),
+            TarFormat::Tar => (upload, false),
+            TarFormat::Targz => {
+                let plain = tmp.path().join("payload.tar");
+                crate::tarops::gunzip_tar(&upload, &plain)?;
+                (plain, false)
+            }
+        };
+        match &pending.dest {
+            TarDest::Container { id, path } => {
+                let to_archive = |f: tokio::fs::File| -> crate::docker::ArchiveStream {
+                    let rs = tokio_util::io::ReaderStream::new(f);
+                    Box::pin(futures::StreamExt::map(rs, |r| {
+                        r.map_err(anyhow::Error::from)
+                    }))
+                };
+                if is_raw {
+                    // docker PUT archive always extracts a tar — wrap the
+                    // single file so it lands at `path`.
+                    let name = path
+                        .rsplit('/')
+                        .next()
+                        .filter(|s| !s.is_empty())
+                        .context("container destination has no file name")?;
+                    let parent = path
+                        .rsplit_once('/')
+                        .map(|(p, _)| if p.is_empty() { "/" } else { p })
+                        .unwrap_or("/");
+                    let wrapped = tmp.path().join("single.tar");
+                    crate::tarops::tar_single_file(&tar_file, name, &wrapped)?;
+                    let f = tokio::fs::File::open(&wrapped).await?;
+                    self.docker
+                        .container_extract(id, parent, to_archive(f))
+                        .await?;
+                } else {
+                    let f = tokio::fs::File::open(&tar_file).await?;
+                    self.docker
+                        .container_extract(id, path, to_archive(f))
+                        .await?;
+                }
+            }
+            TarDest::VolumeDir { dir } => {
+                std::fs::create_dir_all(dir)?;
+                crate::tarops::extract_tar_safe(&tar_file, dir, cfg.webdav.max_upload_bytes)?;
+            }
+            TarDest::VolumeFile { file } => {
+                if let Some(parent) = file.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                // stage + rename so a failed copy never leaves a partial file
+                let staged = file.with_extension("ddm-upload-tmp");
+                std::fs::copy(&tar_file, &staged)?;
+                std::fs::rename(&staged, file)?;
+            }
+        }
+        Ok(crate::agent::proto::FileMeta {
+            kind: "archive".into(),
+            size: pending.len,
+            mtime: chrono::Utc::now().timestamp(),
+        })
     }
 
     // ------------------------------------------------------------------
@@ -3066,6 +3341,7 @@ fn sync_verb_op(v: &SyncVerb) -> Option<&'static str> {
         | GitBranches { .. }
         | GitDiff { .. }
         | ProjectContainers { .. }
+        | ProjectVolumes { .. }
         | ContainerHealth { .. }
         | UnitFileRead { .. }
         | UnitCheck { .. }

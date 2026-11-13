@@ -269,6 +269,68 @@ impl Agent {
         }
     }
 
+    /// Container/volume download. The agent materializes the payload
+    /// (tar/targz/raw) into a temp file first — callers get a bounded
+    /// stream of exactly `sent` bytes like [`Agent::file_get`].
+    pub async fn tar_get(
+        &self,
+        service: &str,
+        source: &proto::TarSource,
+        format: proto::TarFormat,
+        token: &str,
+    ) -> Result<(proto::FileMeta, u64, transport::DownloadStream)> {
+        match self {
+            Agent::Local(core) => {
+                let (meta, sent, f, _tmp) =
+                    core.tar_get_begin(service, source, format, token).await?;
+                // `_tmp` may drop now: the open File handle keeps the
+                // payload readable (POSIX unlink semantics).
+                Ok((
+                    meta,
+                    sent,
+                    transport::DownloadStream::Local(tokio::io::AsyncReadExt::take(f, sent)),
+                ))
+            }
+            Agent::Remote(s) => s.tar_get(service, source, format, token).await,
+        }
+    }
+
+    /// Container/volume upload — same incremental contract as
+    /// [`Agent::file_put`]: the agent authorizes before bytes are sent.
+    pub async fn tar_put(
+        &self,
+        service: &str,
+        source: &proto::TarSource,
+        format: proto::TarFormat,
+        len: u64,
+        token: &str,
+    ) -> Result<UploadSink> {
+        match self {
+            Agent::Local(core) => {
+                let pending = core
+                    .tar_put_begin(service, source, format, len, token)
+                    .await?;
+                let (tx, rx) = tokio::io::duplex(64 * 1024);
+                let (done_tx, done) = tokio::sync::oneshot::channel();
+                let core = core.clone();
+                tokio::spawn(async move {
+                    let cfg = core.cfg.get().await;
+                    let mut rx = rx;
+                    let res = core.tar_put_stream(&cfg, pending, &mut rx).await;
+                    let _ = done_tx.send(res);
+                });
+                Ok(UploadSink::Pipe {
+                    tx,
+                    done,
+                    remaining: len,
+                })
+            }
+            Agent::Remote(s) => Ok(UploadSink::Remote(
+                s.tar_put(service, source, format, len, token).await?,
+            )),
+        }
+    }
+
     /// Subscribe to monitor events. For a remote agent this opens a Watch
     /// connection (authenticated) and re-broadcasts locally.
     pub async fn subscribe_events(

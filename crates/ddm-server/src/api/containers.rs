@@ -59,6 +59,27 @@ fn command_argv(v: &Value) -> Result<Vec<String>, Response> {
     }
 }
 
+/// GET /api/services/:name/containers — list the service's compose-project
+/// containers (id, name, service, state) for pickers like the file transfer UI.
+pub async fn service_containers(
+    user: AuthUser,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<crate::auth::SuccessResponse<Vec<ContainerInfo>>>, Response> {
+    let svc = super::services::require_service_access(&state, &user, &name).await?;
+    let containers: Vec<ContainerInfo> = state
+        .agent
+        .call_as(
+            SyncVerb::ProjectContainers {
+                service: svc.name.clone(),
+            },
+            &user.token,
+        )
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(ok(containers))
+}
+
 /// POST /api/services/:name/exec — exec inside one of the service's
 /// containers (feature `exec_containers` + service access).
 pub async fn service_exec(

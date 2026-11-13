@@ -9,6 +9,7 @@ import './ddm-unit-editor';
 import './ddm-backup-panel';
 import './ddm-service-monitoring';
 import './ddm-files';
+import './ddm-cfiles';
 import './ddm-git';
 
 @customElement('ddm-service-detail')
@@ -234,7 +235,8 @@ export class DdmServiceDetail extends LitElement {
       case 'compose':
         return html`<ddm-compose-editor name=${this.name}></ddm-compose-editor>`;
       case 'files':
-        return html`<ddm-files name=${this.name}></ddm-files>`;
+        return html`<ddm-files name=${this.name}></ddm-files>
+          <ddm-cfiles name=${this.name}></ddm-cfiles>`;
       case 'git':
         return html`<ddm-git name=${this.name}></ddm-git>`;
       case 'unit':

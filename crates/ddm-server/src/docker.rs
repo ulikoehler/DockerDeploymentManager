@@ -33,6 +33,9 @@ pub trait DockerApi: Send + Sync {
     /// List containers of a compose project (label filter).
     async fn project_containers(&self, project: &str) -> Result<Vec<ContainerInfo>>;
 
+    /// Names of volumes carrying the compose-project label.
+    async fn project_volumes(&self, project: &str) -> Result<Vec<String>>;
+
     /// Health status string of a container ("healthy"/"unhealthy"/...).
     async fn container_health(&self, id: &str) -> Result<Option<String>>;
 
@@ -56,6 +59,32 @@ pub trait DockerApi: Send + Sync {
     /// Compose project owning the container (`com.docker.compose.project`
     /// label), used to map a container id back to a managed service.
     async fn container_project(&self, id: &str) -> Result<Option<String>>;
+
+    /// Tar archive of a path inside a container (docker archive API —
+    /// works on running and stopped containers). Uncompressed tar in
+    /// practice; callers sniff the compression magic.
+    async fn container_archive(&self, id: &str, path: &str) -> Result<ArchiveStream>;
+
+    /// Extract a tar stream into `path` inside a container (docker PUT
+    /// archive — the daemon sanitizes entry paths itself).
+    async fn container_extract(&self, id: &str, path: &str, tar: ArchiveStream) -> Result<()>;
+
+    /// Mountpoint + compose project label of a named volume. `None` when
+    /// the volume does not exist.
+    async fn volume_info(&self, name: &str) -> Result<Option<VolumeInfo>>;
+}
+
+/// Byte stream of a container archive (tar, possibly compressed).
+pub type ArchiveStream = Pin<Box<dyn futures::Stream<Item = Result<bytes::Bytes>> + Send>>;
+
+/// What the agent needs to authorize and locate a named volume.
+#[derive(Debug, Clone)]
+pub struct VolumeInfo {
+    /// Host path of the volume's `_data` dir.
+    pub mountpoint: String,
+    /// `com.docker.compose.project` label, if the volume belongs to a
+    /// compose project.
+    pub project: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +156,23 @@ impl DockerApi for BollardDocker {
         };
         let list = self.docker.list_containers(Some(opts)).await?;
         Ok(list.into_iter().map(map_container).collect())
+    }
+
+    async fn project_volumes(&self, project: &str) -> Result<Vec<String>> {
+        use bollard::volume::ListVolumesOptions;
+        let mut filters = HashMap::new();
+        filters.insert(
+            "label".to_string(),
+            vec![format!("com.docker.compose.project={project}")],
+        );
+        let opts = ListVolumesOptions { filters };
+        let resp = self.docker.list_volumes(Some(opts)).await?;
+        Ok(resp
+            .volumes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| v.name)
+            .collect())
     }
 
     async fn container_health(&self, id: &str) -> Result<Option<String>> {
@@ -232,6 +278,50 @@ impl DockerApi for BollardDocker {
             .and_then(|c| c.labels)
             .and_then(|l| l.get("com.docker.compose.project").cloned()))
     }
+
+    async fn container_archive(&self, id: &str, path: &str) -> Result<ArchiveStream> {
+        use bollard::container::DownloadFromContainerOptions;
+        let opts = DownloadFromContainerOptions {
+            path: path.to_string(),
+        };
+        Ok(Box::pin(
+            self.docker
+                .download_from_container(id, Some(opts))
+                .map(|r| r.map_err(anyhow::Error::from)),
+        ))
+    }
+
+    async fn container_extract(&self, id: &str, path: &str, tar: ArchiveStream) -> Result<()> {
+        use bollard::container::UploadToContainerOptions;
+        // bollard wants a plain Byte stream (no Result) — a mid-stream io
+        // error truncates the tar and the daemon rejects it anyway.
+        let bytes = tar.map(|r| r.unwrap_or_default());
+        let opts = UploadToContainerOptions {
+            path: path.to_string(),
+            no_overwrite_dir_non_dir: "false".to_string(),
+        };
+        self.docker
+            .upload_to_container_streaming(id, Some(opts), bytes)
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    async fn volume_info(&self, name: &str) -> Result<Option<VolumeInfo>> {
+        match self.docker.inspect_volume(name).await {
+            Ok(v) => Ok(Some(VolumeInfo {
+                mountpoint: v.mountpoint,
+                project: v.labels.get("com.docker.compose.project").cloned(),
+            })),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("No such volume") || msg.contains("not found") {
+                    Ok(None)
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +365,10 @@ impl DockerApi for MockDocker {
             .cloned()
             .collect())
     }
+    async fn project_volumes(&self, _project: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     async fn container_health(&self, id: &str) -> Result<Option<String>> {
         Ok(self.health.lock().unwrap().get(id).cloned().unwrap_or(None))
     }
@@ -313,5 +407,17 @@ impl DockerApi for MockDocker {
 
     async fn container_project(&self, id: &str) -> Result<Option<String>> {
         Ok(self.projects.lock().unwrap().get(id).cloned())
+    }
+
+    async fn container_archive(&self, _id: &str, _path: &str) -> Result<ArchiveStream> {
+        anyhow::bail!("container_archive not supported by mock")
+    }
+
+    async fn container_extract(&self, _id: &str, _path: &str, _tar: ArchiveStream) -> Result<()> {
+        anyhow::bail!("container_extract not supported by mock")
+    }
+
+    async fn volume_info(&self, _name: &str) -> Result<Option<VolumeInfo>> {
+        Ok(None)
     }
 }

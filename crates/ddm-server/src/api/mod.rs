@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod cfiles;
 pub mod commands_api;
 pub mod containers;
 pub mod files;
@@ -68,6 +69,10 @@ pub fn api_router() -> Router<AppState> {
         .route("/api/services/:name/actions", post(services::action))
         .route("/api/services/:name/logs", get(services::logs))
         // container exec
+        .route(
+            "/api/services/:name/containers",
+            get(containers::service_containers),
+        )
         .route("/api/services/:name/exec", post(containers::service_exec))
         .route("/api/containers/:id/exec", post(containers::container_exec))
         // files + git
@@ -84,6 +89,16 @@ pub fn api_router() -> Router<AppState> {
             get(files::download_file),
         )
         .route("/api/services/:name/files/upload", put(files::upload_file))
+        // container + volume file transfers
+        .route(
+            "/api/services/:name/containers/:cid/files",
+            get(cfiles::container_download).put(cfiles::container_upload),
+        )
+        .route("/api/services/:name/volumes", get(cfiles::volumes_list))
+        .route(
+            "/api/services/:name/volumes/:vol/files",
+            get(cfiles::volume_download).put(cfiles::volume_upload),
+        )
         .route("/api/services/:name/git/repos", get(files::git_repos))
         .route("/api/services/:name/git/status", get(files::git_status))
         .route("/api/services/:name/git/log", get(files::git_log))

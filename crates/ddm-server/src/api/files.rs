@@ -14,7 +14,7 @@ use super::services::require_service_access;
 
 /// Writes (file edits, git mutations) need admin or the `edit_files` feature.
 #[allow(clippy::result_large_err)]
-fn require_edit_files(user: &AuthUser) -> Result<(), Response> {
+pub(crate) fn require_edit_files(user: &AuthUser) -> Result<(), Response> {
     if user.user.is_admin() || user.user.features.edit_files {
         Ok(())
     } else {

@@ -22,6 +22,7 @@ mod protocol;
 mod registry;
 mod services;
 mod systemd;
+mod tarops;
 mod users;
 mod webdav;
 mod webui;

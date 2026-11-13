@@ -560,6 +560,7 @@ dependencies = [
  "axum-extra",
  "base64 0.22.1",
  "bollard",
+ "bytes",
  "chrono",
  "clap",
  "flate2",

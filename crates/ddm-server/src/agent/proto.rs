@@ -128,6 +128,30 @@ pub enum ExecVerb {
     ImageLoad { path: String },
 }
 
+/// Where a container/volume file transfer reads from or writes to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TarSource {
+    /// A path inside a container's filesystem (docker archive API —
+    /// works on running and stopped containers).
+    Container { id: String, path: String },
+    /// A path inside a named docker volume (resolved via its host
+    /// mountpoint).
+    Volume { name: String, path: String },
+}
+
+/// Payload encoding for container/volume transfers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TarFormat {
+    /// Single regular file, raw bytes (no archive).
+    Raw,
+    /// Uncompressed tar archive.
+    Tar,
+    /// gzip-compressed tar archive.
+    Targz,
+}
+
 /// Operations with a single JSON response. All privileged filesystem,
 /// docker, systemd, git and secret-touching reads/writes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +219,10 @@ pub enum SyncVerb {
         execution_id: String,
     },
     ProjectContainers {
+        service: String,
+    },
+    /// Named volumes belonging to a service's compose project.
+    ProjectVolumes {
         service: String,
     },
     ContainerHealth {
@@ -471,6 +499,25 @@ pub enum AgentRequest {
         service: String,
         path: String,
         offset: u64,
+        len: u64,
+        token: String,
+    },
+    /// Stream a file or tar(.gz) archive out of a container path or
+    /// volume. Same wire shape as `FileGet` — the payload is a regular
+    /// file or archive produced agent-side.
+    TarGet {
+        service: String,
+        source: TarSource,
+        format: TarFormat,
+        token: String,
+    },
+    /// Stream a file or tar(.gz) into a container path or volume.
+    /// Same wire shape as `FilePut`: JSON request line, `len` raw bytes,
+    /// then a JSON verdict.
+    TarPut {
+        service: String,
+        source: TarSource,
+        format: TarFormat,
         len: u64,
         token: String,
     },

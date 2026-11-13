@@ -101,6 +101,33 @@ git mutations need the `edit_files` feature or admin.
 | POST | `/api/services/{name}/files/rename` | `{from, to}` |
 | DELETE | `/api/services/{name}/files?path=` | file or dir (recursive); refuses the root |
 
+## Container & volume file transfer
+
+Read/write files inside a container's filesystem or a named Docker volume —
+no restart or bind mount needed. Authorization mirrors the service: a
+container is checked against its compose project (unmanaged containers are
+admin-only), a volume via its `com.docker.compose.project` label (unmanaged
+volumes are admin-only). Uploads additionally need the `edit_files` feature;
+both directions respect the caller's `ops` scope (`read` for downloads,
+`files` for uploads). Payloads are capped at `webdav.max_upload_bytes`.
+
+`format` is `raw` (single file), `tar`, or `targz` (default `targz` for
+GET, `raw` for PUT). Container paths are absolute (`/etc/…`); volume paths
+are relative to the volume root (`/` or empty = root). A `raw` upload to a
+container wraps the file in a tar and extracts it at the destination's
+parent; `raw` to a volume writes exactly one file at the resolved path;
+`tar`/`targz` extract an archive into the destination directory (safe:
+no `..`, absolute paths, or link/device entries).
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/services/{name}/containers` | project containers `{id,name,service,state}` |
+| GET | `/api/services/{name}/volumes` | project volume names |
+| GET | `/api/services/{name}/containers/{cid}/files?path=&format=` | download (attachment; `Content-Disposition` filename) |
+| PUT | `/api/services/{name}/containers/{cid}/files?path=&format=` | upload raw body → `{size}` |
+| GET | `/api/services/{name}/volumes/{vol}/files?path=&format=` | download |
+| PUT | `/api/services/{name}/volumes/{vol}/files?path=&format=` | upload raw body → `{size}` |
+
 ## WebDAV (`/dav`)
 
 A standard WebDAV surface over the service directories, for file managers,

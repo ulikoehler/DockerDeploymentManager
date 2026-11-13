@@ -253,6 +253,52 @@ export async function apiUploadFile(name: string, path: string, data: Blob | Arr
   }
   return json.data ?? json;
 }
+// --- container / volume file transfers -------------------------------
+// kind: "container" | "volume"; id is a container id or volume name.
+// format: raw | tar | targz.
+export function cfileDownloadUrl(
+  name: string,
+  kind: 'container' | 'volume',
+  id: string,
+  path: string,
+  format: string,
+): string {
+  const base =
+    kind === 'container'
+      ? `/api/services/${name}/containers/${encodeURIComponent(id)}/files`
+      : `/api/services/${name}/volumes/${encodeURIComponent(id)}/files`;
+  return `${base}?path=${encodeURIComponent(path)}&format=${format}`;
+}
+export async function apiCfileUpload(
+  name: string,
+  kind: 'container' | 'volume',
+  id: string,
+  path: string,
+  format: string,
+  data: Blob | ArrayBuffer,
+): Promise<any> {
+  const base =
+    kind === 'container'
+      ? `/api/services/${name}/containers/${encodeURIComponent(id)}/files`
+      : `/api/services/${name}/volumes/${encodeURIComponent(id)}/files`;
+  const res = await fetch(`${base}?path=${encodeURIComponent(path)}&format=${format}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+    },
+    body: data,
+  });
+  const json = await res.json().catch(() => ({ success: false, error: `HTTP ${res.status}` }));
+  if (!res.ok || json.success === false) {
+    if (res.status === 401) clearToken();
+    throw new ApiError(res.status, json.error || `HTTP ${res.status}`);
+  }
+  return json.data ?? json;
+}
+export const apiServiceVolumes = (name: string) => api<string[]>(`/api/services/${name}/volumes`);
+export const apiServiceContainers = (name: string) =>
+  api<any[]>(`/api/services/${name}/containers`);
 export const apiExecutionCancel = (id: string) =>
   api(`/api/executions/${id}/cancel`, { method: 'POST' });
 export const apiPutMeta = (name: string, meta: unknown) =>

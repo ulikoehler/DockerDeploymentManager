@@ -46,6 +46,12 @@ const GROUPS: { title: string; eps: Ep[] }[] = [
       { method: 'DELETE', path: '/api/services/:name/files?path=', desc: 'delete file/dir' },
       { method: 'ANY', path: '/dav/:service/*', desc: 'WebDAV — Bearer JWT or Basic user:token; needs mount_files feature' },
       { method: 'ANY', path: '/v2/*', desc: 'OCI registry — docker push/pull straight to DDM (GET /v2/token takes Basic auth; writes need push_images)' },
+      { method: 'GET', path: '/api/services/:name/containers', desc: 'list compose-project containers {id,name,service,state}' },
+      { method: 'GET', path: '/api/services/:name/volumes', desc: 'list compose-project volume names' },
+      { method: 'GET', path: '/api/services/:name/containers/:cid/files?path=&format=', desc: 'download from container fs — format: raw|tar|targz (default targz); container paths are absolute' },
+      { method: 'PUT', path: '/api/services/:name/containers/:cid/files?path=&format=', desc: 'upload to container fs (raw body) — raw wraps one file, tar/targz extract an archive; needs edit_files' },
+      { method: 'GET', path: '/api/services/:name/volumes/:vol/files?path=&format=', desc: 'download from a named volume — same formats; path relative to volume root' },
+      { method: 'PUT', path: '/api/services/:name/volumes/:vol/files?path=&format=', desc: 'upload to a named volume (raw body) — needs edit_files' },
     ],
   },
   {

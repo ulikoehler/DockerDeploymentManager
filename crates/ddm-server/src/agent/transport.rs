@@ -255,6 +255,72 @@ async fn handle_conn(
             }
             Err(e) => write_err(&mut w, "file_get", e).await?,
         },
+        AgentRequest::TarGet {
+            service,
+            source,
+            format,
+            token,
+        } => match core.tar_get_begin(&service, &source, format, &token).await {
+            Ok((meta, sent, mut f, _tmp)) => {
+                write_resp(
+                    &mut w,
+                    &AgentResponse::Ok {
+                        data: serde_json::json!({
+                            "kind": meta.kind,
+                            "size": meta.size,
+                            "mtime": meta.mtime,
+                            "sent": sent,
+                        }),
+                    },
+                )
+                .await?;
+                // Exactly `sent` raw bytes follow, then the connection ends.
+                // `_tmp` stays alive until the copy completes.
+                let mut limited = tokio::io::AsyncReadExt::take(&mut f, sent);
+                tokio::io::copy(&mut limited, &mut w).await?;
+                let _ = w.shutdown().await;
+            }
+            Err(e) => write_err(&mut w, "tar_get", e).await?,
+        },
+        AgentRequest::TarPut {
+            service,
+            source,
+            format,
+            len,
+            token,
+        } => {
+            let pending = match core
+                .tar_put_begin(&service, &source, format, len, &token)
+                .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    write_err(&mut w, "tar_put", e).await?;
+                    return Ok(());
+                }
+            };
+            write_resp(
+                &mut w,
+                &AgentResponse::Ok {
+                    data: serde_json::json!({ "ready": true }),
+                },
+            )
+            .await?;
+            let cfg = core.cfg.get().await;
+            let mut body = (&mut reader).take(len);
+            let resp = match core.tar_put_stream(&cfg, pending, &mut body).await {
+                Ok(meta) => AgentResponse::Ok {
+                    data: serde_json::to_value(meta)?,
+                },
+                Err(e) => AgentResponse::Err {
+                    error: AgentError {
+                        code: "tar_put".into(),
+                        message: format!("{e:#}"),
+                    },
+                },
+            };
+            write_resp(&mut w, &resp).await?;
+        }
     }
     Ok(())
 }
@@ -447,6 +513,84 @@ impl SocketAgent {
                 let sent = data["sent"].as_u64().unwrap_or(0);
                 Ok((meta, sent, DownloadStream::Remote(reader.take(sent))))
             }
+            AgentResponse::Err { error } => bail!("{}: {}", error.code, error.message),
+            AgentResponse::StreamStart { .. } => bail!("unexpected stream"),
+        }
+    }
+
+    /// Container/volume download — same wire shape as [`Self::file_get`].
+    pub(crate) async fn tar_get(
+        &self,
+        service: &str,
+        source: &TarSource,
+        format: TarFormat,
+        token: &str,
+    ) -> Result<(FileMeta, u64, DownloadStream)> {
+        let sock = UnixStream::connect(&self.path)
+            .await
+            .with_context(|| format!("connecting to agent at {}", self.path.display()))?;
+        let (r, mut w) = sock.into_split();
+        let req = AgentRequest::TarGet {
+            service: service.to_string(),
+            source: source.clone(),
+            format,
+            token: token.to_string(),
+        };
+        let mut buf = serde_json::to_vec(&req)?;
+        buf.push(b'\n');
+        w.write_all(&buf).await?;
+        let mut reader = BufReader::new(r);
+        let line = read_line_bounded(&mut reader, MAX_REQ)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("agent closed connection"))?;
+        match serde_json::from_str::<AgentResponse>(&line)? {
+            AgentResponse::Ok { data } => {
+                let meta = FileMeta {
+                    kind: data["kind"].as_str().unwrap_or("file").to_string(),
+                    size: data["size"].as_u64().unwrap_or(0),
+                    mtime: data["mtime"].as_i64().unwrap_or(0),
+                };
+                let sent = data["sent"].as_u64().unwrap_or(0);
+                Ok((meta, sent, DownloadStream::Remote(reader.take(sent))))
+            }
+            AgentResponse::Err { error } => bail!("{}: {}", error.code, error.message),
+            AgentResponse::StreamStart { .. } => bail!("unexpected stream"),
+        }
+    }
+
+    /// Container/volume upload — same wire shape as [`Self::file_put`].
+    pub(crate) async fn tar_put(
+        &self,
+        service: &str,
+        source: &TarSource,
+        format: TarFormat,
+        len: u64,
+        token: &str,
+    ) -> Result<RemoteUpload> {
+        let sock = UnixStream::connect(&self.path)
+            .await
+            .with_context(|| format!("connecting to agent at {}", self.path.display()))?;
+        let (r, mut w) = sock.into_split();
+        let req = AgentRequest::TarPut {
+            service: service.to_string(),
+            source: source.clone(),
+            format,
+            len,
+            token: token.to_string(),
+        };
+        let mut buf = serde_json::to_vec(&req)?;
+        buf.push(b'\n');
+        w.write_all(&buf).await?;
+        let mut reader = BufReader::new(r);
+        let line = read_line_bounded(&mut reader, MAX_REQ)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("agent closed connection"))?;
+        match serde_json::from_str::<AgentResponse>(&line)? {
+            AgentResponse::Ok { .. } => Ok(RemoteUpload {
+                w,
+                reader,
+                remaining: len,
+            }),
             AgentResponse::Err { error } => bail!("{}: {}", error.code, error.message),
             AgentResponse::StreamStart { .. } => bail!("unexpected stream"),
         }
