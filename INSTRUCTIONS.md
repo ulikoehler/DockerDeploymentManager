@@ -13,8 +13,9 @@ MCP-connected agents; keep it in sync with `crates/ddm-server/src/mcp.rs`.
 - **Auth**: send `Authorization: Bearer <token>`. Tokens are minted via
   `POST /api/auth/token` (or the web UI) and can be scoped — `services`,
   `actions`, `ops`, `service_creates` (max number of services the token may
-  create) and `manage_created` (token may fully manage services it created
-  itself, even outside its `services` allowlist). Scoped tokens only ever
+  create), `manage_created` (token may fully manage services it created
+  itself, even outside its `services` allowlist), `create_domain`,
+  `browser_login` and `read_other_service_files`. Scoped tokens only ever
   narrow permissions.
 - **Async operations**: long-running calls (git clone/pull, backup run,
   restores, command execution, systemd restarts) return an
@@ -357,7 +358,11 @@ common shapes:
 
 - **Full token** — no scopes: everything the user can do.
 - **Service-scoped** — `services:["web"]`: full operator rights on `web`
-  (files, exec, backups, compose, monitoring, git) and nothing elsewhere.
+  (files, exec, backups, compose, monitoring, git, compose actions like
+  `up`/`restart`/`pull`) and nothing elsewhere. Minted by an admin it
+  keeps the `operator` role — `admin` itself is always stripped, so
+  host-level surfaces (command sections, gitops, user management) stay
+  closed.
 - **Creation token** — `services:[]` + `service_creates:N` +
   `manage_created:true`: create at most N services and fully manage only
   those. Add `create_domain:"example.com"` to restrict compose writes to
@@ -366,5 +371,10 @@ common shapes:
   compose-file uploads. Omit it for all domains.
 
 Still admin-only regardless of scope: gitops sync/push, service
-deletion, user management, and backup restore (needs admin or an
-`unrestricted` compose policy).
+deletion, user management, backup restore (needs admin or an
+`unrestricted` compose policy), and host-level command sections whose
+`required_role` is `admin` (e.g. arbitrary host shell). DDM exposes **no
+image-build API** — `docker buildx`/`bauen.sh`/`docker login` are host
+operations outside every token scope; recreate stacks with
+`service_action {action:"update"}` (pull + `up -d`) once the image is
+built and pushed, or `{"action":"up"}` when `.env`/compose changed.
