@@ -32,6 +32,9 @@ pub struct PendingPut {
     /// Declared payload length — a short body means the client vanished
     /// mid-upload and the staged bytes must not be committed.
     pub len: u64,
+    /// Token scope's create_domain, carried from authorize-time so the
+    /// compose gate can enforce it on the staged bytes.
+    pub create_domain: Option<String>,
 }
 
 /// Resolved destination of a container/volume upload.
@@ -566,6 +569,21 @@ impl AgentCore {
         Ok(())
     }
 
+    /// Enforce a token scope's `create_domain` on compose content: every
+    /// public hostname the file declares (router labels, domain-ish env
+    /// vars) must equal the allowed domain or be a subdomain of it.
+    /// `None` = unrestricted.
+    fn enforce_create_domain(domain: Option<&str>, content: &str) -> Result<()> {
+        let Some(domain) = domain else { return Ok(()) };
+        let parsed = crate::compose::parse_check(content)?;
+        for d in crate::compose::declared_domains(&parsed) {
+            if d != domain && !d.ends_with(&format!(".{domain}")) {
+                bail!("domain '{d}' is outside the token's create domain '{domain}'");
+            }
+        }
+        Ok(())
+    }
+
     fn require_feature(user: &User, ok: bool, what: &str) -> Result<()> {
         if user.is_admin() || ok {
             Ok(())
@@ -937,6 +955,7 @@ impl AgentCore {
                 ops,
                 service_creates,
                 manage_created,
+                create_domain,
                 name,
             } => {
                 self.do_mint(
@@ -947,6 +966,7 @@ impl AgentCore {
                     ops,
                     service_creates,
                     manage_created,
+                    create_domain,
                     name,
                 )
                 .await
@@ -1189,6 +1209,7 @@ impl AgentCore {
                 ops: None,
                 service_creates: None,
                 manage_created: false,
+                create_domain: None,
                 revoked: false,
                 kind: "session".into(),
                 name: None,
@@ -1218,6 +1239,7 @@ impl AgentCore {
         ops: Option<Vec<String>>,
         service_creates: Option<u32>,
         manage_created: bool,
+        create_domain: Option<String>,
         name: Option<String>,
     ) -> Result<serde_json::Value> {
         let parent_claims = self
@@ -1247,6 +1269,28 @@ impl AgentCore {
             .clamp(1, MAX_MINT_TTL_MINUTES)
             * 60;
         // Intersect with the parent's scope — a child can only narrow.
+        // The create_domain child must be the parent's domain or a
+        // subdomain of it; an invalid requested domain is rejected.
+        let parent_domain = parent_claims
+            .scope
+            .as_ref()
+            .and_then(|s| s.create_domain.as_deref());
+        let child_domain = match (parent_domain, create_domain.as_deref()) {
+            (Some(p), Some(c)) => {
+                let c = crate::auth::normalize_create_domain(c)
+                    .ok_or_else(|| anyhow!("invalid create_domain"))?;
+                if c != p && !c.ends_with(&format!(".{p}")) {
+                    bail!("create_domain '{c}' is outside the parent's '{p}'");
+                }
+                Some(c)
+            }
+            (Some(p), None) => Some(p.to_string()),
+            (None, Some(c)) => Some(
+                crate::auth::normalize_create_domain(c)
+                    .ok_or_else(|| anyhow!("invalid create_domain"))?,
+            ),
+            (None, None) => None,
+        };
         let scope = match (
             &parent_claims.scope,
             &services,
@@ -1254,8 +1298,9 @@ impl AgentCore {
             &ops,
             &service_creates,
             manage_created,
+            &child_domain,
         ) {
-            (None, None, None, None, None, false) => None,
+            (None, None, None, None, None, false, None) => None,
             _ => Some(TokenScope {
                 services: intersect(&parent_claims.scope, |s| &s.services, &services),
                 actions: intersect(&parent_claims.scope, |s| &s.actions, &actions),
@@ -1278,6 +1323,7 @@ impl AgentCore {
                         .as_ref()
                         .map(|s| s.manage_created)
                         .unwrap_or(true),
+                create_domain: child_domain.clone(),
             }),
         };
         let mut roles: Vec<String> = parent_claims
@@ -1348,6 +1394,7 @@ impl AgentCore {
                 ops: scope.as_ref().and_then(|s| s.ops.clone()),
                 service_creates: scope.as_ref().and_then(|s| s.service_creates),
                 manage_created: scope.as_ref().map(|s| s.manage_created).unwrap_or(false),
+                create_domain: scope.as_ref().and_then(|s| s.create_domain.clone()),
                 revoked: false,
                 kind: "token".into(),
                 name: name
@@ -1546,7 +1593,7 @@ impl AgentCore {
                 path,
                 content,
             } => {
-                self.justify_token(token, "file_write", &format!("{service}:{path}"))?;
+                let (claims, _u) = self.justify_token(token, "file_write", &format!("{service}:{path}"))?;
                 if content.len() > MAX_FILE_WRITE {
                     bail!("file too large");
                 }
@@ -1559,6 +1606,10 @@ impl AgentCore {
                         .as_ref()
                         .ok_or_else(|| anyhow!("authorization state missing"))?;
                     self.guard_compose_write(&cfg, &svc.dir, &content, u)?;
+                    Self::enforce_create_domain(
+                        claims.scope.as_ref().and_then(|s| s.create_domain.as_deref()),
+                        &content,
+                    )?;
                 }
                 crate::files::write_file(&svc.dir, &path, &content)?;
                 Ok(serde_json::json!(true))
@@ -1885,8 +1936,12 @@ impl AgentCore {
                 )?))
             }
             SyncVerb::ComposeWrite { service, content } => {
-                self.justify_token(token, "compose_write", &service)?;
+                let (claims, _u) = self.justify_token(token, "compose_write", &service)?;
                 crate::compose::parse_check(&content)?;
+                Self::enforce_create_domain(
+                    claims.scope.as_ref().and_then(|s| s.create_domain.as_deref()),
+                    &content,
+                )?;
                 if content.len() > MAX_FILE_WRITE {
                     bail!("compose file too large");
                 }
@@ -2207,6 +2262,10 @@ impl AgentCore {
             service: service.to_string(),
             path: path.to_string(),
             len,
+            create_domain: claims
+                .scope
+                .as_ref()
+                .and_then(|s| s.create_domain.clone()),
         })
     }
 
@@ -2250,6 +2309,13 @@ impl AgentCore {
             };
             if let Err(e) = self.guard_compose_write(cfg, &pending.svc.dir, &content, &pending.user)
             {
+                staged.abort();
+                return Err(e);
+            }
+            if let Err(e) = Self::enforce_create_domain(
+                pending.create_domain.as_deref(),
+                &content,
+            ) {
                 staged.abort();
                 return Err(e);
             }
@@ -2836,6 +2902,10 @@ impl AgentCore {
                 start,
             } => {
                 crate::compose::parse_check(compose)?;
+                Self::enforce_create_domain(
+                    claims.scope.as_ref().and_then(|s| s.create_domain.as_deref()),
+                    compose,
+                )?;
                 // caller's per-user policy + restrictions, then the floor
                 if let Some(p) = crate::api::services::effective_policy_for_user(cfg, user) {
                     let base = Path::new(&cfg.paths.services_root).join(name);

@@ -140,6 +140,12 @@ pub struct TokenRequest {
     /// scope permits it.
     #[serde(default)]
     pub manage_created: bool,
+    /// Optional domain limit for compose writes: declared public
+    /// hostnames must equal this domain or be a subdomain of it
+    /// (e.g. `example.com` allows `app.example.com`). Omit for all.
+    /// A scoped parent can only pass on a subdomain of its own domain.
+    #[serde(default)]
+    pub create_domain: Option<String>,
     /// Optional human label shown in the token list (max 80 chars).
     #[serde(default)]
     pub name: Option<String>,
@@ -191,6 +197,7 @@ pub async fn issue_token(
             ops: req.ops.clone(),
             service_creates: req.service_creates.as_ref().and_then(|l| l.limit()),
             manage_created: req.manage_created,
+            create_domain: req.create_domain.clone(),
             name: req.name.clone(),
         })
         .await
@@ -203,7 +210,7 @@ pub async fn issue_token(
         None => "*".into(),
     };
     let detail = format!(
-        "ttl={ttl_secs}s services={} actions={} ops={} service_creates={} manage_created={} name={}",
+        "ttl={ttl_secs}s services={} actions={} ops={} service_creates={} manage_created={} create_domain={} name={}",
         fmt(&req.services),
         fmt(&req.actions),
         fmt(&req.ops),
@@ -213,6 +220,7 @@ pub async fn issue_token(
             .map(|n| n.to_string())
             .unwrap_or_else(|| "*".into()),
         req.manage_created,
+        req.create_domain.as_deref().unwrap_or("*"),
         req.name.as_deref().unwrap_or("-")
     );
     state

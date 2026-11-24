@@ -188,6 +188,15 @@ the login that produced it.
    `mount_files` still need an `actions` entry. An `actions` list is
    evaluated against effective (admin-implied) capabilities, so it can
    select e.g. `edit_files` for an admin whose stored flags are false.
+   The optional `create_domain` scope further restricts compose writes:
+   every public hostname a compose file declares (router `labels`
+   values and domain-ish `environment` keys — where Traefik/Caddy/
+   nginx-proxy style routers read them) must equal the domain or be a
+   subdomain of it. It is enforced agent-side on `ServiceCreate`,
+   `ComposeWrite`, compose-path `FileWrite` and streamed uploads, and
+   child tokens may only narrow to a subdomain of the parent's domain.
+   Image references, volume names and non-domain env vars are not
+   scanned, so registries and internal hostnames are unaffected.
 7. **Destructive ops** — backup `restore` requires `admin` or
    `unrestricted`; `target_dir` must be absolute without `..`.
 8. **Privileged files are not editable through the file API** —

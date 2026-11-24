@@ -344,13 +344,19 @@ tar/tar.gz archives. Same auth and path protections as the file API.
 
 **Operate safely with scoped tokens**
 Mint short-lived tokens with the narrowest scope (`services`, `actions`,
-`ops`, `service_creates`, `manage_created`). A token with just
-`services:["web"]` can do everything a service operator can on `web` —
-files, container exec, backups, compose edits, monitoring, git — and
-nothing on other services. Omit `actions` to keep all operational
-features; pass `actions` for an explicit capability subset, and `ops`
-to restrict operation categories (`read`, `logs`, `files`, `compose`,
-`meta`, `monitoring`, `backup`, `git`, `units`, `services`, `exec`,
-`registry`). Still admin-only regardless of scope: gitops sync/push,
-service deletion, user management, and backup restore (needs admin or
-an `unrestricted` compose policy).
+`ops`, `service_creates`, `manage_created`, `create_domain`). Three
+common shapes:
+
+- **Full token** — no scopes: everything the user can do.
+- **Service-scoped** — `services:["web"]`: full operator rights on `web`
+  (files, exec, backups, compose, monitoring, git) and nothing elsewhere.
+- **Creation token** — `services:[]` + `service_creates:N` +
+  `manage_created:true`: create at most N services and fully manage only
+  those. Add `create_domain:"example.com"` to restrict compose writes to
+  hostnames under that domain (the domain itself and any subdomain —
+  e.g. `app.example.com`); checked on service creation, compose PUT and
+  compose-file uploads. Omit it for all domains.
+
+Still admin-only regardless of scope: gitops sync/push, service
+deletion, user management, and backup restore (needs admin or an
+`unrestricted` compose policy).

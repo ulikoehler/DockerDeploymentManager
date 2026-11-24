@@ -48,12 +48,14 @@ export class DdmToken extends LitElement {
   @state() private services: ServiceSummary[] = [];
   @state() private ttlValue = 60;
   @state() private ttlUnit: 'minutes' | 'hours' | 'days' | 'months' | 'years' = 'minutes';
+  @state() private kind: 'full' | 'service' | 'creator' = 'full';
   @state() private scopeServices = false;
   @state() private scopeActions = false;
   @state() private scopeOps = false;
   @state() private scopeCreates = false;
   @state() private createsLimit = 1;
   @state() private manageCreated = true;
+  @state() private createDomain = '';
   @state() private tokenName = '';
   @state() private selServices = new Set<string>();
   @state() private selActions = new Set<string>();
@@ -112,6 +114,32 @@ export class DdmToken extends LitElement {
     return caps;
   }
 
+  /** Token-kind presets: full access, service-scoped, or a
+   *  create-N-and-manage-created token. Presets only set the scope
+   *  checkboxes below — every selection still narrows, never widens. */
+  private setKind(k: 'full' | 'service' | 'creator') {
+    this.kind = k;
+    if (k === 'full') {
+      this.scopeServices = false;
+      this.scopeActions = false;
+      this.scopeOps = false;
+      this.scopeCreates = false;
+    } else if (k === 'service') {
+      this.scopeServices = true;
+      this.scopeCreates = false;
+      this.manageCreated = false;
+    } else {
+      // creation token: no fixed services, capped creations, manages
+      // exactly what it created
+      this.scopeServices = true;
+      this.selServices = new Set();
+      this.scopeCreates = true;
+      this.manageCreated = true;
+      this.scopeActions = false;
+      this.scopeOps = false;
+    }
+  }
+
   private toggleSet(set: Set<string>, key: string, on: boolean): Set<string> {
     const s = new Set(set);
     if (on) s.add(key); else s.delete(key);
@@ -136,15 +164,28 @@ export class DdmToken extends LitElement {
       ops?: string[];
       service_creates?: number;
       manage_created?: boolean;
+      create_domain?: string;
       name?: string;
     } = { ttl_minutes: this.ttlMinutes() };
     const name = this.tokenName.trim();
     if (name) body.name = name;
-    if (this.scopeServices) body.services = [...this.selServices];
+    if (this.kind === 'creator') {
+      // creation tokens manage exactly the services they create — an
+      // explicit empty allowlist, never the user's full service set
+      body.services = [];
+      body.service_creates = Math.max(0, this.createsLimit);
+      body.manage_created = true;
+      const d = this.createDomain.trim();
+      if (d) body.create_domain = d;
+    } else {
+      if (this.scopeServices) body.services = [...this.selServices];
+      if (this.scopeCreates) body.service_creates = Math.max(0, this.createsLimit);
+      if (this.scopeCreates && this.manageCreated) body.manage_created = true;
+      const d = this.createDomain.trim();
+      if (d) body.create_domain = d;
+    }
     if (this.scopeActions) body.actions = [...this.selActions];
     if (this.scopeOps) body.ops = [...this.selOps];
-    if (this.scopeCreates) body.service_creates = Math.max(0, this.createsLimit);
-    if (this.scopeCreates && this.manageCreated) body.manage_created = true;
     try {
       this.issued = await apiIssueToken(body);
       this.loadTokens();
@@ -230,6 +271,18 @@ export class DdmToken extends LitElement {
         </div>
 
         <fieldset>
+          <legend>token kind</legend>
+          <div class="checks">
+            <label><input type="radio" name="tokkind" .checked=${this.kind === 'full'}
+              @change=${() => this.setKind('full')}> full access — everything you can do</label>
+            <label><input type="radio" name="tokkind" .checked=${this.kind === 'service'}
+              @change=${() => this.setKind('service')}> service-scoped — full control of picked services</label>
+            <label><input type="radio" name="tokkind" .checked=${this.kind === 'creator'}
+              @change=${() => this.setKind('creator')}> creation — create N services, manage only those</label>
+          </div>
+        </fieldset>
+
+        <fieldset>
           <legend>
             <label><input type="checkbox" .checked=${this.scopeServices}
               @change=${(e: Event) => (this.scopeServices = (e.target as HTMLInputElement).checked)}>
@@ -311,6 +364,18 @@ export class DdmToken extends LitElement {
             : html`<p class="muted">token may create as many services as your permissions allow</p>`}
         </fieldset>
 
+        <fieldset>
+          <legend>compose domain limit <span class="muted">(optional)</span></legend>
+          <label>allowed domain
+            <input type="text" style="width:16em" placeholder="e.g. example.com — empty = all domains"
+              .value=${this.createDomain}
+              @input=${(e: Event) => (this.createDomain = (e.target as HTMLInputElement).value)}>
+          </label>
+          <p class="muted">compose writes (service creation, compose PUT, compose-file uploads) may only declare
+            this domain and its subdomains — e.g. <code>app.example.com</code> is allowed, <code>evil.com</code> is not.
+            Applies to router labels and domain-like env vars; image registries and internal hostnames are unaffected.</p>
+        </fieldset>
+
         <button @click=${this.generate}>generate token</button>
       </div>
 
@@ -357,6 +422,7 @@ export class DdmToken extends LitElement {
                     t.ops ? `ops: ${t.ops.join(',')}` : '',
                     t.service_creates != null ? `creates: ${t.service_creates}` : '',
                     t.manage_created ? '+manage-created' : '',
+                    t.create_domain ? `dom: ${t.create_domain}` : '',
                   ].filter(Boolean).join(' · ') || (t.kind === 'session' ? 'login' : 'full')
                 }</td>
                 <td class="muted">${new Date(t.iat * 1000).toLocaleString()}</td>

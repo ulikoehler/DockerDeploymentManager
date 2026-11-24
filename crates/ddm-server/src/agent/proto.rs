@@ -376,6 +376,10 @@ pub enum CryptoOp {
         /// Token may fully manage services it created (meta jti match).
         /// Forced off when the parent's scope doesn't carry it.
         manage_created: bool,
+        /// Optional domain restriction for compose writes: declared
+        /// hostnames must equal it or be a subdomain of it. Children may
+        /// only narrow to a subdomain of the parent's domain.
+        create_domain: Option<String>,
         name: Option<String>,
     },
     Verify {
@@ -613,6 +617,9 @@ pub struct TokenRecord {
     /// Token may manage services it created (scope flag).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub manage_created: bool,
+    /// Domain restriction on compose writes (scope), if set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_domain: Option<String>,
     #[serde(default)]
     pub revoked: bool,
     /// "session" (login JWT) or "token" (minted for agents/scopes).

@@ -67,6 +67,33 @@ pub struct TokenScope {
     /// without it cannot pass it on.
     #[serde(default)]
     pub manage_created: bool,
+    /// If set, compose content this token writes (service creation,
+    /// compose PUT, compose-file file writes) may only declare public
+    /// hostnames equal to this domain or to a subdomain of it — e.g.
+    /// `example.com` permits `app.example.com` and `a.b.example.com`.
+    /// "All" (absent) = unrestricted. Children may only narrow to a
+    /// subdomain of the parent's domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_domain: Option<String>,
+}
+
+/// Normalize a `create_domain` scope value: lowercase, no trailing dot,
+/// must look like a DNS name. Returns `None` for empty/invalid input —
+/// callers decide whether that means "unrestricted" or an error.
+pub fn normalize_create_domain(raw: &str) -> Option<String> {
+    let d = raw.trim().trim_end_matches('.').to_lowercase();
+    if d.is_empty() || d.len() > 253 {
+        return None;
+    }
+    let ok = d.split('.').all(|l| {
+        !l.is_empty()
+            && l.len() <= 63
+            && l.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+    }) && d.contains('.');
+    ok.then_some(d)
 }
 
 /// Grant a scoped user access to services created by its token — prepends
@@ -617,6 +644,7 @@ mod security_tests {
             ops: None,
             service_creates: None,
             manage_created: false,
+        create_domain: None,
         };
         apply_token_scope(&mut user, &scope, DefaultAccess::Allow);
         assert!(!user.roles.iter().any(|r| r == "operator"));
@@ -649,6 +677,7 @@ mod security_tests {
             ops: None,
             service_creates: None,
             manage_created: false,
+        create_domain: None,
         };
         apply_token_scope(&mut user, &scope3, DefaultAccess::Deny);
         assert!(can_access_service(&user, "web", DefaultAccess::Deny));
@@ -670,6 +699,7 @@ mod security_tests {
             ops: None,
             service_creates: None,
             manage_created: false,
+        create_domain: None,
         };
         apply_token_scope(&mut user, &scope2, DefaultAccess::Deny);
         assert!(!user.is_admin());
@@ -685,6 +715,7 @@ mod security_tests {
                 ops: None,
                 service_creates: None,
                 manage_created: false,
+            create_domain: None,
             },
             DefaultAccess::Deny,
         );
@@ -709,6 +740,7 @@ mod security_tests {
                 ops: None,
                 service_creates: None,
                 manage_created: false,
+            create_domain: None,
             },
             DefaultAccess::Deny,
         );
@@ -731,6 +763,7 @@ mod security_tests {
                 ops: None,
                 service_creates: None,
                 manage_created: false,
+            create_domain: None,
             },
             DefaultAccess::Deny,
         );
@@ -747,6 +780,7 @@ mod security_tests {
                 ops: None,
                 service_creates: None,
                 manage_created: false,
+            create_domain: None,
             },
             DefaultAccess::Deny,
         );

@@ -2201,6 +2201,7 @@ async fn demoted_admin_loses_agent_admin() {
             ops: None,
             service_creates: None,
             manage_created: false,
+            create_domain: None,
             name: None,
         })
         .await;
