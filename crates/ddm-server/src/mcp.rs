@@ -1235,7 +1235,9 @@ impl ServerHandler for DdmMcp {
                  files, git repos, backups, monitoring and users. Obtain a bearer \
                  token via POST /api/auth/login and pass it as Authorization: \
                  Bearer <token> (or ?token=). Long-running operations return an \
-                 execution_id — poll it with execution_get.",
+                 execution_id — poll it with execution_get. Full service \
+                 reference with examples: \
+                 https://raw.githubusercontent.com/ulikoehler/DockerDeploymentManager/main/INSTRUCTIONS.md",
             )
     }
 }
