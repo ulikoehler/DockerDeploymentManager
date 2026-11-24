@@ -238,6 +238,31 @@ export class DdmToken extends LitElement {
     return `curl -H "Authorization: Bearer ${token}" \\\n  ${location.origin}/api/services`;
   }
 
+  /** Ready-to-paste instruction block for an agent prompt: where DDM
+   *  lives, how to authenticate, what to do, and the token itself. */
+  private agentPrompt(token: string, expiresAt: number): string {
+    const base = location.origin;
+    let task = 'manage Docker services';
+    if (this.kind === 'creator') {
+      task =
+        'create new services and manage only the services it creates' +
+        (this.createDomain.trim() ? ` — public hostnames must stay under ${this.createDomain.trim()}` : '');
+    } else if (this.kind === 'service') {
+      const svcs = [...this.selServices];
+      task = svcs.length ? `manage the service(s): ${svcs.join(', ')}` : 'manage services';
+    }
+    return [
+      `Manage Docker services through DDM (Docker Deployment Manager) at ${base}.`,
+      ``,
+      `- MCP endpoint: ${base}/mcp — send header \`Authorization: Bearer ${token}\``,
+      `- REST API: ${base}/api — same bearer token on every request`,
+      `- API reference with tool examples: https://raw.githubusercontent.com/ulikoehler/DockerDeploymentManager/main/INSTRUCTIONS.md`,
+      ``,
+      `Task: ${task}. Work only within what this token permits — it is scoped and enforced server-side.`,
+      `Token expires ${new Date(expiresAt * 1000).toLocaleString()}.`,
+    ].join('\n');
+  }
+
   render() {
     return html`
       <h2>Access tokens</h2>
@@ -402,7 +427,11 @@ export class DdmToken extends LitElement {
                 copy MCP client config</button>
               <button class="small secondary" @click=${() => this.copy(this.restExample(this.issued!.token))}>
                 copy REST example</button>
+              <button class="small secondary" @click=${() => this.copy(this.agentPrompt(this.issued!.token, this.issued!.expires_at))}>
+                copy agent prompt</button>
             </div>
+            <p class="muted">agent prompt — paste into your agent's instructions:</p>
+            <pre>${this.agentPrompt(this.issued.token, this.issued.expires_at)}</pre>
             <p class="muted">REST API usage:</p>
             <pre>${this.restExample(this.issued.token)}</pre>
             <p class="muted">MCP client configuration:</p>
