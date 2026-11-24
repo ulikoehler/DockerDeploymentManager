@@ -380,6 +380,11 @@ pub enum CryptoOp {
         /// hostnames must equal it or be a subdomain of it. Children may
         /// only narrow to a subdomain of the parent's domain.
         create_domain: Option<String>,
+        /// `Some(false)` forbids exchanging the minted token for a
+        /// browser session (`/api/auth/token-login`). `None`/`Some(true)`
+        /// = allowed (default). A parent that denies cannot pass a
+        /// child that allows.
+        browser_login: Option<bool>,
         name: Option<String>,
     },
     Verify {
@@ -429,6 +434,14 @@ pub enum CryptoOp {
     RevokeToken {
         token: String,
         jti: String,
+    },
+    /// Exchange a minted token (short token or JWT) for a browser
+    /// session. Resolves short tokens, verifies signature/expiry/
+    /// revocation and rejects tokens whose scope sets
+    /// `browser_login: false`. Returns the resolved JWT plus the
+    /// session-shaped profile the login endpoint hands out.
+    TokenLogin {
+        token: String,
     },
     /// Unauthenticated bootstrap check: true while users.yaml has zero
     /// users. Once any user exists this is permanently false.
@@ -620,6 +633,10 @@ pub struct TokenRecord {
     /// Domain restriction on compose writes (scope), if set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_domain: Option<String>,
+    /// False when the token's scope forbids browser login
+    /// (`browser_login: false`); absent in old records = allowed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub browser_login_denied: bool,
     #[serde(default)]
     pub revoked: bool,
     /// "session" (login JWT) or "token" (minted for agents/scopes).

@@ -1,6 +1,6 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { apiLogin, apiSetupStatus, apiSetupCreate, setToken, ApiError } from '../api';
+import { apiLogin, apiTokenLogin, apiSetupStatus, apiSetupCreate, setToken, ApiError } from '../api';
 import { sharedStyles } from '../styles';
 
 @customElement('ddm-login')
@@ -28,6 +28,7 @@ export class DdmLogin extends LitElement {
   @state() private error = '';
   @state() private busy = false;
   @state() private setupNeeded: boolean | null = null;
+  @state() private useToken = false;
 
   connectedCallback() {
     super.connectedCallback();
@@ -49,6 +50,24 @@ export class DdmLogin extends LitElement {
       this.dispatchEvent(new CustomEvent('login', { detail: r }));
     } catch (err) {
       this.error = err instanceof ApiError ? err.message : 'login failed';
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async submitToken(e: Event) {
+    e.preventDefault();
+    const form = e.target as HTMLFormElement;
+    const token = (form.elements.namedItem('token') as HTMLInputElement).value.trim();
+    if (!token) return;
+    this.busy = true;
+    this.error = '';
+    try {
+      const r = await apiTokenLogin(token);
+      setToken(r.token);
+      this.dispatchEvent(new CustomEvent('login', { detail: r }));
+    } catch (err) {
+      this.error = err instanceof ApiError ? err.message : 'token login failed';
     } finally {
       this.busy = false;
     }
@@ -100,12 +119,25 @@ export class DdmLogin extends LitElement {
       <div class="box card">
         <p class="brand">DDM</p>
         <p class="sub">Docker Deployment Manager</p>
-        <form @submit=${this.submit}>
-          <input name="name" placeholder="username" autocomplete="username" required>
-          <input name="password" type="password" placeholder="password"
-                 autocomplete="current-password" required>
-          <button ?disabled=${this.busy}>${this.busy ? '…' : 'Login'}</button>
-        </form>
+        ${this.useToken
+          ? html`
+            <form @submit=${this.submitToken}>
+              <input name="token" placeholder="paste access token" autocomplete="off" required>
+              <button ?disabled=${this.busy}>${this.busy ? '…' : 'Sign in with token'}</button>
+            </form>
+            <p class="sub" style="margin-top:0.8em">
+              <a href="#" @click=${(e: Event) => { e.preventDefault(); this.useToken = false; this.error = ''; }}>← username &amp; password</a>
+            </p>`
+          : html`
+            <form @submit=${this.submit}>
+              <input name="name" placeholder="username" autocomplete="username" required>
+              <input name="password" type="password" placeholder="password"
+                     autocomplete="current-password" required>
+              <button ?disabled=${this.busy}>${this.busy ? '…' : 'Login'}</button>
+            </form>
+            <p class="sub" style="margin-top:0.8em">
+              <a href="#" @click=${(e: Event) => { e.preventDefault(); this.useToken = true; this.error = ''; }}>sign in with a token instead</a>
+            </p>`}
         ${this.error ? html`<p class="error">${this.error}</p>` : ''}
       </div>
     `;

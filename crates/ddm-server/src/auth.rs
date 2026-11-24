@@ -75,6 +75,12 @@ pub struct TokenScope {
     /// subdomain of the parent's domain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_domain: Option<String>,
+    /// `Some(false)` forbids exchanging this token for a browser
+    /// session via `/api/auth/token-login` — API/MCP bearer use is
+    /// unaffected. Absent = allowed (the default). Can only narrow:
+    /// a parent that denies it cannot mint a child that allows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_login: Option<bool>,
 }
 
 /// Normalize a `create_domain` scope value: lowercase, no trailing dot,
@@ -645,6 +651,7 @@ mod security_tests {
             service_creates: None,
             manage_created: false,
         create_domain: None,
+            browser_login: None,
         };
         apply_token_scope(&mut user, &scope, DefaultAccess::Allow);
         assert!(!user.roles.iter().any(|r| r == "operator"));
@@ -678,6 +685,7 @@ mod security_tests {
             service_creates: None,
             manage_created: false,
         create_domain: None,
+            browser_login: None,
         };
         apply_token_scope(&mut user, &scope3, DefaultAccess::Deny);
         assert!(can_access_service(&user, "web", DefaultAccess::Deny));
@@ -700,6 +708,7 @@ mod security_tests {
             service_creates: None,
             manage_created: false,
         create_domain: None,
+            browser_login: None,
         };
         apply_token_scope(&mut user, &scope2, DefaultAccess::Deny);
         assert!(!user.is_admin());
@@ -716,6 +725,7 @@ mod security_tests {
                 service_creates: None,
                 manage_created: false,
             create_domain: None,
+                browser_login: None,
             },
             DefaultAccess::Deny,
         );
@@ -741,6 +751,7 @@ mod security_tests {
                 service_creates: None,
                 manage_created: false,
             create_domain: None,
+                browser_login: None,
             },
             DefaultAccess::Deny,
         );
@@ -764,6 +775,7 @@ mod security_tests {
                 service_creates: None,
                 manage_created: false,
             create_domain: None,
+                browser_login: None,
             },
             DefaultAccess::Deny,
         );
@@ -781,6 +793,7 @@ mod security_tests {
                 service_creates: None,
                 manage_created: false,
             create_domain: None,
+                browser_login: None,
             },
             DefaultAccess::Deny,
         );

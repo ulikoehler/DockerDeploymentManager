@@ -498,6 +498,85 @@ async fn non_admin_scope_cannot_gain_privileges() {
     assert_eq!(st, StatusCode::FORBIDDEN);
 }
 
+/// `browser_login: false` blocks /api/auth/token-login but leaves API
+/// bearer use intact; default tokens can exchange for a browser session.
+/// A denied parent cannot mint a child that re-allows it.
+#[tokio::test]
+async fn token_login_respects_browser_login_flag() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+
+    let mint = |body: Value| {
+        let app = h.app.clone();
+        let admin = admin.clone();
+        async move {
+            let (_, _, j) = call(
+                &app,
+                "POST",
+                "/api/auth/token",
+                Some(&admin),
+                Some(body),
+            )
+            .await;
+            j.pointer("/data/token")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        }
+    };
+    let token_login = |app: &Router<()>, tok: &str| {
+        let app = app.clone();
+        let tok = tok.to_string();
+        async move {
+            call(
+                &app,
+                "POST",
+                "/api/auth/token-login",
+                None,
+                Some(serde_json::json!({"token": tok})),
+            )
+            .await
+        }
+    };
+
+    // default: allowed
+    let ok_tok = mint(serde_json::json!({"ttl_minutes": 30})).await;
+    let (st, _, j) = token_login(&h.app, &ok_tok).await;
+    assert_eq!(st, StatusCode::OK, "default token login failed: {j}");
+    let jwt = j.pointer("/data/token").unwrap().as_str().unwrap().to_string();
+    let (st, _, _) = call(&h.app, "GET", "/api/auth/me", Some(&jwt), None).await;
+    assert_eq!(st, StatusCode::OK);
+
+    // denied: token-login fails, bearer use still works
+    let no_tok = mint(serde_json::json!({"ttl_minutes": 30, "browser_login": false})).await;
+    let (st, _, j) = token_login(&h.app, &no_tok).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "denied token logged in: {j}");
+    let (st, _, _) = call(&h.app, "GET", "/api/auth/me", Some(&no_tok), None).await;
+    assert_eq!(st, StatusCode::OK, "denied token lost bearer access");
+
+    // a denied parent cannot mint a child that re-allows browser login
+    let (_, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/auth/token",
+        Some(&no_tok),
+        Some(serde_json::json!({"ttl_minutes": 30})),
+    )
+    .await;
+    let child_tok = j
+        .pointer("/data/token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    assert!(!child_tok.is_empty(), "child mint failed: {j}");
+    let (st, _, j) = token_login(&h.app, &child_tok).await;
+    assert_eq!(
+        st,
+        StatusCode::BAD_REQUEST,
+        "child re-enabled browser login: {j}"
+    );
+}
+
 #[tokio::test]
 async fn viewer_access_rules_still_apply() {
     let h = harness().await;
@@ -2202,6 +2281,7 @@ async fn demoted_admin_loses_agent_admin() {
             service_creates: None,
             manage_created: false,
             create_domain: None,
+            browser_login: None,
             name: None,
         })
         .await;

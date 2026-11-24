@@ -33,6 +33,7 @@ pub fn api_router() -> Router<AppState> {
         )
         .route("/api/auth/me", get(auth::me))
         .route("/api/auth/token", post(auth::issue_token))
+        .route("/api/auth/token-login", post(auth::token_login))
         .route("/api/auth/tokens", get(auth::tokens_list))
         .route("/api/auth/tokens/:jti", delete(auth::revoke_token))
         .route("/api/auth/logout-all", post(auth::logout_all))

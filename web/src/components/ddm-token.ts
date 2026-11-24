@@ -56,6 +56,7 @@ export class DdmToken extends LitElement {
   @state() private createsLimit = 1;
   @state() private manageCreated = true;
   @state() private createDomain = '';
+  @state() private browserLogin = true;
   @state() private tokenName = '';
   @state() private selServices = new Set<string>();
   @state() private selActions = new Set<string>();
@@ -165,6 +166,7 @@ export class DdmToken extends LitElement {
       service_creates?: number;
       manage_created?: boolean;
       create_domain?: string;
+      browser_login?: boolean;
       name?: string;
     } = { ttl_minutes: this.ttlMinutes() };
     const name = this.tokenName.trim();
@@ -184,6 +186,7 @@ export class DdmToken extends LitElement {
       const d = this.createDomain.trim();
       if (d) body.create_domain = d;
     }
+    if (!this.browserLogin) body.browser_login = false;
     if (this.scopeActions) body.actions = [...this.selActions];
     if (this.scopeOps) body.ops = [...this.selOps];
     try {
@@ -376,6 +379,16 @@ export class DdmToken extends LitElement {
             Applies to router labels and domain-like env vars; image registries and internal hostnames are unaffected.</p>
         </fieldset>
 
+        <fieldset>
+          <legend>browser login</legend>
+          <label><input type="checkbox" .checked=${this.browserLogin}
+            @change=${(e: Event) => (this.browserLogin = (e.target as HTMLInputElement).checked)}>
+            allow signing in to the web UI with this token</label>
+          <p class="muted">when off, the token still works for API/MCP bearer calls but
+            <code>POST /api/auth/token-login</code> and the login page's "sign in with a token"
+            reject it. A token minted without this permission can never re-enable it in a child.</p>
+        </fieldset>
+
         <button @click=${this.generate}>generate token</button>
       </div>
 
@@ -423,6 +436,7 @@ export class DdmToken extends LitElement {
                     t.service_creates != null ? `creates: ${t.service_creates}` : '',
                     t.manage_created ? '+manage-created' : '',
                     t.create_domain ? `dom: ${t.create_domain}` : '',
+                    t.browser_login_denied ? 'no-browser-login' : '',
                   ].filter(Boolean).join(' · ') || (t.kind === 'session' ? 'login' : 'full')
                 }</td>
                 <td class="muted">${new Date(t.iat * 1000).toLocaleString()}</td>

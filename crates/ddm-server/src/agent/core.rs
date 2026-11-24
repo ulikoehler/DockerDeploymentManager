@@ -956,6 +956,7 @@ impl AgentCore {
                 service_creates,
                 manage_created,
                 create_domain,
+                browser_login,
                 name,
             } => {
                 self.do_mint(
@@ -967,10 +968,12 @@ impl AgentCore {
                     service_creates,
                     manage_created,
                     create_domain,
+                    browser_login,
                     name,
                 )
                 .await
             }
+            CryptoOp::TokenLogin { token } => self.do_token_login(&token).await,
             CryptoOp::Rotate { token } => {
                 let (_claims, _user) = self.unscoped_admin(&token)?;
                 self.justify(&_claims, "rotate", "");
@@ -1210,6 +1213,7 @@ impl AgentCore {
                 service_creates: None,
                 manage_created: false,
                 create_domain: None,
+                browser_login_denied: false,
                 revoked: false,
                 kind: "session".into(),
                 name: None,
@@ -1240,6 +1244,7 @@ impl AgentCore {
         service_creates: Option<u32>,
         manage_created: bool,
         create_domain: Option<String>,
+        browser_login: Option<bool>,
         name: Option<String>,
     ) -> Result<serde_json::Value> {
         let parent_claims = self
@@ -1291,6 +1296,17 @@ impl AgentCore {
             ),
             (None, None) => None,
         };
+        // Browser-login permission narrows only: a parent that denied it
+        // (`Some(false)`) forces the child off; otherwise the child's own
+        // choice applies, defaulting to allowed. Stored as `Some(false)`
+        // when denied, `None` when allowed — `Some(true)` is redundant.
+        let parent_bl = parent_claims
+            .scope
+            .as_ref()
+            .and_then(|s| s.browser_login)
+            .unwrap_or(true);
+        let child_bl = browser_login.unwrap_or(true) && parent_bl;
+        let scope_bl = if child_bl { None } else { Some(false) };
         let scope = match (
             &parent_claims.scope,
             &services,
@@ -1299,8 +1315,9 @@ impl AgentCore {
             &service_creates,
             manage_created,
             &child_domain,
+            &scope_bl,
         ) {
-            (None, None, None, None, None, false, None) => None,
+            (None, None, None, None, None, false, None, None) => None,
             _ => Some(TokenScope {
                 services: intersect(&parent_claims.scope, |s| &s.services, &services),
                 actions: intersect(&parent_claims.scope, |s| &s.actions, &actions),
@@ -1324,6 +1341,7 @@ impl AgentCore {
                         .map(|s| s.manage_created)
                         .unwrap_or(true),
                 create_domain: child_domain.clone(),
+                browser_login: scope_bl,
             }),
         };
         let mut roles: Vec<String> = parent_claims
@@ -1395,6 +1413,11 @@ impl AgentCore {
                 service_creates: scope.as_ref().and_then(|s| s.service_creates),
                 manage_created: scope.as_ref().map(|s| s.manage_created).unwrap_or(false),
                 create_domain: scope.as_ref().and_then(|s| s.create_domain.clone()),
+                browser_login_denied: scope
+                    .as_ref()
+                    .and_then(|s| s.browser_login)
+                    .unwrap_or(true)
+                    == false,
                 revoked: false,
                 kind: "token".into(),
                 name: name
@@ -1409,6 +1432,31 @@ impl AgentCore {
         }
         self.justify(&claims, "mint", &parent_claims.sub);
         Ok(serde_json::json!({ "token": short, "expires_at": claims.exp, "jti": jti }))
+    }
+
+    /// Exchange a presented credential (short token or JWT) for a browser
+    /// session. The resolved JWT is returned unchanged, so the session
+    /// carries exactly the token's scopes — token-login can narrow use,
+    /// never widen it. Tokens minted with `browser_login: false` are
+    /// rejected here but keep working as API/MCP bearer credentials.
+    async fn do_token_login(&self, token: &str) -> Result<serde_json::Value> {
+        let jwt = self.resolve_token(token);
+        let (claims, _user) = self.token_user(&jwt)?;
+        if claims
+            .scope
+            .as_ref()
+            .and_then(|s| s.browser_login)
+            == Some(false)
+        {
+            bail!("browser login is not allowed for this token");
+        }
+        self.justify(&claims, "token_login", &claims.sub);
+        Ok(serde_json::json!({
+            "token": jwt,
+            "name": claims.sub,
+            "roles": claims.roles,
+            "expires_at": claims.exp,
+        }))
     }
 
     async fn do_set_password(

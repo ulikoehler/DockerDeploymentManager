@@ -197,6 +197,12 @@ the login that produced it.
    child tokens may only narrow to a subdomain of the parent's domain.
    Image references, volume names and non-domain env vars are not
    scanned, so registries and internal hostnames are unaffected.
+   Minted tokens may also forbid browser login
+   (`browser_login:false` on `/api/auth/token`: API/MCP bearer use is
+   unaffected, but `POST /api/auth/token-login` — the exchange the
+   login page's "sign in with a token" uses — rejects them). The flag
+   only narrows: a parent that denies it cannot mint an allowing
+   child.
 7. **Destructive ops** — backup `restore` requires `admin` or
    `unrestricted`; `target_dir` must be absolute without `..`.
 8. **Privileged files are not editable through the file API** —

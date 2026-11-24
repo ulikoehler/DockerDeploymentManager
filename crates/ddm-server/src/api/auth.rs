@@ -146,6 +146,11 @@ pub struct TokenRequest {
     /// A scoped parent can only pass on a subdomain of its own domain.
     #[serde(default)]
     pub create_domain: Option<String>,
+    /// `false` forbids exchanging this token for a browser session via
+    /// `/api/auth/token-login` — the token keeps working as an API/MCP
+    /// bearer credential. Default (omitted/true) = allowed.
+    #[serde(default)]
+    pub browser_login: Option<bool>,
     /// Optional human label shown in the token list (max 80 chars).
     #[serde(default)]
     pub name: Option<String>,
@@ -198,6 +203,7 @@ pub async fn issue_token(
             service_creates: req.service_creates.as_ref().and_then(|l| l.limit()),
             manage_created: req.manage_created,
             create_domain: req.create_domain.clone(),
+            browser_login: req.browser_login,
             name: req.name.clone(),
         })
         .await
@@ -210,7 +216,7 @@ pub async fn issue_token(
         None => "*".into(),
     };
     let detail = format!(
-        "ttl={ttl_secs}s services={} actions={} ops={} service_creates={} manage_created={} create_domain={} name={}",
+        "ttl={ttl_secs}s services={} actions={} ops={} service_creates={} manage_created={} create_domain={} browser_login={} name={}",
         fmt(&req.services),
         fmt(&req.actions),
         fmt(&req.ops),
@@ -221,12 +227,43 @@ pub async fn issue_token(
             .unwrap_or_else(|| "*".into()),
         req.manage_created,
         req.create_domain.as_deref().unwrap_or("*"),
+        req.browser_login.unwrap_or(true),
         req.name.as_deref().unwrap_or("-")
     );
     state
         .audit
         .record(&user.user.name, "token_issue", "session", &detail);
     Ok(ok(TokenResponse { token, expires_at }))
+}
+
+#[derive(Deserialize)]
+pub struct TokenLoginRequest {
+    /// The minted token to exchange — the short token handed out at
+    /// mint time or the underlying JWT.
+    pub token: String,
+}
+
+/// Exchange a minted token for a browser session. Returns the same
+/// session shape as `/api/auth/login`; the resolved JWT carries the
+/// token's scopes unchanged. Tokens minted with `browser_login: false`
+/// are rejected.
+pub async fn token_login(
+    State(state): State<AppState>,
+    Json(req): Json<TokenLoginRequest>,
+) -> Result<Json<crate::auth::SuccessResponse<LoginResponse>>, Response> {
+    let v = state
+        .agent
+        .crypto(crate::agent::proto::CryptoOp::TokenLogin {
+            token: req.token,
+        })
+        .await
+        .map_err(|e| crate::auth::bad_request(format!("{e:#}")))?;
+    Ok(ok(LoginResponse {
+        token: v["token"].as_str().unwrap_or_default().to_string(),
+        name: v["name"].as_str().unwrap_or_default().to_string(),
+        roles: serde_json::from_value(v["roles"].clone()).unwrap_or_default(),
+        expires_at: v["expires_at"].as_i64().unwrap_or(0),
+    }))
 }
 
 /// List minted tokens: admins see all, other users only their own.
