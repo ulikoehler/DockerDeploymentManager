@@ -370,6 +370,12 @@ pub enum CryptoOp {
         services: Option<Vec<String>>,
         actions: Option<Vec<String>>,
         ops: Option<Vec<String>>,
+        /// Cap on how many services the child token may create (None =
+        /// unlimited). Intersects with the parent's cap via `min`.
+        service_creates: Option<u32>,
+        /// Token may fully manage services it created (meta jti match).
+        /// Forced off when the parent's scope doesn't carry it.
+        manage_created: bool,
         name: Option<String>,
     },
     Verify {
@@ -601,6 +607,12 @@ pub struct TokenRecord {
     /// narrowing semantics as `actions`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ops: Option<Vec<String>>,
+    /// Max services this token may create (scope cap), if restricted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_creates: Option<u32>,
+    /// Token may manage services it created (scope flag).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manage_created: bool,
     #[serde(default)]
     pub revoked: bool,
     /// "session" (login JWT) or "token" (minted for agents/scopes).

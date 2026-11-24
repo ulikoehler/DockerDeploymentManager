@@ -51,6 +51,9 @@ export class DdmToken extends LitElement {
   @state() private scopeServices = false;
   @state() private scopeActions = false;
   @state() private scopeOps = false;
+  @state() private scopeCreates = false;
+  @state() private createsLimit = 1;
+  @state() private manageCreated = true;
   @state() private tokenName = '';
   @state() private selServices = new Set<string>();
   @state() private selActions = new Set<string>();
@@ -131,6 +134,8 @@ export class DdmToken extends LitElement {
       services?: string[];
       actions?: string[];
       ops?: string[];
+      service_creates?: number;
+      manage_created?: boolean;
       name?: string;
     } = { ttl_minutes: this.ttlMinutes() };
     const name = this.tokenName.trim();
@@ -138,6 +143,8 @@ export class DdmToken extends LitElement {
     if (this.scopeServices) body.services = [...this.selServices];
     if (this.scopeActions) body.actions = [...this.selActions];
     if (this.scopeOps) body.ops = [...this.selOps];
+    if (this.scopeCreates) body.service_creates = Math.max(0, this.createsLimit);
+    if (this.scopeCreates && this.manageCreated) body.manage_created = true;
     try {
       this.issued = await apiIssueToken(body);
       this.loadTokens();
@@ -284,6 +291,26 @@ export class DdmToken extends LitElement {
             : html`<p class="muted">token may perform all operations your capabilities allow</p>`}
         </fieldset>
 
+        <fieldset>
+          <legend>
+            <label><input type="checkbox" .checked=${this.scopeCreates}
+              @change=${(e: Event) => (this.scopeCreates = (e.target as HTMLInputElement).checked)}>
+              limit service creations</label>
+          </legend>
+          ${this.scopeCreates
+            ? html`<label>max services this token may create
+                <input type="number" min="0" style="width:6em" .value=${String(this.createsLimit)}
+                  @input=${(e: Event) => (this.createsLimit = Math.max(0, +(e.target as HTMLInputElement).value || 0))}>
+              </label>
+              <label><input type="checkbox" .checked=${this.manageCreated}
+                @change=${(e: Event) => (this.manageCreated = (e.target as HTMLInputElement).checked)}>
+                token may fully manage services it created</label>
+              <p class="muted">0 blocks service creation entirely; the count is per token and survives restarts.
+                With "manage created" the token can access its own creations even outside the service allowlist —
+                pair with an empty service list for a provision-only token.</p>`
+            : html`<p class="muted">token may create as many services as your permissions allow</p>`}
+        </fieldset>
+
         <button @click=${this.generate}>generate token</button>
       </div>
 
@@ -328,6 +355,8 @@ export class DdmToken extends LitElement {
                     t.services ? `svc: ${t.services.join(',')}` : '',
                     t.actions ? `act: ${t.actions.join(',')}` : '',
                     t.ops ? `ops: ${t.ops.join(',')}` : '',
+                    t.service_creates != null ? `creates: ${t.service_creates}` : '',
+                    t.manage_created ? '+manage-created' : '',
                   ].filter(Boolean).join(' · ') || (t.kind === 'session' ? 'login' : 'full')
                 }</td>
                 <td class="muted">${new Date(t.iat * 1000).toLocaleString()}</td>

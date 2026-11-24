@@ -109,6 +109,9 @@ impl axum::extract::FromRequestParts<AppState> for DavUser {
         if let Some(scope) = &claims.scope {
             let default_access = state.config.get().await.security.default_access;
             crate::auth::apply_token_scope(&mut user, scope, default_access);
+            let created: Vec<String> =
+                serde_json::from_value(verified["created_services"].clone()).unwrap_or_default();
+            crate::auth::grant_created_services(&mut user, &claims, &created);
         }
         Ok(DavUser { user, token })
     }

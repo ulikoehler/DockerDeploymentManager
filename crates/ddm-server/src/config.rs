@@ -1189,6 +1189,10 @@ pub struct ServiceMeta {
     pub description: String,
     #[serde(default)]
     pub created_by: Option<String>,
+    /// `jti` of the token that created the service — lets per-token
+    /// service-creation caps count only their own creations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_token: Option<String>,
     #[serde(default)]
     pub template: Option<String>,
     #[serde(default)]

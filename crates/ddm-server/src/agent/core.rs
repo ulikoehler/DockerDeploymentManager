@@ -460,16 +460,27 @@ impl AgentCore {
     /// apply the token's scope, and return both. This is the *authoritative*
     /// user for agent-side authorization — narrower than the raw claims,
     /// never wider.
-    fn scoped_user(
-        &self,
-        token: &str,
-        default_access: crate::config::DefaultAccess,
-    ) -> Result<(Claims, User)> {
+    fn scoped_user(&self, token: &str, cfg: &AppConfig) -> Result<(Claims, User)> {
         let (claims, mut user) = self.token_user(token)?;
         if let Some(scope) = &claims.scope {
-            crate::auth::apply_token_scope(&mut user, scope, default_access);
+            crate::auth::apply_token_scope(&mut user, scope, cfg.security.default_access);
+            let created = self.services_created_by(&claims, cfg);
+            crate::auth::grant_created_services(&mut user, &claims, &created);
         }
         Ok((claims, user))
+    }
+
+    /// Services whose meta was stamped with this token's `jti` — the basis
+    /// for the `manage_created` scope grant and the `service_creates` cap.
+    fn services_created_by(&self, claims: &Claims, cfg: &AppConfig) -> Vec<String> {
+        let Some(jti) = claims.jti.as_deref() else {
+            return vec![];
+        };
+        svc_ops::discover_services(cfg)
+            .iter()
+            .filter(|s| s.meta.created_by_token.as_deref() == Some(jti))
+            .map(|s| s.name.clone())
+            .collect()
     }
 
     /// For trust-root operations that must never run under a narrowed
@@ -516,7 +527,7 @@ impl AgentCore {
         token: &str,
         service: &str,
     ) -> Result<(Claims, User)> {
-        let (claims, user) = self.scoped_user(token, cfg.security.default_access)?;
+        let (claims, user) = self.scoped_user(token, &cfg)?;
         if !crate::permissions::can_access_service(&user, service, cfg.security.default_access) {
             bail!("service access denied: {service}");
         }
@@ -536,6 +547,23 @@ impl AgentCore {
             Some(o) if ops.iter().any(|x| x == o) => Ok(()),
             _ => bail!("token scope does not permit this operation"),
         }
+    }
+
+    /// Enforce a token scope's `service_creates` cap: count services whose
+    /// meta was stamped with this token's `jti` and refuse once the cap is
+    /// reached. Unscoped/unlimited tokens are unaffected.
+    fn enforce_service_create_cap(&self, cfg: &AppConfig, claims: &Claims) -> Result<()> {
+        let Some(limit) = claims.scope.as_ref().and_then(|s| s.service_creates) else {
+            return Ok(());
+        };
+        if claims.jti.is_none() {
+            bail!("scoped token missing jti");
+        }
+        let created = self.services_created_by(claims, cfg).len();
+        if created >= limit as usize {
+            bail!("service creation limit reached ({limit})");
+        }
+        Ok(())
     }
 
     fn require_feature(user: &User, ok: bool, what: &str) -> Result<()> {
@@ -657,12 +685,12 @@ impl AgentCore {
             // additionally mirrors the server's group-membership gate so a
             // non-admin operator cannot read arbitrary unit logs.
             SyncVerb::ListUnits { .. } => {
-                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                let (_c, u) = self.scoped_user(token, &cfg)?;
                 Self::require_feature(&u, u.has_role("operator"), "operator role")?;
                 Ok(Some(u))
             }
             SyncVerb::Journal { unit, .. } => {
-                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                let (_c, u) = self.scoped_user(token, &cfg)?;
                 Self::require_feature(&u, u.has_role("operator"), "operator role")?;
                 if !u.is_admin() && !unit_in_group(cfg, unit) {
                     bail!("unit outside configured systemd groups");
@@ -673,7 +701,7 @@ impl AgentCore {
             // in service list/detail — reachable with plain service access —
             // so allow either operator, or access to the matching service.
             SyncVerb::UnitState { unit } | SyncVerb::UnitPathExists { unit } => {
-                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                let (_c, u) = self.scoped_user(token, &cfg)?;
                 let svc = unit.strip_suffix(".service").unwrap_or(unit);
                 if u.has_role("operator")
                     || crate::permissions::can_access_service(&u, svc, cfg.security.default_access)
@@ -684,7 +712,7 @@ impl AgentCore {
             }
             // ---- execution cancel: same gate as running command items ----
             SyncVerb::ExecCancel { .. } => {
-                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                let (_c, u) = self.scoped_user(token, &cfg)?;
                 Self::require_feature(
                     &u,
                     u.features.run_commands || u.has_role("operator"),
@@ -694,7 +722,7 @@ impl AgentCore {
             }
             // ---- gitops surface is admin-only server-side ----
             SyncVerb::GitSyncRun | SyncVerb::GitSyncPush | SyncVerb::GitSyncStatus => {
-                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                let (_c, u) = self.scoped_user(token, &cfg)?;
                 Self::require_admin(&u)?;
                 Ok(Some(u))
             }
@@ -724,7 +752,7 @@ impl AgentCore {
                 Ok(u)
             }
             ExecVerb::SectionItem { section, item, .. } => {
-                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                let (_c, u) = self.scoped_user(token, &cfg)?;
                 // mirror api::commands_api::authorized_item on the fresh user
                 if !u.is_admin() && !u.features.run_commands {
                     bail!("run_commands required");
@@ -750,7 +778,7 @@ impl AgentCore {
                 Ok(u)
             }
             ExecVerb::SystemdCommand { target, .. } | ExecVerb::SystemdRestart { target } => {
-                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                let (_c, u) = self.scoped_user(token, &cfg)?;
                 Self::require_feature(&u, u.has_role("operator"), "operator role")?;
                 // Mirror the server: non-admin operators may only touch
                 // units covered by a configured group.
@@ -792,8 +820,9 @@ impl AgentCore {
                 Ok(u)
             }
             ExecVerb::ServiceCreate { .. } => {
-                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                let (c, u) = self.scoped_user(token, &cfg)?;
                 Self::require_feature(&u, feat(|f| f.create_services, &u), "create_services")?;
+                self.enforce_service_create_cap(cfg, &c)?;
                 Ok(u)
             }
             ExecVerb::ServiceDelete { name, .. } => {
@@ -804,7 +833,7 @@ impl AgentCore {
             // Passive log streams still get the container→service check:
             // a compromised server could feed any container id here.
             ExecVerb::ContainerLogs { id, .. } => {
-                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                let (_c, u) = self.scoped_user(token, &cfg)?;
                 self.authorize_container(cfg, &u, id).await?;
                 Ok(u)
             }
@@ -816,7 +845,7 @@ impl AgentCore {
                 if command.is_empty() {
                     bail!("empty command");
                 }
-                let (claims, u) = self.scoped_user(token, cfg.security.default_access)?;
+                let (claims, u) = self.scoped_user(token, &cfg)?;
                 Self::require_feature(&u, feat(|f| f.exec_containers, &u), "exec_containers")?;
                 let project = self
                     .docker
@@ -853,7 +882,7 @@ impl AgentCore {
                 Ok(u)
             }
             ExecVerb::ImageLoad { .. } => {
-                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                let (_c, u) = self.scoped_user(token, &cfg)?;
                 Self::require_feature(&u, feat(|f| f.push_images, &u), "push_images")?;
                 Ok(u)
             }
@@ -894,7 +923,11 @@ impl AgentCore {
                 self.check_not_revoked(&claims)?;
                 let mut user = user;
                 user.password_hash.clear();
-                Ok(serde_json::json!({"claims": claims, "user": user}))
+                // Services stamped with this token's jti — the server
+                // grants access to these when the scope asks for it.
+                let cfg = self.cfg.get().await;
+                let created_services = self.services_created_by(&claims, &cfg);
+                Ok(serde_json::json!({"claims": claims, "user": user, "created_services": created_services}))
             }
             CryptoOp::Mint {
                 token,
@@ -902,10 +935,21 @@ impl AgentCore {
                 services,
                 actions,
                 ops,
+                service_creates,
+                manage_created,
                 name,
             } => {
-                self.do_mint(&token, ttl_minutes, services, actions, ops, name)
-                    .await
+                self.do_mint(
+                    &token,
+                    ttl_minutes,
+                    services,
+                    actions,
+                    ops,
+                    service_creates,
+                    manage_created,
+                    name,
+                )
+                .await
             }
             CryptoOp::Rotate { token } => {
                 let (_claims, _user) = self.unscoped_admin(&token)?;
@@ -1143,6 +1187,8 @@ impl AgentCore {
                 services: None,
                 actions: None,
                 ops: None,
+                service_creates: None,
+                manage_created: false,
                 revoked: false,
                 kind: "session".into(),
                 name: None,
@@ -1170,6 +1216,8 @@ impl AgentCore {
         services: Option<Vec<String>>,
         actions: Option<Vec<String>>,
         ops: Option<Vec<String>>,
+        service_creates: Option<u32>,
+        manage_created: bool,
         name: Option<String>,
     ) -> Result<serde_json::Value> {
         let parent_claims = self
@@ -1199,12 +1247,37 @@ impl AgentCore {
             .clamp(1, MAX_MINT_TTL_MINUTES)
             * 60;
         // Intersect with the parent's scope — a child can only narrow.
-        let scope = match (&parent_claims.scope, &services, &actions, &ops) {
-            (None, None, None, None) => None,
+        let scope = match (
+            &parent_claims.scope,
+            &services,
+            &actions,
+            &ops,
+            &service_creates,
+            manage_created,
+        ) {
+            (None, None, None, None, None, false) => None,
             _ => Some(TokenScope {
                 services: intersect(&parent_claims.scope, |s| &s.services, &services),
                 actions: intersect(&parent_claims.scope, |s| &s.actions, &actions),
                 ops: intersect(&parent_claims.scope, |s| &s.ops, &ops),
+                service_creates: match (
+                    parent_claims
+                        .scope
+                        .as_ref()
+                        .and_then(|s| s.service_creates),
+                    service_creates,
+                ) {
+                    (Some(p), Some(r)) => Some(p.min(r)),
+                    (Some(p), None) => Some(p),
+                    (None, r) => r,
+                },
+                // A scoped parent without the flag cannot pass it on.
+                manage_created: manage_created
+                    && parent_claims
+                        .scope
+                        .as_ref()
+                        .map(|s| s.manage_created)
+                        .unwrap_or(true),
             }),
         };
         let mut roles: Vec<String> = parent_claims
@@ -1273,6 +1346,8 @@ impl AgentCore {
                 services: scope.as_ref().and_then(|s| s.services.clone()),
                 actions: scope.as_ref().and_then(|s| s.actions.clone()),
                 ops: scope.as_ref().and_then(|s| s.ops.clone()),
+                service_creates: scope.as_ref().and_then(|s| s.service_creates),
+                manage_created: scope.as_ref().map(|s| s.manage_created).unwrap_or(false),
                 revoked: false,
                 kind: "token".into(),
                 name: name
@@ -1435,6 +1510,8 @@ impl AgentCore {
                 let (claims, mut user) = self.justify_token(token, "services_list", "")?;
                 if let Some(scope) = &claims.scope {
                     crate::auth::apply_token_scope(&mut user, scope, cfg.security.default_access);
+                    let created = self.services_created_by(&claims, &cfg);
+                    crate::auth::grant_created_services(&mut user, &claims, &created);
                 }
                 let svcs: Vec<_> = svc_ops::discover_services(&cfg)
                     .into_iter()
@@ -1583,7 +1660,7 @@ impl AgentCore {
                 self.justify_token(token, "container_health", &id)?;
                 // Container ids are arbitrary input here — re-resolve the
                 // owning service and check access (unmanaged = admin-only).
-                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                let (_c, u) = self.scoped_user(token, &cfg)?;
                 self.authorize_container(&cfg, &u, &id).await?;
                 Ok(serde_json::to_value(
                     self.docker.container_health(&id).await?,
@@ -1925,6 +2002,8 @@ impl AgentCore {
                 let (claims, mut user) = self.justify_token(token, "monitor_status", "")?;
                 if let Some(scope) = &claims.scope {
                     crate::auth::apply_token_scope(&mut user, scope, cfg.security.default_access);
+                    let created = self.services_created_by(&claims, &cfg);
+                    crate::auth::grant_created_services(&mut user, &claims, &created);
                 }
                 let m = self.monitor.lock().unwrap().clone();
                 match m {
@@ -1948,6 +2027,8 @@ impl AgentCore {
                 let (claims, mut user) = self.justify_token(token, "monitor_events", "")?;
                 if let Some(scope) = &claims.scope {
                     crate::auth::apply_token_scope(&mut user, scope, cfg.security.default_access);
+                    let created = self.services_created_by(&claims, &cfg);
+                    crate::auth::grant_created_services(&mut user, &claims, &created);
                 }
                 let m = self.monitor.lock().unwrap().clone();
                 match m {
@@ -1999,7 +2080,7 @@ impl AgentCore {
             }
             SyncVerb::ContainerLogsCollect { id, tail, since } => {
                 self.justify_token(token, "container_logs", &id)?;
-                let (_c, u) = self.scoped_user(token, cfg.security.default_access)?;
+                let (_c, u) = self.scoped_user(token, &cfg)?;
                 self.authorize_container(&cfg, &u, &id).await?;
                 use futures::StreamExt;
                 let mut stream = self.docker.logs(&id, tail, since, false).await?;
@@ -2096,7 +2177,7 @@ impl AgentCore {
         token: &str,
     ) -> Result<PendingPut> {
         let cfg = self.cfg.get().await;
-        let (claims, user) = self.scoped_user(token, cfg.security.default_access)?;
+        let (claims, user) = self.scoped_user(token, &cfg)?;
         self.enforce_ops(token, Some("files"))?;
         if !crate::permissions::can_access_service(&user, service, cfg.security.default_access) {
             bail!("service access denied: {service}");
@@ -2345,7 +2426,7 @@ impl AgentCore {
         token: &str,
     ) -> Result<PendingTarPut> {
         let cfg = self.cfg.get().await;
-        let (claims, user) = self.scoped_user(token, cfg.security.default_access)?;
+        let (claims, user) = self.scoped_user(token, &cfg)?;
         self.enforce_ops(token, Some("files"))?;
         if !crate::permissions::can_access_service(&user, service, cfg.security.default_access) {
             bail!("service access denied: {service}");
@@ -2475,7 +2556,7 @@ impl AgentCore {
         title: String,
         token: &str,
     ) -> Result<mpsc::Receiver<ServerMessage>> {
-        let (_claims, _user) = self.justify_token(token, &title, "")?;
+        let (claims, _user) = self.justify_token(token, &title, "")?;
         let cfg = self.cfg.get().await;
         // Defense in depth: re-check the verb's authorization against the
         // fresh, scope-applied user before any command is assembled.
@@ -2489,7 +2570,10 @@ impl AgentCore {
                     title: title.clone(),
                 })
                 .await;
-            let ok = match core.exec_inner(&verb, &cfg, &eid, &tx, &authorized).await {
+            let ok = match core
+                .exec_inner(&verb, &cfg, &eid, &tx, &authorized, &claims)
+                .await
+            {
                 Ok(ok) => ok,
                 Err(e) => {
                     let _ = tx
@@ -2519,6 +2603,7 @@ impl AgentCore {
         eid: &str,
         tx: &mpsc::Sender<ServerMessage>,
         user: &User,
+        claims: &Claims,
     ) -> Result<bool> {
         match verb {
             ExecVerb::Compose { service, op } => {
@@ -2767,6 +2852,9 @@ impl AgentCore {
                 // prospective service dir — relative binds resolve there
                 let base = Path::new(&cfg.paths.services_root).join(name);
                 self.enforce_policy_floor(cfg, compose, Some(&base))?;
+                // Re-check the token's creation cap against the verified
+                // claims — narrows the precheck→exec race.
+                self.enforce_service_create_cap(cfg, claims)?;
                 let dir = svc_ops::create_service_dir(cfg, name)?;
                 crate::compose::write_compose(&dir.join(&cfg.paths.compose_file), compose)?;
                 svc_ops::save_meta(
@@ -2774,6 +2862,7 @@ impl AgentCore {
                     &crate::config::ServiceMeta {
                         description: description.clone(),
                         created_by: Some(created_by.clone()),
+                        created_by_token: claims.jti.clone(),
                         template: template_id.clone(),
                         ..Default::default()
                     },

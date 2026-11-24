@@ -129,9 +129,39 @@ pub struct TokenRequest {
     /// exec. Can only narrow, never widen.
     #[serde(default)]
     pub ops: Option<Vec<String>>,
+    /// Cap on how many services the token may create. Accepts a number,
+    /// or `true` for the default limit of 1. Omitted/`false` = unlimited.
+    /// Can only narrow a parent's cap (min wins).
+    #[serde(default)]
+    pub service_creates: Option<ServiceCreateLimit>,
+    /// If true, the token may fully access services it created itself
+    /// (matched via its `jti` in the service meta), even outside the
+    /// `services` allowlist. Can only be kept when the caller's own
+    /// scope permits it.
+    #[serde(default)]
+    pub manage_created: bool,
     /// Optional human label shown in the token list (max 80 chars).
     #[serde(default)]
     pub name: Option<String>,
+}
+
+/// `service_creates` request value: `true` → default limit 1, a number →
+/// that limit, `false` → no limit.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum ServiceCreateLimit {
+    Enabled(bool),
+    Count(u32),
+}
+
+impl ServiceCreateLimit {
+    fn limit(&self) -> Option<u32> {
+        match self {
+            Self::Enabled(true) => Some(1),
+            Self::Enabled(false) => None,
+            Self::Count(n) => Some(*n),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -159,6 +189,8 @@ pub async fn issue_token(
             services: req.services.clone(),
             actions: req.actions.clone(),
             ops: req.ops.clone(),
+            service_creates: req.service_creates.as_ref().and_then(|l| l.limit()),
+            manage_created: req.manage_created,
             name: req.name.clone(),
         })
         .await
@@ -171,10 +203,16 @@ pub async fn issue_token(
         None => "*".into(),
     };
     let detail = format!(
-        "ttl={ttl_secs}s services={} actions={} ops={} name={}",
+        "ttl={ttl_secs}s services={} actions={} ops={} service_creates={} manage_created={} name={}",
         fmt(&req.services),
         fmt(&req.actions),
         fmt(&req.ops),
+        req.service_creates
+            .as_ref()
+            .and_then(|l| l.limit())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "*".into()),
+        req.manage_created,
         req.name.as_deref().unwrap_or("-")
     );
     state

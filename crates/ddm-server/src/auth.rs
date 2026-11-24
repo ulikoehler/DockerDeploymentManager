@@ -54,6 +54,40 @@ pub struct TokenScope {
     /// services, exec. Enforced agent-side per verb; can only narrow.
     #[serde(default)]
     pub ops: Option<Vec<String>>,
+    /// If set, the token may create at most this many services. Creations
+    /// are attributed to the token's `jti` in the service meta, so the cap
+    /// survives restarts and is per-token, not per-user. Child tokens
+    /// intersect with `min(parent, requested)` — can only narrow.
+    #[serde(default)]
+    pub service_creates: Option<u32>,
+    /// If true, the token may access services it created itself
+    /// (meta `created_by_token` == `jti`) regardless of the `services`
+    /// allowlist — combine with `services: []` + `service_creates` for a
+    /// "provision-and-manage only" token. Can only narrow: a parent
+    /// without it cannot pass it on.
+    #[serde(default)]
+    pub manage_created: bool,
+}
+
+/// Grant a scoped user access to services created by its token — prepends
+/// exact allow rules (first match wins) for each `names` entry, so the
+/// grant survives the `services` scope and the user's own later denies.
+/// `names` comes from the agent, which owns the service dir.
+pub fn grant_created_services(user: &mut User, claims: &Claims, names: &[String]) {
+    let Some(scope) = &claims.scope else { return };
+    if !scope.manage_created || claims.jti.is_none() {
+        return;
+    }
+    for n in names {
+        user.access.insert(
+            0,
+            crate::users::AccessRule {
+                kind: crate::users::AccessRuleType::Exact,
+                pattern: n.clone(),
+                effect: crate::users::AccessEffect::Allow,
+            },
+        );
+    }
 }
 
 /// Apply a token scope to a user, narrowing their effective permissions.
@@ -125,6 +159,15 @@ pub fn apply_token_scope(
             effect: AccessEffect::Deny,
         });
         user.access = rules;
+    }
+    // A `service_creates` cap implies the right to create — otherwise a
+    // `services`-scoped token (which drops `admin`) could never use it.
+    // Still gated on the pre-scope user actually being able to create:
+    // the scope carries the capability forward, never grants it.
+    if scope.service_creates.is_some()
+        && (pre_scope.is_admin() || pre_scope.features.create_services)
+    {
+        user.features.create_services = true;
     }
 }
 
@@ -347,6 +390,9 @@ pub async fn authenticate(parts: &Parts, state: &crate::AppState) -> Result<Auth
     if let Some(scope) = &claims.scope {
         let default_access = state.config.get().await.security.default_access;
         apply_token_scope(&mut user, scope, default_access);
+        let created: Vec<String> =
+            serde_json::from_value(verified["created_services"].clone()).unwrap_or_default();
+        grant_created_services(&mut user, &claims, &created);
     }
     Ok(AuthUser {
         user,
@@ -544,6 +590,8 @@ mod security_tests {
             services: Some(vec!["web1".into()]),
             actions: Some(vec!["edit_compose".into()]),
             ops: None,
+            service_creates: None,
+            manage_created: false,
         };
         apply_token_scope(&mut user, &scope, DefaultAccess::Allow);
         assert!(!user.roles.iter().any(|r| r == "operator"));
@@ -574,6 +622,8 @@ mod security_tests {
             services: Some(vec!["web".into(), "db".into()]),
             actions: None,
             ops: None,
+            service_creates: None,
+            manage_created: false,
         };
         apply_token_scope(&mut user, &scope3, DefaultAccess::Deny);
         assert!(can_access_service(&user, "web", DefaultAccess::Deny));
@@ -593,6 +643,8 @@ mod security_tests {
             services: None,
             actions: Some(vec!["operator".into()]),
             ops: None,
+            service_creates: None,
+            manage_created: false,
         };
         apply_token_scope(&mut user, &scope2, DefaultAccess::Deny);
         assert!(!user.is_admin());
@@ -606,6 +658,8 @@ mod security_tests {
                 services: None,
                 actions: None,
                 ops: None,
+                service_creates: None,
+                manage_created: false,
             },
             DefaultAccess::Deny,
         );
