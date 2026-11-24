@@ -179,6 +179,15 @@ the login that produced it.
    mint unscoped children, outlive the parent token, or change passwords.
    A `services` scope **always drops the `admin` role** — otherwise the
    admin bypass in `can_access_service` would silently void the scope.
+   Dropping admin must not strip the operational feature flags either:
+   a scoped token without an `actions` list keeps every feature the
+   caller could effectively exercise (admins implicitly hold all of
+   them), so it remains a full operator *within* the allowed services.
+   Global capabilities are never granted by a scope — `create_services`
+   requires an explicit `service_creates` cap, and `push_images` /
+   `mount_files` still need an `actions` entry. An `actions` list is
+   evaluated against effective (admin-implied) capabilities, so it can
+   select e.g. `edit_files` for an admin whose stored flags are false.
 7. **Destructive ops** — backup `restore` requires `admin` or
    `unrestricted`; `target_dir` must be absolute without `..`.
 8. **Privileged files are not editable through the file API** —

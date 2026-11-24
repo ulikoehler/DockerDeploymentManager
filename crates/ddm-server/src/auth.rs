@@ -114,17 +114,22 @@ pub fn apply_token_scope(
             .cloned()
             .collect();
         user.roles = kept;
+        // Features are evaluated against the *effective* pre-scope
+        // capabilities: admins implicitly hold every feature even though
+        // their stored flags are false, so `actions` must not AND them
+        // down to nothing.
         let f = &mut user.features;
-        f.create_services &= has("create_services");
-        f.edit_compose &= has("edit_compose");
-        f.edit_units &= has("edit_units");
-        f.run_commands &= has("run_commands");
-        f.manage_backup &= has("manage_backup");
-        f.manage_monitoring &= has("manage_monitoring");
-        f.edit_files &= has("edit_files");
-        f.exec_containers &= has("exec_containers");
-        f.mount_files &= has("mount_files");
-        f.push_images &= has("push_images");
+        let cap = |name: &str, cur: bool| has(name) && (pre_scope.is_admin() || cur);
+        f.create_services = cap("create_services", f.create_services);
+        f.edit_compose = cap("edit_compose", f.edit_compose);
+        f.edit_units = cap("edit_units", f.edit_units);
+        f.run_commands = cap("run_commands", f.run_commands);
+        f.manage_backup = cap("manage_backup", f.manage_backup);
+        f.manage_monitoring = cap("manage_monitoring", f.manage_monitoring);
+        f.edit_files = cap("edit_files", f.edit_files);
+        f.exec_containers = cap("exec_containers", f.exec_containers);
+        f.mount_files = cap("mount_files", f.mount_files);
+        f.push_images = cap("push_images", f.push_images);
         if !has("unrestricted") && user.compose_policy.as_deref() == Some("unrestricted") {
             user.compose_policy = None; // fall back to the default policy
         }
@@ -159,6 +164,26 @@ pub fn apply_token_scope(
             effect: AccessEffect::Deny,
         });
         user.access = rules;
+    }
+    // A scoped token without an explicit `actions` list stays a full
+    // operator *within its allowed services*: carry forward every
+    // operational feature the pre-scope principal could exercise —
+    // admins implicitly have all of them, and dropping the `admin`
+    // role for a `services` scope must not silently strip edit_files /
+    // exec_containers / manage_backup / etc. `actions` still narrows
+    // when present, and global capabilities are never granted here:
+    // create_services (unless a service_creates cap is set below),
+    // push_images, mount_files.
+    if scope.actions.is_none() {
+        let f = &mut user.features;
+        f.edit_files |= pre_scope.is_admin() || pre_scope.features.edit_files;
+        f.exec_containers |= pre_scope.is_admin() || pre_scope.features.exec_containers;
+        f.manage_backup |= pre_scope.is_admin() || pre_scope.features.manage_backup;
+        f.manage_monitoring |=
+            pre_scope.is_admin() || pre_scope.features.manage_monitoring;
+        f.edit_compose |= pre_scope.is_admin() || pre_scope.features.edit_compose;
+        f.edit_units |= pre_scope.is_admin() || pre_scope.features.edit_units;
+        f.run_commands |= pre_scope.is_admin() || pre_scope.features.run_commands;
     }
     // A `service_creates` cap implies the right to create — otherwise a
     // `services`-scoped token (which drops `admin`) could never use it.
@@ -665,6 +690,69 @@ mod security_tests {
         );
         assert_eq!(user.roles, vec!["operator"]);
         assert!(user.access.is_empty());
+    }
+
+    #[test]
+    fn scoped_token_keeps_operational_features() {
+        use crate::config::DefaultAccess;
+
+        // admin + services scope, no actions list: the token must remain
+        // a full operator *within* the allowed services — dropping admin
+        // may not strip edit_files/exec_containers/manage_backup/etc.
+        let mut admin = u();
+        admin.roles = vec!["admin".into()];
+        apply_token_scope(
+            &mut admin,
+            &TokenScope {
+                services: Some(vec!["web".into()]),
+                actions: None,
+                ops: None,
+                service_creates: None,
+                manage_created: false,
+            },
+            DefaultAccess::Deny,
+        );
+        assert!(!admin.is_admin());
+        let f = &admin.features;
+        assert!(f.edit_files && f.exec_containers && f.manage_backup);
+        assert!(f.manage_monitoring && f.edit_compose && f.edit_units);
+        assert!(f.run_commands);
+        // ...but global capabilities are never granted by a scope
+        assert!(!f.create_services && !f.push_images && !f.mount_files);
+
+        // an explicit actions list still narrows capabilities exactly
+        let mut admin = u();
+        admin.roles = vec!["admin".into()];
+        apply_token_scope(
+            &mut admin,
+            &TokenScope {
+                services: Some(vec!["web".into()]),
+                actions: Some(vec!["edit_files".into()]),
+                ops: None,
+                service_creates: None,
+                manage_created: false,
+            },
+            DefaultAccess::Deny,
+        );
+        assert!(admin.features.edit_files);
+        assert!(!admin.features.exec_containers && !admin.features.manage_backup);
+
+        // a non-admin never gains features it did not have
+        let mut op = u(); // operator, default features
+        apply_token_scope(
+            &mut op,
+            &TokenScope {
+                services: Some(vec!["web".into()]),
+                actions: None,
+                ops: None,
+                service_creates: None,
+                manage_created: false,
+            },
+            DefaultAccess::Deny,
+        );
+        assert!(!op.features.edit_files && !op.features.exec_containers);
+        assert!(!op.features.manage_backup && !op.features.edit_compose);
+        assert!(op.features.run_commands); // pre-existing default
     }
 
     #[test]

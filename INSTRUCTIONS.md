@@ -344,6 +344,13 @@ tar/tar.gz archives. Same auth and path protections as the file API.
 
 **Operate safely with scoped tokens**
 Mint short-lived tokens with the narrowest scope (`services`, `actions`,
-`ops`, `service_creates`, `manage_created`). A token with
-`services:["web"], actions:["restart","logs"], ops:["service_logs"]`
-can only restart and read logs of `web` — nothing else.
+`ops`, `service_creates`, `manage_created`). A token with just
+`services:["web"]` can do everything a service operator can on `web` —
+files, container exec, backups, compose edits, monitoring, git — and
+nothing on other services. Omit `actions` to keep all operational
+features; pass `actions` for an explicit capability subset, and `ops`
+to restrict operation categories (`read`, `logs`, `files`, `compose`,
+`meta`, `monitoring`, `backup`, `git`, `units`, `services`, `exec`,
+`registry`). Still admin-only regardless of scope: gitops sync/push,
+service deletion, user management, and backup restore (needs admin or
+an `unrestricted` compose policy).
