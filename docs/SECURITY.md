@@ -214,7 +214,11 @@ the login that produced it.
    `.restic_*`, `meta.yaml`, `backup.sh`) applies unchanged — backup
    passwords and monitoring/backup secrets are never reachable
    through it. Default off; a scoped parent without the flag cannot
-   pass it to a child.
+   pass it to a child. A `services`-scoped token minted by an admin
+   also keeps the `operator` role (admin implies it) so compose
+   actions and unit writes work on the allowed services — `admin`
+   itself is still stripped, and an explicit `actions` list can
+   narrow the role set further.
 7. **Destructive ops** — backup `restore` requires `admin` or
    `unrestricted`; `target_dir` must be absolute without `..`.
 8. **Privileged files are not editable through the file API** —

@@ -577,6 +577,38 @@ async fn token_login_respects_browser_login_flag() {
     );
 }
 
+/// A service-scoped token minted by an admin keeps `operator` (admin
+/// implies it) so compose actions/units work on the allowed services —
+/// but never `admin` itself.
+#[tokio::test]
+async fn service_scoped_token_keeps_operator_role() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    let (_, _, j) = call(
+        &h.app,
+        "POST",
+        "/api/auth/token",
+        Some(&admin),
+        Some(serde_json::json!({"ttl_minutes": 30, "services": ["svc_a"]})),
+    )
+    .await;
+    let t = j.pointer("/data/token").unwrap().as_str().unwrap().to_string();
+    let (_, _, me) = call(&h.app, "GET", "/api/auth/me", Some(&t), None).await;
+    let roles = me
+        .pointer("/data/roles")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        roles.iter().any(|r| r == "operator"),
+        "service token lost operator role: {roles:?}"
+    );
+    assert!(
+        !roles.iter().any(|r| r == "admin"),
+        "service token kept admin: {roles:?}"
+    );
+}
+
 /// `read_other_service_files` grants read-only file/config access to
 /// services outside the allowlist — writes stay denied, and a parent
 /// without the flag cannot pass it to a child.

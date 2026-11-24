@@ -180,6 +180,16 @@ pub fn apply_token_scope(
         // `admin` bypasses all service-access rules — a service-scoped token
         // must not keep it, or the scope is a silent no-op.
         user.roles.retain(|r| r != "admin");
+        // …but admin *implies* operator, and core service operations
+        // (compose actions, unit writes) require the operator role — an
+        // admin-minted service token keeps operator rights on its allowed
+        // services. An explicit `actions` list stays fully user-controlled.
+        if scope.actions.is_none()
+            && pre_scope.is_admin()
+            && !user.roles.iter().any(|r| r == "operator")
+        {
+            user.roles.push("operator".to_string());
+        }
         // Intersection semantics: the user's explicit denies still apply,
         // then exact allows for the scoped services the user could already
         // reach, then deny the rest. Services outside the user's current

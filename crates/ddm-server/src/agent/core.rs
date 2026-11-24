@@ -1413,9 +1413,22 @@ impl AgentCore {
             .cloned()
             .collect();
         // A service-scoped token can never be admin — `admin` bypasses
-        // service-access rules and would void the scope entirely.
-        if scope.as_ref().and_then(|s| s.services.as_ref()).is_some() {
+        // service-access rules and would void the scope entirely. But
+        // admin *implies* operator, and core service operations (compose
+        // actions, unit writes) require the operator role — so an
+        // admin-minted service token keeps `operator` on its allowed
+        // services. An explicit `actions` scope can still narrow it away.
+        if let Some(s) = scope.as_ref().filter(|s| s.services.is_some()) {
             roles.retain(|r| r != "admin");
+            // `fresh` (not the possibly-stale parent claims) decides —
+            // a demoted admin must not smuggle operator back in. An
+            // explicit `actions` list stays fully user-controlled.
+            if s.actions.is_none()
+                && fresh.roles.iter().any(|r| r == "admin")
+                && !roles.iter().any(|r| r == "operator")
+            {
+                roles.push("operator".to_string());
+            }
         }
         // A revoked parent must not mint children.
         self.check_not_revoked(&parent_claims)?;
