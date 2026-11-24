@@ -259,7 +259,7 @@ export class DdmToken extends LitElement {
       ``,
       `- MCP endpoint: ${base}/mcp — send header \`Authorization: Bearer ${token}\``,
       `- REST API: ${base}/api — same bearer token on every request`,
-      `- API reference with tool examples: https://raw.githubusercontent.com/ulikoehler/DockerDeploymentManager/main/INSTRUCTIONS.md`,
+      `- API reference with tool examples: ${base}/INSTRUCTIONS.md (public, no auth)`,
       ``,
       `Task: ${task}. Work only within what this token permits — it is scoped and enforced server-side.`,
       `Token expires ${new Date(expiresAt * 1000).toLocaleString()}.`,

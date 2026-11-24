@@ -25,6 +25,8 @@ pub fn api_router() -> Router<AppState> {
         .route("/dav/*path", any(crate::webdav::handle))
         // OCI registry — docker push/pull straight to DDM
         .merge(registry::router())
+        // public agent reference — no auth required
+        .route("/INSTRUCTIONS.md", get(crate::webui::instructions))
         // auth
         .route("/api/auth/login", post(auth::login))
         .route(

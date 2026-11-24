@@ -13,6 +13,19 @@ use rust_embed::RustEmbed;
 #[folder = "../../web/dist"]
 struct WebAssets;
 
+/// Agent-facing service reference, embedded at build time and served
+/// unauthenticated at `/INSTRUCTIONS.md`.
+pub const INSTRUCTIONS: &str = include_str!("../../../INSTRUCTIONS.md");
+
+pub async fn instructions() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from(INSTRUCTIONS))
+        .unwrap()
+}
+
 /// True when the binary actually contains UI assets.
 pub fn has_assets() -> bool {
     WebAssets::iter().next().is_some()
