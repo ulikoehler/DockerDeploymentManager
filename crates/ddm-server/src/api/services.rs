@@ -43,6 +43,39 @@ pub(crate) async fn require_service_access(
         .map_err(|e| not_found(e.to_string()))
 }
 
+/// Read-only file/config gate: normal service access, or a token whose
+/// scope carries `read_other_service_files`. In the latter case the
+/// returned `Service` is `None` — the agent's file verbs re-verify the
+/// caller's *fresh* access rules before serving anything, so this only
+/// decides whether the request may reach them.
+pub(crate) async fn require_service_files_read(
+    state: &AppState,
+    user: &AuthUser,
+    name: &str,
+) -> Result<Option<svc_ops::Service>, Response> {
+    if !valid_service_name(name) {
+        return Err(bad_request("invalid service name"));
+    }
+    let cfg = state.config.get().await;
+    if can_access_service(&user.user, name, cfg.security.default_access) {
+        drop(cfg);
+        return require_service_access(state, user, name)
+            .await
+            .map(Some);
+    }
+    let flagged = user
+        .claims
+        .scope
+        .as_ref()
+        .map(|s| s.read_other_service_files)
+        .unwrap_or(false);
+    if flagged {
+        Ok(None)
+    } else {
+        Err(forbidden())
+    }
+}
+
 /// The caller's compose policy name → the policy. `unrestricted` → None.
 /// An unknown policy name must NOT disable checks: fall back to the
 /// configured default policy (and ultimately to a deny-all default).
@@ -423,7 +456,7 @@ pub async fn get_compose(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<ComposeResponse>>, Response> {
-    let svc = require_service_access(&state, &user, &name).await?;
+    let svc = require_service_files_read(&state, &user, &name).await?;
     let content: String = state
         .agent
         .call_as(
@@ -434,7 +467,16 @@ pub async fn get_compose(
         )
         .await
         .map_err(|e| internal(e.to_string()))?;
-    let base = svc.compose_path.parent().map(|p| p.to_path_buf());
+    // Cross-service reads have no Service object — the policy base only
+    // resolves relative paths, so the host-side service dir is close
+    // enough for the informational violation list.
+    let base = match svc {
+        Some(s) => s.compose_path.parent().map(|p| p.to_path_buf()),
+        None => {
+            let cfg = state.config.get().await;
+            Some(FsPath::new(cfg.paths.host_services_root()).join(&name))
+        }
+    };
     let violations = caller_policy(&state, &user)
         .await
         .map(|p| policy::validate_compose_in(&content, &p, base.as_deref()))
@@ -560,7 +602,7 @@ pub async fn get_unit(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<crate::auth::SuccessResponse<UnitResponse>>, Response> {
-    let _svc = require_service_access(&state, &user, &name).await?;
+    let _svc = require_service_files_read(&state, &user, &name).await?;
     let content: Option<String> = state
         .agent
         .call_as(

@@ -81,6 +81,15 @@ pub struct TokenScope {
     /// a parent that denies it cannot mint a child that allows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_login: Option<bool>,
+    /// If true, the token may *read* files and config (file tree,
+    /// stat, download, compose read, unit read) of services outside its
+    /// `services` allowlist — still bounded by the user's own access
+    /// rules, and the file layer's privileged-file denylist (`.git`,
+    /// `.restic_*`, `meta.yaml`, `backup.sh`) applies unchanged. No
+    /// writes, exec, git or monitoring/backup config. Default off;
+    /// a scoped parent without it cannot pass it to a child.
+    #[serde(default)]
+    pub read_other_service_files: bool,
 }
 
 /// Normalize a `create_domain` scope value: lowercase, no trailing dot,
@@ -652,6 +661,7 @@ mod security_tests {
             manage_created: false,
         create_domain: None,
             browser_login: None,
+            read_other_service_files: false,
         };
         apply_token_scope(&mut user, &scope, DefaultAccess::Allow);
         assert!(!user.roles.iter().any(|r| r == "operator"));
@@ -686,6 +696,7 @@ mod security_tests {
             manage_created: false,
         create_domain: None,
             browser_login: None,
+            read_other_service_files: false,
         };
         apply_token_scope(&mut user, &scope3, DefaultAccess::Deny);
         assert!(can_access_service(&user, "web", DefaultAccess::Deny));
@@ -709,6 +720,7 @@ mod security_tests {
             manage_created: false,
         create_domain: None,
             browser_login: None,
+            read_other_service_files: false,
         };
         apply_token_scope(&mut user, &scope2, DefaultAccess::Deny);
         assert!(!user.is_admin());
@@ -726,6 +738,7 @@ mod security_tests {
                 manage_created: false,
             create_domain: None,
                 browser_login: None,
+                read_other_service_files: false,
             },
             DefaultAccess::Deny,
         );
@@ -752,6 +765,7 @@ mod security_tests {
                 manage_created: false,
             create_domain: None,
                 browser_login: None,
+                read_other_service_files: false,
             },
             DefaultAccess::Deny,
         );
@@ -776,6 +790,7 @@ mod security_tests {
                 manage_created: false,
             create_domain: None,
                 browser_login: None,
+                read_other_service_files: false,
             },
             DefaultAccess::Deny,
         );
@@ -794,6 +809,7 @@ mod security_tests {
                 manage_created: false,
             create_domain: None,
                 browser_login: None,
+                read_other_service_files: false,
             },
             DefaultAccess::Deny,
         );

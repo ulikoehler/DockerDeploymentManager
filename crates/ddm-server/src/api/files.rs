@@ -10,7 +10,7 @@ use axum::{
 use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 
-use super::services::require_service_access;
+use super::services::{require_service_access, require_service_files_read};
 
 /// Writes (file edits, git mutations) need admin or the `edit_files` feature.
 #[allow(clippy::result_large_err)]
@@ -63,8 +63,7 @@ pub async fn list_files(
     Path(name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> Result<Json<crate::auth::SuccessResponse<files::FileNode>>, Response> {
-    let svc = require_service_access(&state, &user, &name).await?;
-    let _ = svc;
+    let _svc = require_service_files_read(&state, &user, &name).await?;
     let node: files::FileNode = state
         .agent
         .call_as(
@@ -124,7 +123,7 @@ pub async fn download_file(
     Path(name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> Result<Response, Response> {
-    require_service_access(&state, &user, &name).await?;
+    require_service_files_read(&state, &user, &name).await?;
     let (meta, sent, mut stream) = state
         .agent
         .file_get(&name, &q.path, 0, 0, &user.token)

@@ -537,6 +537,42 @@ impl AgentCore {
         Ok((claims, user))
     }
 
+    /// `justify_service` for read-only file/config verbs (file tree,
+    /// stat, download, compose read, unit read). When the scoped user
+    /// lacks access, a token carrying `read_other_service_files` may
+    /// still read — but only services the *fresh* (pre-scope) user could
+    /// access, so the flag widens the token's service list without
+    /// exceeding the user's own permissions. The file layer's
+    /// privileged-file denylist applies unchanged.
+    fn justify_service_files_read(
+        &self,
+        cfg: &AppConfig,
+        token: &str,
+        service: &str,
+    ) -> Result<(Claims, User)> {
+        let (claims, mut user) = self.token_user(token)?;
+        let fresh = user.clone();
+        if let Some(scope) = &claims.scope {
+            crate::auth::apply_token_scope(&mut user, scope, cfg.security.default_access);
+            let created = self.services_created_by(&claims, cfg);
+            crate::auth::grant_created_services(&mut user, &claims, &created);
+        }
+        if crate::permissions::can_access_service(&user, service, cfg.security.default_access) {
+            return Ok((claims, user));
+        }
+        let flagged = claims
+            .scope
+            .as_ref()
+            .map(|s| s.read_other_service_files)
+            .unwrap_or(false);
+        if flagged
+            && crate::permissions::can_access_service(&fresh, service, cfg.security.default_access)
+        {
+            return Ok((claims, user));
+        }
+        bail!("service access denied: {service}");
+    }
+
     /// Enforce a token scope's `ops` allowlist: when present, the verb's
     /// operation category must be listed. Unscoped tokens are unaffected.
     fn enforce_ops(&self, token: &str, op: Option<&'static str>) -> Result<()> {
@@ -678,19 +714,23 @@ impl AgentCore {
             SyncVerb::ServiceGet { name } => {
                 self.justify_service(cfg, token, name).map(|x| Some(x.1))
             }
+            // Read-only file/config verbs additionally honor the
+            // `read_other_service_files` scope flag.
             SyncVerb::FileNode { service, .. }
             | SyncVerb::FileStat { service, .. }
-            | SyncVerb::GitRepos { service }
+            | SyncVerb::ComposeRead { service }
+            | SyncVerb::UnitFileRead { service } => self
+                .justify_service_files_read(cfg, token, service)
+                .map(|x| Some(x.1)),
+            SyncVerb::GitRepos { service }
             | SyncVerb::GitStatus { service, .. }
             | SyncVerb::GitLog { service, .. }
             | SyncVerb::GitBranches { service, .. }
             | SyncVerb::GitDiff { service, .. }
             | SyncVerb::ProjectContainers { service }
             | SyncVerb::ProjectVolumes { service }
-            | SyncVerb::UnitFileRead { service }
             | SyncVerb::UnitCheck { service }
             | SyncVerb::UnitRender { service }
-            | SyncVerb::ComposeRead { service }
             | SyncVerb::MonitoringGet { service }
             | SyncVerb::BackupGet { service }
             | SyncVerb::BackupCheck { service }
@@ -957,6 +997,7 @@ impl AgentCore {
                 manage_created,
                 create_domain,
                 browser_login,
+                read_other_service_files,
                 name,
             } => {
                 self.do_mint(
@@ -969,6 +1010,7 @@ impl AgentCore {
                     manage_created,
                     create_domain,
                     browser_login,
+                    read_other_service_files,
                     name,
                 )
                 .await
@@ -1214,6 +1256,7 @@ impl AgentCore {
                 manage_created: false,
                 create_domain: None,
                 browser_login_denied: false,
+                read_other_service_files: false,
                 revoked: false,
                 kind: "session".into(),
                 name: None,
@@ -1245,6 +1288,7 @@ impl AgentCore {
         manage_created: bool,
         create_domain: Option<String>,
         browser_login: Option<bool>,
+        read_other_service_files: bool,
         name: Option<String>,
     ) -> Result<serde_json::Value> {
         let parent_claims = self
@@ -1316,8 +1360,19 @@ impl AgentCore {
             manage_created,
             &child_domain,
             &scope_bl,
+            read_other_service_files,
         ) {
-            (None, None, None, None, None, false, None, None) => None,
+            (
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                false,
+            ) => None,
             _ => Some(TokenScope {
                 services: intersect(&parent_claims.scope, |s| &s.services, &services),
                 actions: intersect(&parent_claims.scope, |s| &s.actions, &actions),
@@ -1342,6 +1397,13 @@ impl AgentCore {
                         .unwrap_or(true),
                 create_domain: child_domain.clone(),
                 browser_login: scope_bl,
+                // A scoped parent without the flag cannot pass it on.
+                read_other_service_files: read_other_service_files
+                    && parent_claims
+                        .scope
+                        .as_ref()
+                        .map(|s| s.read_other_service_files)
+                        .unwrap_or(true),
             }),
         };
         let mut roles: Vec<String> = parent_claims
@@ -1418,6 +1480,10 @@ impl AgentCore {
                     .and_then(|s| s.browser_login)
                     .unwrap_or(true)
                     == false,
+                read_other_service_files: scope
+                    .as_ref()
+                    .map(|s| s.read_other_service_files)
+                    .unwrap_or(false),
                 revoked: false,
                 kind: "token".into(),
                 name: name
@@ -2384,7 +2450,7 @@ impl AgentCore {
         token: &str,
     ) -> Result<(crate::agent::proto::FileMeta, u64, tokio::fs::File)> {
         let cfg = self.cfg.get().await;
-        let (claims, _user) = self.justify_service(&cfg, token, service)?;
+        let (claims, _user) = self.justify_service_files_read(&cfg, token, service)?;
         self.enforce_ops(token, Some("read"))?;
         let svc = svc_ops::get_service(&cfg, service)?;
         let meta = crate::files::stat(&svc.dir, path)?;

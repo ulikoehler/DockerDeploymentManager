@@ -577,6 +577,120 @@ async fn token_login_respects_browser_login_flag() {
     );
 }
 
+/// `read_other_service_files` grants read-only file/config access to
+/// services outside the allowlist — writes stay denied, and a parent
+/// without the flag cannot pass it to a child.
+#[tokio::test]
+async fn scoped_token_cross_service_file_reads() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+    let mint = |body: Value, parent: &str| {
+        let app = h.app.clone();
+        let parent = parent.to_string();
+        async move {
+            let (_, _, j) = call(
+                &app,
+                "POST",
+                "/api/auth/token",
+                Some(&parent),
+                Some(body),
+            )
+            .await;
+            j.pointer("/data/token")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        }
+    };
+
+    // scoped to svc_a only, no flag → svc_b files denied
+    let plain = mint(
+        serde_json::json!({"ttl_minutes": 30, "services": ["svc_a"]}),
+        &admin,
+    )
+    .await;
+    let (st, _, _) = call(
+        &h.app,
+        "GET",
+        "/api/services/svc_b/files",
+        Some(&plain),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // same scope + flag → svc_b file tree, compose and unit readable
+    let reader = mint(
+        serde_json::json!({
+            "ttl_minutes": 30, "services": ["svc_a"],
+            "read_other_service_files": true,
+        }),
+        &admin,
+    )
+    .await;
+    let (st, _, j) = call(
+        &h.app,
+        "GET",
+        "/api/services/svc_b/files",
+        Some(&reader),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "cross-service file list denied: {j}");
+    let (st, _, j) = call(
+        &h.app,
+        "GET",
+        "/api/services/svc_b/compose",
+        Some(&reader),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "cross-service compose read denied: {j}");
+    assert!(
+        j.pointer("/data/content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("alpine"),
+        "compose content missing: {j}"
+    );
+
+    // …but writes and non-file reads stay denied
+    let (st, _, _) = call(
+        &h.app,
+        "PUT",
+        "/api/services/svc_b/files",
+        Some(&reader),
+        Some(serde_json::json!({"path": "x.txt", "content": "x"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "cross-service write allowed");
+    let (st, _, _) = call(
+        &h.app,
+        "GET",
+        "/api/services/svc_b",
+        Some(&reader),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "service detail leaked");
+
+    // a child of an unflagged token cannot gain the flag
+    let child = mint(
+        serde_json::json!({"ttl_minutes": 30, "read_other_service_files": true}),
+        &plain,
+    )
+    .await;
+    let (st, _, _) = call(
+        &h.app,
+        "GET",
+        "/api/services/svc_b/files",
+        Some(&child),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "child gained read flag");
+}
+
 #[tokio::test]
 async fn viewer_access_rules_still_apply() {
     let h = harness().await;
@@ -2282,6 +2396,7 @@ async fn demoted_admin_loses_agent_admin() {
             manage_created: false,
             create_domain: None,
             browser_login: None,
+            read_other_service_files: false,
             name: None,
         })
         .await;

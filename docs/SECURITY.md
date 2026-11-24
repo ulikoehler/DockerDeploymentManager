@@ -202,7 +202,19 @@ the login that produced it.
    unaffected, but `POST /api/auth/token-login` — the exchange the
    login page's "sign in with a token" uses — rejects them). The flag
    only narrows: a parent that denies it cannot mint an allowing
-   child.
+   child. A token may also opt into read-only cross-service file
+   access (`read_other_service_files:true`): the file tree, stat,
+   download, compose read and unit read verbs then accept services
+   outside the `services` allowlist — but only ones the *fresh*
+   (pre-scope) user could access, so the flag widens the token's
+   service list without exceeding the user's permissions. It is
+   read-only by construction (the verbs it unlocks have no write
+   path), git/monitoring/backup-config/container-tar reads stay
+   scoped, and the file layer's privileged-file denylist (`.git`,
+   `.restic_*`, `meta.yaml`, `backup.sh`) applies unchanged — backup
+   passwords and monitoring/backup secrets are never reachable
+   through it. Default off; a scoped parent without the flag cannot
+   pass it to a child.
 7. **Destructive ops** — backup `restore` requires `admin` or
    `unrestricted`; `target_dir` must be absolute without `..`.
 8. **Privileged files are not editable through the file API** —

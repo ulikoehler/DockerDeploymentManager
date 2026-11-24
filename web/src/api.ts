@@ -114,6 +114,7 @@ export const apiIssueToken = (body: {
   manage_created?: boolean;
   create_domain?: string;
   browser_login?: boolean;
+  read_other_service_files?: boolean;
   name?: string;
 }) => api<{ token: string; expires_at: number }>('/api/auth/token', { method: 'POST', body });
 export const apiTokenLogin = (token: string) =>

@@ -385,6 +385,12 @@ pub enum CryptoOp {
         /// = allowed (default). A parent that denies cannot pass a
         /// child that allows.
         browser_login: Option<bool>,
+        /// Allow read-only file/config access (file tree, stat,
+        /// download, compose read, unit read) to services outside the
+        /// `services` allowlist — bounded by the user's own access
+        /// rules; privileged files stay denied. Forced off when the
+        /// parent's scope doesn't carry it.
+        read_other_service_files: bool,
         name: Option<String>,
     },
     Verify {
@@ -637,6 +643,9 @@ pub struct TokenRecord {
     /// (`browser_login: false`); absent in old records = allowed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub browser_login_denied: bool,
+    /// Token may read files/config of services outside its allowlist.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_other_service_files: bool,
     #[serde(default)]
     pub revoked: bool,
     /// "session" (login JWT) or "token" (minted for agents/scopes).

@@ -57,6 +57,7 @@ export class DdmToken extends LitElement {
   @state() private manageCreated = true;
   @state() private createDomain = '';
   @state() private browserLogin = true;
+  @state() private readOtherFiles = false;
   @state() private tokenName = '';
   @state() private selServices = new Set<string>();
   @state() private selActions = new Set<string>();
@@ -167,6 +168,7 @@ export class DdmToken extends LitElement {
       manage_created?: boolean;
       create_domain?: string;
       browser_login?: boolean;
+      read_other_service_files?: boolean;
       name?: string;
     } = { ttl_minutes: this.ttlMinutes() };
     const name = this.tokenName.trim();
@@ -187,6 +189,7 @@ export class DdmToken extends LitElement {
       if (d) body.create_domain = d;
     }
     if (!this.browserLogin) body.browser_login = false;
+    if (this.readOtherFiles) body.read_other_service_files = true;
     if (this.scopeActions) body.actions = [...this.selActions];
     if (this.scopeOps) body.ops = [...this.selOps];
     try {
@@ -414,6 +417,18 @@ export class DdmToken extends LitElement {
             reject it. A token minted without this permission can never re-enable it in a child.</p>
         </fieldset>
 
+        <fieldset>
+          <legend>cross-service file reads</legend>
+          <label><input type="checkbox" .checked=${this.readOtherFiles}
+            @change=${(e: Event) => (this.readOtherFiles = (e.target as HTMLInputElement).checked)}>
+            allow read-only access to files &amp; config of other services</label>
+          <p class="muted">the token may browse/read/download files and view compose/unit files of
+            services outside its allowlist — still limited to services <em>you</em> can access.
+            Read-only: no writes, exec, git or backup/monitoring config. Privileged files
+            (<code>.git</code>, <code>.restic_*</code>, <code>meta.yaml</code>, <code>backup.sh</code>)
+            stay denied. Default off.</p>
+        </fieldset>
+
         <button @click=${this.generate}>generate token</button>
       </div>
 
@@ -466,6 +481,7 @@ export class DdmToken extends LitElement {
                     t.manage_created ? '+manage-created' : '',
                     t.create_domain ? `dom: ${t.create_domain}` : '',
                     t.browser_login_denied ? 'no-browser-login' : '',
+                    t.read_other_service_files ? '+read-other-files' : '',
                   ].filter(Boolean).join(' · ') || (t.kind === 'session' ? 'login' : 'full')
                 }</td>
                 <td class="muted">${new Date(t.iat * 1000).toLocaleString()}</td>

@@ -345,9 +345,14 @@ tar/tar.gz archives. Same auth and path protections as the file API.
 **Operate safely with scoped tokens**
 Mint short-lived tokens with the narrowest scope (`services`, `actions`,
 `ops`, `service_creates`, `manage_created`, `create_domain`,
-`browser_login`). `browser_login:false` keeps the token usable as an
+`browser_login`, `read_other_service_files`). `browser_login:false` keeps the token usable as an
 API/MCP bearer credential but blocks exchanging it for a browser
-session (`/api/auth/token-login`) — default is allowed. Three
+session (`/api/auth/token-login`) — default is allowed.
+`read_other_service_files:true` (default off) allows *read-only* file
+and config access — file tree/stat/download, compose read, unit read —
+to services outside the token's `services` list, still limited to
+services the token's user may access; privileged files (`.git`,
+`.restic_*`, `meta.yaml`, `backup.sh`) remain denied. Three
 common shapes:
 
 - **Full token** — no scopes: everything the user can do.

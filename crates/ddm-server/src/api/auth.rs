@@ -151,6 +151,13 @@ pub struct TokenRequest {
     /// bearer credential. Default (omitted/true) = allowed.
     #[serde(default)]
     pub browser_login: Option<bool>,
+    /// `true` lets the token *read* files and config (file tree, stat,
+    /// download, compose read, unit read) of services outside its
+    /// `services` allowlist — read-only, still bounded by the user's
+    /// own access rules; privileged files (`.git`, `.restic_*`,
+    /// `meta.yaml`, `backup.sh`) stay denied. Default off.
+    #[serde(default)]
+    pub read_other_service_files: bool,
     /// Optional human label shown in the token list (max 80 chars).
     #[serde(default)]
     pub name: Option<String>,
@@ -204,6 +211,7 @@ pub async fn issue_token(
             manage_created: req.manage_created,
             create_domain: req.create_domain.clone(),
             browser_login: req.browser_login,
+            read_other_service_files: req.read_other_service_files,
             name: req.name.clone(),
         })
         .await
@@ -216,7 +224,7 @@ pub async fn issue_token(
         None => "*".into(),
     };
     let detail = format!(
-        "ttl={ttl_secs}s services={} actions={} ops={} service_creates={} manage_created={} create_domain={} browser_login={} name={}",
+        "ttl={ttl_secs}s services={} actions={} ops={} service_creates={} manage_created={} create_domain={} browser_login={} read_other_files={} name={}",
         fmt(&req.services),
         fmt(&req.actions),
         fmt(&req.ops),
@@ -228,6 +236,7 @@ pub async fn issue_token(
         req.manage_created,
         req.create_domain.as_deref().unwrap_or("*"),
         req.browser_login.unwrap_or(true),
+        req.read_other_service_files,
         req.name.as_deref().unwrap_or("-")
     );
     state
