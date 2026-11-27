@@ -128,6 +128,183 @@ pub enum ExecVerb {
     ImageLoad { path: String },
 }
 
+impl ComposeOp {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ComposeOp::Pull => "pull",
+            ComposeOp::Up => "up",
+            ComposeOp::Down => "down",
+            ComposeOp::Restart => "restart",
+            ComposeOp::Start => "start",
+            ComposeOp::Stop => "stop",
+            ComposeOp::Update => "update",
+            ComposeOp::Enable => "enable",
+            ComposeOp::Disable => "disable",
+            ComposeOp::UpRecreate => "up --remove-orphans",
+        }
+    }
+}
+
+impl SystemdTarget {
+    fn describe(&self) -> String {
+        match self {
+            SystemdTarget::Group(g) => format!("group {g}"),
+            SystemdTarget::Unit(u) => format!("unit {u}"),
+        }
+    }
+}
+
+/// Cap for detail strings — command params/scripts can be arbitrarily
+/// long, but history entries should stay compact (full output is replayed
+/// from the execution stream anyway).
+fn trunc_detail(s: String) -> String {
+    const MAX: usize = 500;
+    if s.len() <= MAX {
+        s
+    } else {
+        let mut t: String = s.chars().take(MAX).collect();
+        t.push('…');
+        t
+    }
+}
+
+impl ExecVerb {
+    /// Human-readable summary for the executions history: operation kind,
+    /// a one-line description of what runs, and the target container when
+    /// the verb acts inside one. SectionItem callers may override this
+    /// with the rendered command (see `Agent::exec_with_meta`).
+    pub fn describe(&self) -> crate::protocol::ExecMeta {
+        use crate::protocol::ExecMeta as M;
+        let m = |kind: &str, detail: String, container: Option<String>| M {
+            kind: Some(kind.into()),
+            detail: Some(trunc_detail(detail)),
+            container,
+        };
+        match self {
+            ExecVerb::Compose { service, op } => {
+                m("compose", format!("docker compose {} ({service})", op.as_str()), None)
+            }
+            ExecVerb::SectionItem {
+                section,
+                item,
+                params,
+            } => {
+                let mut d = format!("command {section}/{item}");
+                if !params.is_empty() {
+                    let mut kv: Vec<_> = params.iter().collect();
+                    kv.sort();
+                    d += &format!(
+                        " — {}",
+                        kv.iter()
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                m("command", d, None)
+            }
+            ExecVerb::SystemdCommand {
+                target,
+                command_id,
+            } => m(
+                "systemd",
+                format!("systemd command {command_id} on {}", target.describe()),
+                None,
+            ),
+            ExecVerb::SystemdRestart { target } => {
+                m("systemd", format!("systemd restart {}", target.describe()), None)
+            }
+            ExecVerb::UnitRegen {
+                service,
+                enable,
+                start,
+            } => m(
+                "systemd",
+                format!("regen unit {service} (enable={enable}, start={start})"),
+                None,
+            ),
+            ExecVerb::UnitWrite {
+                service,
+                enable,
+                restart,
+                ..
+            } => m(
+                "systemd",
+                format!("write unit {service} (enable={enable}, restart={restart})"),
+                None,
+            ),
+            ExecVerb::GitClone {
+                service,
+                url,
+                path,
+                branch,
+            } => m(
+                "git",
+                format!(
+                    "git clone {url} → {service}:{path}{}",
+                    branch.as_ref().map(|b| format!(" @{b}")).unwrap_or_default()
+                ),
+                None,
+            ),
+            ExecVerb::GitOp {
+                service,
+                path,
+                op,
+                git_ref,
+            } => m(
+                "git",
+                format!(
+                    "git {op} ({service}:{path}){}",
+                    git_ref.as_ref().map(|r| format!(" @{r}")).unwrap_or_default()
+                ),
+                None,
+            ),
+            ExecVerb::BackupRun { service } => m("backup", format!("restic backup ({service})"), None),
+            ExecVerb::BackupForget { service } => {
+                m("backup", format!("restic forget+prune ({service})"), None)
+            }
+            ExecVerb::BackupRestore {
+                service,
+                snapshot,
+                target_dir,
+                ..
+            } => m(
+                "backup",
+                format!("restic restore {snapshot} → {target_dir} ({service})"),
+                None,
+            ),
+            ExecVerb::ServiceCreate { name, .. } => {
+                m("service", format!("service create {name}"), None)
+            }
+            ExecVerb::ServiceDelete {
+                name,
+                down,
+                keep_dir,
+            } => m(
+                "service",
+                format!("service delete {name} (down={down}, keep_dir={keep_dir})"),
+                None,
+            ),
+            ExecVerb::ContainerLogs {
+                id,
+                tail,
+                since,
+                follow,
+            } => m(
+                "logs",
+                format!("container logs {id} (tail {tail}, since {since:?}, follow {follow})"),
+                Some(id.clone()),
+            ),
+            ExecVerb::ContainerExec { container, command } => m(
+                "container_exec",
+                command.join(" "),
+                Some(container.clone()),
+            ),
+            ExecVerb::ImageLoad { path } => m("registry", format!("docker load {path}"), None),
+        }
+    }
+}
+
 /// Where a container/volume file transfer reads from or writes to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

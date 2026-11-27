@@ -12,7 +12,9 @@ import { sharedStyles } from '../styles';
 export class DdmExecutions extends LitElement {
   static styles = [
     sharedStyles,
-    css`.output { min-height: 12em; max-height: 24em; overflow:auto; }`,
+    css`.output { min-height: 12em; max-height: 24em; overflow:auto; }
+      .detail-cell { max-width: 26em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .kind { display: inline-block; padding: 0 .4em; border-radius: .5em; background: var(--glass-hi); font-size: .8em; margin-right: .4em; }`,
   ];
 
   @state() private execs: any[] = [];
@@ -120,7 +122,7 @@ export class DdmExecutions extends LitElement {
       if (this.statusFilter === 'failed' && e.success !== false) return false;
       if (this.statusFilter === 'running' && e.success !== null && e.finished_at) return false;
       if (this.serviceFilter && e.service !== this.serviceFilter) return false;
-      if (q && !`${e.title} ${e.service ?? ''} ${e.user} ${e.id}`.toLowerCase().includes(q)) return false;
+      if (q && !`${e.title} ${e.service ?? ''} ${e.user} ${e.id} ${e.meta?.kind ?? ''} ${e.meta?.detail ?? ''} ${e.meta?.container ?? ''}`.toLowerCase().includes(q)) return false;
       return true;
     });
   }
@@ -152,20 +154,23 @@ export class DdmExecutions extends LitElement {
       ${this.error ? html`<p class="error">${this.error}</p>` : ''}
       <table>
         <thead><tr>
-          <th>started</th><th>title</th><th>service</th><th>user</th><th>result</th>
+          <th>started</th><th>title</th><th>what ran</th><th>service</th><th>user</th><th>result</th>
         </tr></thead>
         <tbody>
           ${rows.map(
             (e) => html`<tr style="cursor:pointer" @click=${() => this.select(e.id)}>
               <td class="muted" title=${this.fmt(e.started_at)}>${timeAgo(e.started_at)}</td>
               <td>${e.title}</td>
+              <td class="muted detail-cell" title=${e.meta?.detail ?? ''}>
+                ${e.meta?.kind ? html`<span class="kind">${e.meta.kind}</span>` : ''}${e.meta?.detail ?? '—'}
+              </td>
               <td class="muted">${e.service ?? '—'}</td>
               <td class="muted">${e.user}</td>
               <td>${this.badge(e)}</td>
             </tr>`,
           )}
           ${!rows.length
-            ? html`<tr><td colspan="5" class="muted">${this.execs.length ? 'no executions match the filter' : 'no executions yet'}</td></tr>`
+            ? html`<tr><td colspan="6" class="muted">${this.execs.length ? 'no executions match the filter' : 'no executions yet'}</td></tr>`
             : ''}
         </tbody>
       </table>
@@ -183,6 +188,15 @@ export class DdmExecutions extends LitElement {
               <button class="small secondary"
                 @click=${() => { this.output = ''; this.ws?.close(); this.selected = null; }}>close</button>
             </h3>
+            <p class="muted" style="margin:.2em 0 .6em">
+              user <b>${this.selected.user}</b>
+              · service ${this.selected.service ?? '—'}
+              ${this.selected.meta?.kind ? html`· kind <span class="kind">${this.selected.meta.kind}</span>` : ''}
+              ${this.selected.meta?.container ? html`· container <code>${this.selected.meta.container}</code>` : ''}
+            </p>
+            ${this.selected.meta?.detail
+              ? html`<pre class="output log-view" style="max-height:8em;margin-bottom:.6em">${this.selected.meta.detail}</pre>`
+              : ''}
             <pre class="output log-view">${this.output
               ? unsafeHTML(ansiToHtml(this.output))
               : '(no output captured yet)'}</pre>

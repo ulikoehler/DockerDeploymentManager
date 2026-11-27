@@ -147,6 +147,30 @@ pub async fn sections_mut(
     Ok(ok(true))
 }
 
+/// History title + meta for a command item run — shared by the REST and
+/// WebSocket run paths so both record the same execution summary. The
+/// title names the section and item (instead of the bare `command s/i`
+/// index pair) and the detail carries the rendered command line.
+pub fn run_meta(
+    cfg: &AppConfig,
+    si: usize,
+    item: &crate::config::CommandItem,
+    params: &HashMap<String, String>,
+) -> (String, crate::protocol::ExecMeta) {
+    let section = cfg.sections.get(si).map(|s| s.title.as_str()).unwrap_or("");
+    let title = if section.is_empty() {
+        item.title.clone()
+    } else {
+        format!("{section} / {}", item.title)
+    };
+    let meta = crate::protocol::ExecMeta {
+        kind: Some("command".into()),
+        detail: Some(crate::exec::describe_item(item, params)),
+        container: None,
+    };
+    (title, meta)
+}
+
 #[derive(Deserialize)]
 pub struct RunRequest {
     #[serde(default)]
@@ -160,21 +184,23 @@ pub async fn run(
     Json(req): Json<RunRequest>,
 ) -> Result<Json<crate::auth::SuccessResponse<serde_json::Value>>, Response> {
     let cfg = state.config.get().await;
-    let _item = authorized_item(&user.user, &cfg, si, ii)?;
+    let item = authorized_item(&user.user, &cfg, si, ii)?;
+    let (title, meta) = run_meta(&cfg, si, &item, &req.params);
 
     let id = state
         .agent
-        .exec(
+        .exec_with_meta(
             crate::agent::proto::ExecVerb::SectionItem {
                 section: si,
                 item: ii,
                 params: req.params.clone(),
             },
-            format!("command {si}/{ii}"),
+            title,
             None,
             &user.token,
             &user.user.name,
             &state.exec,
+            meta,
         )
         .await
         .map_err(|e| bad_request(e.to_string()))?;

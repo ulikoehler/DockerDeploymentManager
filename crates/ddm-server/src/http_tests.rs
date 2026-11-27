@@ -1456,6 +1456,14 @@ async fn command_run_requires_feature_and_role() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
+    // history names the item and carries the rendered command — not the
+    // bare "command 0/0" index pair
+    let hist = h.state.exec.history();
+    let e = hist.iter().find(|e| e.user == "viewer").expect("no execution");
+    assert_eq!(e.title, "ops / echo");
+    let meta = e.meta.as_ref().expect("no execution meta");
+    assert_eq!(meta.kind.as_deref(), Some("command"));
+    assert_eq!(meta.detail.as_deref(), Some("echo hi"));
     let (st, _, _) = call(
         &h.app,
         "POST",
@@ -3130,6 +3138,16 @@ async fn container_exec_agent_side_label_check() {
         .await
         .unwrap();
     assert!(!ok, "non-zero exit code reported as success");
+
+    // history carries the verb-derived summary: kind, detail, container
+    let hist = exec.history();
+    let e = hist
+        .iter()
+        .find(|e| e.meta.as_ref().and_then(|m| m.container.as_deref()) == Some("c1"))
+        .expect("no container_exec history entry");
+    let meta = e.meta.as_ref().unwrap();
+    assert_eq!(meta.kind.as_deref(), Some("container_exec"));
+    assert_eq!(meta.detail.as_deref(), Some("id"));
 
     // The agent's own justification log records the authoritative argv and
     // the resolved project (the exec title alone comes from the server).

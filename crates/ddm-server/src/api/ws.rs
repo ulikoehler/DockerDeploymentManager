@@ -115,21 +115,27 @@ async fn stream_execution(
             let cfg = cfg.get().await;
             let item =
                 crate::api::commands_api::authorized_item(&read_user, &cfg, section, item_idx);
+            let prepared = item
+                .as_ref()
+                .ok()
+                .map(|it| crate::api::commands_api::run_meta(&cfg, section, it, &params));
             drop(cfg);
             match item {
                 Ok(_item) => {
+                    let (title, meta) = prepared.unwrap();
                     let eid = match agent
-                        .exec(
+                        .exec_with_meta(
                             crate::agent::proto::ExecVerb::SectionItem {
                                 section,
                                 item: item_idx,
                                 params: params.clone(),
                             },
-                            format!("command {section}/{item_idx}"),
+                            title,
                             None,
                             &token,
                             &read_user.name,
                             &exec,
+                            meta,
                         )
                         .await
                     {

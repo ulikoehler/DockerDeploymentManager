@@ -1,5 +1,5 @@
 use crate::config::{CommandArg, CommandDefinition, CommandItem};
-use crate::protocol::{ExecutionInfo, ServerMessage};
+use crate::protocol::{ExecMeta, ExecutionInfo, ServerMessage};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
@@ -212,7 +212,17 @@ impl ExecutionManager {
     ) -> String {
         let id = Uuid::new_v4().to_string();
         self.register(&id);
-        self.push_history(&id, &item.title, service, user);
+        self.push_history(
+            &id,
+            &item.title,
+            service,
+            user,
+            Some(ExecMeta {
+                kind: Some("command".into()),
+                detail: Some(describe_item(&item, &params)),
+                container: None,
+            }),
+        );
 
         let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<ServerMessage>(256);
         {
@@ -245,9 +255,10 @@ impl ExecutionManager {
         title: &str,
         service: Option<String>,
         user: &str,
+        meta: ExecMeta,
     ) -> broadcast::Sender<ServerMessage> {
         let tx = self.register(id);
-        self.push_history(id, title, service, user);
+        self.push_history(id, title, service, user, Some(meta));
         tx
     }
 
@@ -256,7 +267,14 @@ impl ExecutionManager {
         self.mark_finished(id, success);
     }
 
-    fn push_history(&self, id: &str, title: &str, service: Option<String>, user: &str) {
+    fn push_history(
+        &self,
+        id: &str,
+        title: &str,
+        service: Option<String>,
+        user: &str,
+        meta: Option<ExecMeta>,
+    ) {
         let mut h = self.history.lock().unwrap();
         if h.len() >= self.max_history {
             h.pop_front();
@@ -269,6 +287,7 @@ impl ExecutionManager {
             started_at: chrono::Utc::now(),
             finished_at: None,
             success: None,
+            meta,
         });
     }
 
@@ -331,6 +350,35 @@ fn substitute(s: &str, params: &HashMap<String, String>) -> String {
     let mut out = s.to_string();
     for (k, v) in params {
         out = out.replace(&format!("${{{k}}}"), v);
+    }
+    out
+}
+
+/// Render a command item the way the executor will run it — used for the
+/// executions-history detail so "what ran" stays inspectable after the
+/// fact. Capped like `ExecVerb::describe` details.
+pub fn describe_item(item: &CommandItem, params: &HashMap<String, String>) -> String {
+    let mut out = String::new();
+    if !item.work_dir.is_empty() && item.work_dir != "." {
+        out.push_str(&format!("cd {} && ", item.work_dir));
+    }
+    let parts: Vec<String> = item
+        .command_sequence
+        .iter()
+        .map(|c| {
+            let args = build_args(&c.args, params);
+            if args.is_empty() {
+                c.program.clone()
+            } else {
+                format!("{} {}", c.program, args.join(" "))
+            }
+        })
+        .collect();
+    out.push_str(&parts.join(" && "));
+    if out.len() > 500 {
+        let mut t: String = out.chars().take(500).collect();
+        t.push('…');
+        return t;
     }
     out
 }
@@ -634,7 +682,7 @@ mod tests {
         let m = ExecutionManager::new(10).with_file(path.clone());
         let id = "exec-1".to_string();
         m.register(&id);
-        m.push_history(&id, "test job", Some("svc".into()), "u");
+        m.push_history(&id, "test job", Some("svc".into()), "u", None);
         m.mark_finished(&id, true);
         drop(m);
 

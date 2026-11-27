@@ -19,6 +19,16 @@ pub enum ServerMessage {
     },
 }
 
+/// Human-readable summary of what an execution ran — operation kind, a
+/// one-line detail (command line, container, snapshot, …) and the target
+/// container when set. Recorded at adoption time from the exec verb.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecMeta {
+    pub kind: Option<String>,
+    pub detail: Option<String>,
+    pub container: Option<String>,
+}
+
 /// Snapshot of a finished (or running) execution for the history API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionInfo {
@@ -29,6 +39,9 @@ pub struct ExecutionInfo {
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
     pub success: Option<bool>,
+    /// Absent in records written before execution details were tracked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ExecMeta>,
 }
 
 /// Push events for the global WS /ws/events channel.

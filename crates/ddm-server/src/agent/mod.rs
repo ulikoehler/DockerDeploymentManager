@@ -128,9 +128,28 @@ impl Agent {
         user: &str,
         mgr: &Arc<ExecutionManager>,
     ) -> Result<String> {
+        let meta = verb.describe();
+        self.exec_with_meta(verb, title, service, token, user, mgr, meta)
+            .await
+    }
+
+    /// Like [`Agent::exec`] but with an explicit history meta — used when
+    /// the caller can render more than the verb's generic summary (e.g.
+    /// command items whose script only the caller's config view resolves).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn exec_with_meta(
+        &self,
+        verb: ExecVerb,
+        title: impl Into<String>,
+        service: Option<String>,
+        token: &str,
+        user: &str,
+        mgr: &Arc<ExecutionManager>,
+        meta: crate::protocol::ExecMeta,
+    ) -> Result<String> {
         let title = title.into();
         let eid = Uuid::new_v4().to_string();
-        let _tx = mgr.adopt(&eid, &title, service.clone(), user);
+        let _tx = mgr.adopt(&eid, &title, service.clone(), user, meta);
         let rx = match self {
             Agent::Local(core) => core.exec(verb, eid.clone(), title.clone(), token).await?,
             Agent::Remote(s) => exec_remote(s, &verb, &eid, &title, service, token).await?,
@@ -164,7 +183,7 @@ impl Agent {
     ) -> Result<bool> {
         let title = title.into();
         let eid = Uuid::new_v4().to_string();
-        let _tx = mgr.adopt(&eid, &title, service.clone(), user);
+        let _tx = mgr.adopt(&eid, &title, service.clone(), user, verb.describe());
         let mut rx = match self {
             Agent::Local(core) => core.exec(verb, eid.clone(), title, token).await?,
             Agent::Remote(s) => exec_remote(s, &verb, &eid, &title, service, token).await?,
