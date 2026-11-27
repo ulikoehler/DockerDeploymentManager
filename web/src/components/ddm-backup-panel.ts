@@ -32,6 +32,7 @@ export class DdmBackupPanel extends LitElement {
   @state() private gEditing = false;
   @state() private g: any = null;
   @state() private gMsg = '';
+  @state() private gExtraEnv = '{}';
 
   connectedCallback() {
     super.connectedCallback();
@@ -140,6 +141,7 @@ export class DdmBackupPanel extends LitElement {
   private async openGlobal() {
     try {
       this.g = await apiBackupGlobalGet();
+      this.gExtraEnv = JSON.stringify(this.g?.extra_env ?? {}, null, 2);
       this.gEditing = true;
     } catch (e: any) {
       this.gMsg = e.message;
@@ -150,6 +152,12 @@ export class DdmBackupPanel extends LitElement {
     try {
       const ret = this.g?.retention ?? {};
       const num = (v: any) => (v === '' || v == null ? null : Number(v));
+      let extraEnv: any = {};
+      try {
+        extraEnv = JSON.parse(this.gExtraEnv || '{}');
+      } catch {
+        throw new Error('extra_env is not valid JSON');
+      }
       const patch = {
         enabled: !!this.g?.enabled,
         scheduler: this.g?.scheduler ?? 'systemd_timer',
@@ -161,8 +169,14 @@ export class DdmBackupPanel extends LitElement {
           keep_weekly: num(ret.keep_weekly),
           keep_monthly: num(ret.keep_monthly),
         },
+        repository_base: this.g?.repository_base ?? '',
+        repository_template: this.g?.repository_template ?? '',
+        restic_binary: this.g?.restic_binary ?? 'auto',
+        extra_env: extraEnv,
       };
-      this.g = await apiBackupGlobalPut(patch);
+      await apiBackupGlobalPut(patch);
+      this.g = await apiBackupGlobalGet();
+      this.gExtraEnv = JSON.stringify(this.g?.extra_env ?? {}, null, 2);
       this.gEditing = false;
       this.gMsg = 'global backup settings saved';
       this.refresh();
@@ -258,6 +272,29 @@ export class DdmBackupPanel extends LitElement {
                       <input style="flex:1" placeholder="*-*-* 03:00:00" .value=${this.g.on_calendar ?? ''}
                         @input=${(e: any) => (this.g = { ...this.g, on_calendar: e.target.value })}>
                     </div>
+                    <div class="row" style="margin-top:.5em">
+                      <label class="muted" style="width:10em">repository_base</label>
+                      <div style="flex:1">
+                        <input style="width:100%" placeholder="rest:http://user:pass@host:port/ — *** keeps, empty clears"
+                          .value=${this.g.repository_base ?? ''}
+                          @input=${(e: any) => (this.g = { ...this.g, repository_base: e.target.value })}>
+                        ${this.g.repository_base_display
+                          ? html`<p class="muted" style="margin:.2em 0 0">current: <code>${this.g.repository_base_display}</code></p>`
+                          : ''}
+                      </div>
+                    </div>
+                    <div class="row" style="margin-top:.5em">
+                      <label class="muted" style="width:10em">repository_template</label>
+                      <input style="flex:1" placeholder="s3:bucket/ddm/{service} — *** keeps, empty clears"
+                        .value=${this.g.repository_template ?? ''}
+                        @input=${(e: any) => (this.g = { ...this.g, repository_template: e.target.value })}>
+                    </div>
+                    <div class="row" style="margin-top:.5em">
+                      <label class="muted" style="width:10em">restic_binary</label>
+                      <input style="flex:1" placeholder="auto"
+                        .value=${this.g.restic_binary ?? 'auto'}
+                        @input=${(e: any) => (this.g = { ...this.g, restic_binary: e.target.value })}>
+                    </div>
                     <div class="row" style="margin-top:.5em;flex-wrap:wrap;gap:.8em">
                       ${(['keep_last', 'keep_daily', 'keep_weekly', 'keep_monthly'] as const).map(
                         (k) => html`<label class="muted">${k.replace('keep_', 'keep ')}
@@ -269,7 +306,13 @@ export class DdmBackupPanel extends LitElement {
                             })}></label>`,
                       )}
                     </div>
-                    <p class="muted">empty retention = keep everything; repository paths/credentials stay in config.yaml</p>
+                    <div class="row" style="margin-top:.5em">
+                      <label class="muted" style="width:10em">extra_env</label>
+                      <ddm-code-editor style="flex:1" .value=${this.gExtraEnv} lang="json" height="6rem"
+                        @change=${(e: any) => (this.gExtraEnv = e.detail.value)}></ddm-code-editor>
+                    </div>
+                    <p class="muted">{"AWS_ACCESS_KEY_ID":"***"} — values *** or empty keep the stored value, null removes the key</p>
+                    <p class="muted">empty retention = keep everything; *** keeps stored secrets — re-provision services to apply repository changes</p>
                     <div class="toolbar">
                       <button @click=${this.saveGlobal}>save</button>
                       <button class="secondary" @click=${() => { this.gEditing = false; this.gMsg = ''; }}>cancel</button>

@@ -29,6 +29,21 @@ exported into the generated script. Prefer env indirection for secrets
 (the URL may contain credentials and is redacted in `GET /api/config` but
 embedded in `backup.sh`).
 
+### Editing from the UI
+
+All of the above except `unit_prefix` is editable under *service → Backup
+→ global backup settings* (admin only), backed by
+`GET/PUT /api/backup/global`. Secret-bearing values — `repository_base`,
+`repository_template` and `extra_env` values — are write-only: the API
+reports `***` and sending `***` (or an empty env value) keeps the stored
+value, while `null` removes an `extra_env` key. The non-secret shape of
+the repository (`scheme://***:***@host/path`) is shown as
+`repository_base_display`.
+
+Changing `repository_base`, `repository_template`, `restic_binary` or
+`extra_env` only affects **newly rendered** scripts — re-run *provision*
+for each service to regenerate its `backup.sh`.
+
 ## Per-service config (`meta.yaml` or `PUT …/backup`)
 
 ```yaml

@@ -2133,12 +2133,31 @@ impl AgentCore {
                 let (_claims, _caller) = self.unscoped_admin(token)?;
                 self.justify(&_claims, "backup_global_get", "");
                 let b = &cfg.backup;
+                // repository_base/template and extra_env values may embed
+                // credentials — report "***" (never the value) so the UI
+                // can show "configured". `repository_base_display` keeps
+                // the non-secret shape (scheme/host/path) visible.
+                let extra_env: serde_json::Map<String, serde_json::Value> = b
+                    .extra_env
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            serde_json::Value::String(backup_secret_view(v)),
+                        )
+                    })
+                    .collect();
                 Ok(serde_json::json!({
                     "enabled": b.enabled,
                     "scheduler": b.scheduler,
                     "on_calendar": b.on_calendar,
                     "excludes": b.excludes,
                     "retention": b.retention,
+                    "repository_base": backup_secret_view(&b.repository_base),
+                    "repository_base_display": crate::config::strip_url_creds(&b.repository_base),
+                    "repository_template": b.repository_template.as_deref().map(backup_secret_view),
+                    "restic_binary": b.restic_binary,
+                    "extra_env": serde_json::Value::Object(extra_env),
                 }))
             }
             SyncVerb::BackupGlobalPut { patch } => {
@@ -3513,9 +3532,89 @@ const NOTIFIER_SECRET_KEYS: &[&str] = &[
 /// notifier secrets.
 const GITOPS_SECRET_KEYS: &[&str] = &["token", "webhook_secret"];
 
+/// Value shown for a secret-bearing backup string: "***" when set so the
+/// UI can show "configured" without receiving the value (mirrors the
+/// notifier/gitops secret convention).
+fn backup_secret_view(v: &str) -> String {
+    if v.is_empty() {
+        String::new()
+    } else {
+        "***".to_string()
+    }
+}
+
+/// Validate a plain (non-secret) backup config string: single-line and
+/// bounded — values are rendered into a root-executed script.
+fn validate_backup_plain(s: &str, key: &str) -> Result<()> {
+    if s.len() > 500 || s.contains('\n') || s.contains('\r') {
+        bail!("invalid backup.{key}");
+    }
+    Ok(())
+}
+
+/// Secret-bearing string field (`repository_base`): GET reports "***",
+/// PUT treats "***" as "keep stored", "" / null as "clear".
+fn backup_secret_patch(v: &serde_json::Value, old: &str, key: &str) -> Result<String> {
+    match v {
+        serde_json::Value::Null => Ok(String::new()),
+        serde_json::Value::String(s) if s == "***" => Ok(old.to_string()),
+        serde_json::Value::String(s) => {
+            validate_backup_plain(s, key)?;
+            Ok(s.clone())
+        }
+        _ => bail!("backup.{key} must be a string"),
+    }
+}
+
+/// Same as [`backup_secret_patch`] for the optional `repository_template`.
+fn backup_secret_patch_opt(
+    v: &serde_json::Value,
+    old: Option<&str>,
+    key: &str,
+) -> Result<Option<String>> {
+    match v {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(s) if s == "***" => Ok(old.map(str::to_string)),
+        serde_json::Value::String(s) => {
+            validate_backup_plain(s, key)?;
+            if s.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(s.clone()))
+            }
+        }
+        _ => bail!("backup.{key} must be a string"),
+    }
+}
+
+/// Merge `extra_env` from a UI patch: "***" / empty keeps the stored
+/// value, null removes the key, anything else sets it.
+fn apply_backup_extra_env(b: &mut crate::config::BackupConfig, v: &serde_json::Value) -> Result<()> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| anyhow!("backup.extra_env must be an object"))?;
+    for (k, val) in obj {
+        if !crate::backup::valid_env_key(k) {
+            bail!("backup.extra_env: invalid key '{k}'");
+        }
+        match val {
+            serde_json::Value::Null => {
+                b.extra_env.remove(k);
+            }
+            serde_json::Value::String(s) if s == "***" || s.is_empty() => {}
+            serde_json::Value::String(s) => {
+                validate_backup_plain(s, &format!("extra_env.{k}"))?;
+                b.extra_env.insert(k.clone(), s.clone());
+            }
+            _ => bail!("backup.extra_env.{k} must be a string or null"),
+        }
+    }
+    Ok(())
+}
+
 /// Apply a UI patch to the global `backup:` config section. Only the
-/// whitelisted keys are touched — repository paths, extra_env and other
-/// sensitive/advanced fields stay file-managed. Unknown keys fail closed.
+/// whitelisted keys are touched — other fields stay file-managed.
+/// Unknown keys fail closed.
 fn apply_backup_global_patch(
     b: &mut crate::config::BackupConfig,
     patch: &serde_json::Value,
@@ -3526,7 +3625,15 @@ fn apply_backup_global_patch(
     for key in obj.keys() {
         if !matches!(
             key.as_str(),
-            "enabled" | "scheduler" | "on_calendar" | "excludes" | "retention"
+            "enabled"
+                | "scheduler"
+                | "on_calendar"
+                | "excludes"
+                | "retention"
+                | "repository_base"
+                | "repository_template"
+                | "restic_binary"
+                | "extra_env"
         ) {
             bail!("backup patch: unknown key '{key}'");
         }
@@ -3562,6 +3669,23 @@ fn apply_backup_global_patch(
                     .map_err(|_| anyhow!("invalid retention policy"))?,
             )
         };
+    }
+    if let Some(v) = obj.get("repository_base") {
+        b.repository_base = backup_secret_patch(v, &b.repository_base, "repository_base")?;
+    }
+    if let Some(v) = obj.get("repository_template") {
+        b.repository_template =
+            backup_secret_patch_opt(v, b.repository_template.as_deref(), "repository_template")?;
+    }
+    if let Some(v) = obj.get("restic_binary") {
+        let s = v
+            .as_str()
+            .ok_or_else(|| anyhow!("backup.restic_binary must be a string"))?;
+        validate_backup_plain(s, "restic_binary")?;
+        b.restic_binary = s.to_string();
+    }
+    if let Some(v) = obj.get("extra_env") {
+        apply_backup_extra_env(b, v)?;
     }
     Ok(())
 }

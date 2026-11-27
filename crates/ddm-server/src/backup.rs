@@ -72,11 +72,7 @@ pub fn render_backup_script(
         shell_quote(&format!("{dir}/{PASSWORD_FILE}"))
     ));
     for (k, v) in &cfg.backup.extra_env {
-        if !k
-            .chars()
-            .enumerate()
-            .all(|(i, c)| c == '_' || c.is_ascii_alphanumeric() && (i > 0 || !c.is_ascii_digit()))
-        {
+        if !valid_env_key(k) {
             anyhow::bail!("invalid backup extra_env key '{k}'");
         }
         s.push_str(&format!("export {k}={}\n", shell_quote(v)));
@@ -162,6 +158,15 @@ pub fn render_backup_script(
 
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Environment-variable name check for `backup.extra_env` — keys are
+/// rendered unquoted into a root-executed script.
+pub fn valid_env_key(k: &str) -> bool {
+    !k.is_empty()
+        && k.chars().enumerate().all(|(i, c)| {
+            c == '_' || c.is_ascii_alphanumeric() && (i > 0 || !c.is_ascii_digit())
+        })
 }
 
 // ---------------------------------------------------------------------------

@@ -96,7 +96,7 @@ impl AppConfig {
 }
 
 /// Remove `user:pass@` from a URL, preserving scheme and host.
-fn strip_url_creds(u: &str) -> String {
+pub(crate) fn strip_url_creds(u: &str) -> String {
     match u.split_once("://") {
         Some((scheme, rest)) => match rest.split_once('@') {
             Some((_creds, host)) => format!("{scheme}://***:***@{host}"),

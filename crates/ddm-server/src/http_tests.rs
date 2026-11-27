@@ -1674,6 +1674,100 @@ async fn config_redacts_gitops_url_credentials() {
 }
 
 #[tokio::test]
+async fn backup_global_settings_roundtrip_and_redaction() {
+    let h = harness().await;
+    let (_, admin) = login(&h.app, "admin", PASSWORD).await;
+
+    // defaults: no repository configured
+    let (st, _, j) = call(&h.app, "GET", "/api/backup/global", Some(&admin), None).await;
+    assert_eq!(st, StatusCode::OK, "{j}");
+    assert_eq!(
+        j.pointer("/data/repository_base").unwrap().as_str().unwrap(),
+        ""
+    );
+    assert_eq!(
+        j.pointer("/data/restic_binary").unwrap().as_str().unwrap(),
+        "auto"
+    );
+
+    // set repository + extra_env
+    let (st, _, j) = call(
+        &h.app,
+        "PUT",
+        "/api/backup/global",
+        Some(&admin),
+        Some(serde_json::json!({
+            "enabled": true,
+            "repository_base": "rest:http://user:pass@10.11.12.13:16383/",
+            "repository_template": "",
+            "restic_binary": "auto",
+            "extra_env": {
+                "AWS_ACCESS_KEY_ID": "AKIAEXAMPLE",
+                "AWS_SECRET_ACCESS_KEY": "shh",
+            },
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{j}");
+
+    // GET redacts secrets but keeps the non-secret repository shape
+    let (st, _, j) = call(&h.app, "GET", "/api/backup/global", Some(&admin), None).await;
+    assert_eq!(st, StatusCode::OK, "{j}");
+    let d = &j["data"];
+    assert_eq!(d["repository_base"], "***");
+    assert_eq!(
+        d["repository_base_display"].as_str().unwrap(),
+        "rest:http://***:***@10.11.12.13:16383/"
+    );
+    assert_eq!(d["extra_env"]["AWS_ACCESS_KEY_ID"], "***");
+    assert!(!j.to_string().contains("AKIAEXAMPLE"), "secret leaked: {j}");
+
+    // "***" keeps stored secrets, null removes an extra_env key
+    let (st, _, j) = call(
+        &h.app,
+        "PUT",
+        "/api/backup/global",
+        Some(&admin),
+        Some(serde_json::json!({
+            "repository_base": "***",
+            "extra_env": {
+                "AWS_ACCESS_KEY_ID": "***",
+                "AWS_SECRET_ACCESS_KEY": null,
+            },
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{j}");
+
+    // config.yaml on disk holds the real values
+    let raw = std::fs::read_to_string(h._dir.path().join("config.yaml")).unwrap();
+    assert!(
+        raw.contains("rest:http://user:pass@10.11.12.13:16383/"),
+        "repository_base not persisted: {raw}"
+    );
+    assert!(raw.contains("AWS_ACCESS_KEY_ID"), "{raw}");
+    assert!(!raw.contains("AWS_SECRET_ACCESS_KEY"), "{raw}");
+
+    // GET again: kept secret still redacted, removed key gone
+    let (_, _, j) = call(&h.app, "GET", "/api/backup/global", Some(&admin), None).await;
+    let d = &j["data"];
+    assert_eq!(d["repository_base"], "***");
+    assert_eq!(d["extra_env"]["AWS_ACCESS_KEY_ID"], "***");
+    assert!(d["extra_env"].get("AWS_SECRET_ACCESS_KEY").is_none());
+
+    // unknown keys fail closed
+    let (st, _, j) = call(
+        &h.app,
+        "PUT",
+        "/api/backup/global",
+        Some(&admin),
+        Some(serde_json::json!({"bogus": 1})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{j}");
+}
+
+#[tokio::test]
 async fn edit_units_cannot_bypass_admin_gate() {
     let h = harness().await;
     let (_, admin) = login(&h.app, "admin", PASSWORD).await;
